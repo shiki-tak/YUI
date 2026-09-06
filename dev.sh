@@ -9,8 +9,8 @@
 # Ctrl+C で両方まとめて止まる。ログは logs/ に残る。
 # 環境変数 BACKEND_PORT / FRONTEND_PORT でポートを変えられる。
 #
-# フェーズ2以降で VOICEVOX Engine や whisper.cpp を使うようになったら、
-# start_process の呼び出しを増やす。
+# VOICEVOX Engine は、このスクリプトでは起動しない（インストール方法が
+# 環境によって違うため）。起動していれば使い、無ければ警告して続行する。
 #
 # macOS 標準の bash 3.2 で動くように書いている（wait -n や連想配列は使わない）。
 
@@ -169,6 +169,19 @@ curl -fs -m 5 "$OLLAMA_HOST/api/tags" 2>/dev/null | grep -q "\"${OLLAMA_MODEL%%:
   || fail "モデル $OLLAMA_MODEL がありません。次を実行してください:
     ollama pull $OLLAMA_MODEL"
 ok "Ollama：$OLLAMA_MODEL"
+
+# VOICEVOX は任意。無くても文字での会話は続けられるため、止めずに続行する。
+VOICEVOX_HOST="$(read_env YUI_VOICEVOX_HOST)"
+VOICEVOX_HOST="${VOICEVOX_HOST:-http://localhost:50021}"
+SPEECH_ENABLED="$(read_env YUI_SPEECH_ENABLED)"
+if [ "${SPEECH_ENABLED:-true}" = "false" ]; then
+  warn "音声合成：無効（YUI_SPEECH_ENABLED=false）"
+elif VOICEVOX_VERSION="$(curl -fs -m 3 "$VOICEVOX_HOST/version" 2>/dev/null)"; then
+  ok "VOICEVOX：$(printf '%s' "$VOICEVOX_VERSION" | tr -d '\"')（$VOICEVOX_HOST）"
+else
+  warn "VOICEVOX に接続できません（$VOICEVOX_HOST）。音声なしで起動します。
+  エンジンを起動してから開き直すと音声を使えます。"
+fi
 
 stop_existing
 

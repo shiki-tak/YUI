@@ -21,6 +21,11 @@ dist/
 backend/data/
 logs/
 
+# VOICEVOX Engine（開発環境用に置く配布物。リポジトリでは追跡しない）
+/voicevox_engine-*
+/voicevox/
+/macos-arm64/
+
 # OS / エディタ
 .DS_Store
 .idea/

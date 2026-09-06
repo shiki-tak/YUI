@@ -89,7 +89,7 @@ cp .env.example .env
 ```
 
 `http://localhost:8000/docs` で API を確認できます。
-`http://localhost:8000/api/health` はモデルに接続できるかを返します。
+`http://localhost:8000/api/health` はモデルと音声合成に接続できるかを返します。
 
 ### 3. フロントエンド
 
@@ -97,6 +97,28 @@ cp .env.example .env
 cd frontend
 npm install
 npm run dev
+```
+
+### 4. VOICEVOX Engine（任意）
+
+フェーズ2で読み上げに使います。起動していれば `./dev.sh` が接続を確認し、
+無ければ警告を出して音声なしで起動します。文字での会話は影響を受けません。
+
+既定の接続先は `http://localhost:50021`、話者は **59（猫使ビィ／おちつき）** です。
+`backend/.env` の `YUI_VOICEVOX_SPEAKER` で変えられます。エンジンを使わない環境では
+`YUI_SPEECH_ENABLED=false` にします。
+
+**生成した音声を公開する場合は「VOICEVOX:猫使ビィ」のクレジット表記が必要です。**
+話者を変えるときは、その話者の利用規約と表記の条件を確認してください（規約は
+起動中のエンジンの `/speaker_info` からも読めます）。
+
+配布物はリポジトリに含めません。リポジトリのルートに展開した場合、書庫と
+展開先（`macos-arm64/`、`voicevox/`）は `.gitignore` 済みです。展開には 7z が要ります。
+
+```sh
+brew install sevenzip
+7zz x voicevox_engine-macos-arm64-<版>.7z.001
+./macos-arm64/run                 # 127.0.0.1:50021 で待ち受ける
 ```
 
 `http://localhost:5173` を開きます。`/api` は Vite の proxy 経由でバックエンドへ渡ります。

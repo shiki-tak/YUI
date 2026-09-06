@@ -44,7 +44,7 @@
 | ローカル推論 | Ollama＋公式Python SDK | 通常の返答生成。Qwen3.5 9Bを思考出力なしで使用 |
 | クラウド推論 | Anthropic Python SDK＋Claude API | 難しい分析、必要時の追加判定。モデルは交換可能にする |
 | 最新情報 | Ollama Web Search APIなど＋HTTPX | 検索、公式情報の取得、出典と取得日時の保存 |
-| 音声合成 | VOICEVOX Engine＋HTTPX | 音声合成用データを作り、読み上げ音声を生成 |
+| 音声合成 | VOICEVOX Engine＋HTTPX | 音声合成用データを作り、読み上げ音声を生成。話者は猫使ビィ／おちつき |
 | DB | SQLite＋SQLAlchemy＋aiosqlite | 会話、経験、人格、評価、利用量の永続化 |
 | DB変更管理 | Alembic | テーブル定義の変更履歴を管理 |
 | YouTube入力 | YouTube Live Streaming API＋HTTPX | コメント・配信情報の取得 |
@@ -169,6 +169,7 @@ flowchart TD
 - 確認できなかった最新情報は断定せず、通常のローカル会話は継続できるようにする。
 - 外部サービスの検索回数、トークン利用量、費用、応答時間を記録する。
 - 開発用の操作画面と、OBSで視聴者に見せる画面を分ける。
+- 音声を公開する場では「VOICEVOX:猫使ビィ」のクレジットを表示する。話者を変えるときは、その話者の利用規約と表記の条件を確認する。
 
 ## 9. 公式資料
 

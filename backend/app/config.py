@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     ollama_think: bool | None = False
     llm_timeout_seconds: float = 120.0
 
+    # VOICEVOX Engine：音声合成
+    voicevox_host: str = "http://localhost:50021"
+    # 猫使ビィ／おちつき。読み上げた音声を公開する場合は
+    # 「VOICEVOX:猫使ビィ」のクレジット表記が必要（話者を変えるときは規約も確認する）。
+    voicevox_speaker: int = 59
+    voicevox_timeout_seconds: float = 30.0
+    # 音声を切っても会話は続けられる。エンジンが無い環境で使う。
+    speech_enabled: bool = True
+
     # DB
     database_url: str = "sqlite+aiosqlite:///./data/yui.db"
 

@@ -23,6 +23,8 @@ from app.llm.base import ChatMessage, LLMClient, LLMResponse
 from app.main import app
 from app.models import Base
 from app.persona import BASE_PERSONA
+from app.voice import get_speech_client
+from app.voice.base import SpeechClient, SpeechResult
 
 
 class FakeLLM(LLMClient):
@@ -68,9 +70,43 @@ class FakeLLM(LLMClient):
         return {"ok": True, "provider": self.provider}
 
 
+class FakeSpeech(SpeechClient):
+    """音声合成の差し替え。VOICEVOX を起動していなくても検証できるようにする。"""
+
+    provider = "fake-voice"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+        self.ok = True
+
+    async def synthesize(self, text: str, *, speaker_id: int | None = None) -> SpeechResult:
+        self.calls.append((text, speaker_id))
+        return SpeechResult(
+            audio=b"RIFF\x00\x00\x00\x00WAVE",
+            media_type="audio/wav",
+            provider=self.provider,
+            speaker_id=speaker_id if speaker_id is not None else 3,
+            text=text,
+            engine_version="test",
+            query_ms=1,
+            synthesis_ms=2,
+            audio_ms=500,
+        )
+
+    async def health(self) -> dict[str, Any]:
+        if not self.ok:
+            return {"ok": False, "provider": self.provider, "error": "接続できません"}
+        return {"ok": True, "provider": self.provider, "engine_version": "test", "speaker": 3}
+
+
 @pytest.fixture
 def fake_llm() -> FakeLLM:
     return FakeLLM()
+
+
+@pytest.fixture
+def fake_speech() -> FakeSpeech:
+    return FakeSpeech()
 
 
 @pytest_asyncio.fixture
@@ -85,7 +121,7 @@ async def session_factory(tmp_path) -> AsyncIterator[async_sessionmaker]:
 
 @pytest_asyncio.fixture
 async def client(
-    session_factory: async_sessionmaker, fake_llm: FakeLLM
+    session_factory: async_sessionmaker, fake_llm: FakeLLM, fake_speech: FakeSpeech
 ) -> AsyncIterator[AsyncClient]:
     async def override_session():
         async with session_factory() as session:
@@ -100,6 +136,7 @@ async def client(
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_agent] = lambda: agent
     app.dependency_overrides[get_llm_client] = lambda: fake_llm
+    app.dependency_overrides[get_speech_client] = lambda: fake_speech
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http_client:
