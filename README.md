@@ -35,11 +35,31 @@ backend/    FastAPI。人格・記憶・会話進行・振り返り・実行記�
     api/      HTTP API
   alembic/  DB のテーブル定義の変更履歴
 frontend/   React + TypeScript + Vite。開発用の操作画面
+dev.sh      開発用のプロセスをまとめて起動する
 docs/design/   設計書
 docs/result/   フェーズごとの実装記録
 docs/issues/   残っている課題
 docs/review/   レビュー結果と対応（codex／claude）
 ```
+
+## まとめて起動する
+
+準備が済んでいれば、リポジトリ直下のスクリプトで両方を起動できます。
+
+```sh
+./dev.sh
+```
+
+起動前に Ollama への接続・モデルの有無・ポートの空き・DBのマイグレーションを
+確認し、問題があれば対処方法を表示して止まります。Ctrl+C で両方まとめて停止します。
+ログは `logs/` に出力されます。
+
+```sh
+./dev.sh --no-open           # ブラウザを開かない
+BACKEND_PORT=8001 ./dev.sh   # ポートを変える
+```
+
+初回は下の準備が必要です。個別に起動したい場合も下を参照してください。
 
 ## 準備
 

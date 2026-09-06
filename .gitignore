@@ -19,6 +19,7 @@ dist/
 *.db-journal
 *.sqlite3
 backend/data/
+logs/
 
 # OS / エディタ
 .DS_Store

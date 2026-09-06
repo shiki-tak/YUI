@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# 開発用のプロセスをまとめて起動する。
+#
+#   ./dev.sh            バックエンドとフロントエンドを起動する
+#   ./dev.sh --no-open  ブラウザを開かない
+#
+# Ctrl+C で両方まとめて止まる。ログは logs/ に残る。
+# 環境変数 BACKEND_PORT / FRONTEND_PORT でポートを変えられる。
+#
+# フェーズ2以降で VOICEVOX Engine や whisper.cpp を使うようになったら、
+# start_process の呼び出しを増やす。
+#
+# macOS 標準の bash 3.2 で動くように書いている（wait -n や連想配列は使わない）。
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND="$ROOT/backend"
+FRONTEND="$ROOT/frontend"
+LOG_DIR="$ROOT/logs"
+
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+OPEN_BROWSER=1
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-open) OPEN_BROWSER=0 ;;
+    -h|--help) sed -n '3,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "不明な引数: $arg" >&2; exit 2 ;;
+  esac
+done
+
+GREEN=$'\033[32m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+info() { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$GREEN" "$OFF" "$*"; }
+warn() { printf '%s!%s %s\n' "$YELLOW" "$OFF" "$*"; }
+fail() { printf '%s✗%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
+
+# 起動したプロセスの PID。bash 3.2 では空配列の展開に注意が必要なため、
+# 配列ではなく空白区切りの文字列で持つ。
+PIDS=""
+LAST_PID=""
+
+cleanup() {
+  local status=$?
+  trap - INT TERM EXIT
+  echo
+  info "停止しています..."
+  for pid in $PIDS; do
+    # 子プロセス（uvicorn の reloader や vite）も一緒に止める。
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+  ok "停止しました"
+  exit "$status"
+}
+
+# 注意：$( ) で呼ぶとサブシェルになり PID を親が管理できなくなる。
+# 呼び出し側は LAST_PID を参照する。
+start_process() {
+  local label="$1" dir="$2"
+  shift 2
+  ( cd "$dir" && exec "$@" ) > "$LOG_DIR/$label.log" 2>&1 &
+  LAST_PID=$!
+  PIDS="$PIDS $LAST_PID"
+}
+
+port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+
+wait_for_http() {
+  local url="$1" label="$2" pid="$3" i
+  for i in $(seq 1 60); do
+    if curl -fs -m 2 -o /dev/null "$url" 2>/dev/null; then return 0; fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      fail "$label の起動に失敗しました。logs/$label.log を確認してください。"
+    fi
+    sleep 0.5
+  done
+  fail "$label が応答しません（$url）。logs/ を確認してください。"
+}
+
+# --- 事前確認 ---------------------------------------------------------------
+
+mkdir -p "$LOG_DIR"
+info "起動前の確認"
+
+[ -x "$BACKEND/.venv/bin/python" ] || fail \
+  "backend/.venv がありません。次を実行してください:
+    cd backend && python3 -m venv .venv && .venv/bin/pip install -e \".[dev]\""
+
+[ -d "$FRONTEND/node_modules" ] || fail \
+  "frontend/node_modules がありません。次を実行してください:
+    cd frontend && npm install"
+
+if [ ! -f "$BACKEND/.env" ]; then
+  cp "$BACKEND/.env.example" "$BACKEND/.env"
+  warn "backend/.env が無かったため .env.example から作成しました"
+fi
+
+read_env() {
+  grep -E "^$1=" "$BACKEND/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+OLLAMA_HOST="$(read_env YUI_OLLAMA_HOST)"
+OLLAMA_MODEL="$(read_env YUI_OLLAMA_MODEL)"
+OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:9b}"
+
+curl -fs -m 3 -o /dev/null "$OLLAMA_HOST/api/tags" 2>/dev/null \
+  || fail "Ollama に接続できません（$OLLAMA_HOST）。\`ollama serve\` を起動してください。"
+curl -fs -m 5 "$OLLAMA_HOST/api/tags" 2>/dev/null | grep -q "\"${OLLAMA_MODEL%%:*}" \
+  || fail "モデル $OLLAMA_MODEL がありません。次を実行してください:
+    ollama pull $OLLAMA_MODEL"
+ok "Ollama：$OLLAMA_MODEL"
+
+for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+  if port_in_use "$port"; then
+    fail "ポート $port は使用中です。先に止めてください:
+    lsof -nP -iTCP:$port -sTCP:LISTEN"
+  fi
+done
+
+# DB のテーブル定義を最新にする（適用済みなら何もしない）。
+( cd "$BACKEND" && .venv/bin/alembic upgrade head ) > "$LOG_DIR/alembic.log" 2>&1 \
+  || fail "DB のマイグレーションに失敗しました。logs/alembic.log を確認してください。"
+ok "DB：最新の状態"
+
+# --- 起動 -------------------------------------------------------------------
+
+trap cleanup INT TERM EXIT
+
+info ""
+info "起動しています"
+
+start_process backend "$BACKEND" \
+  .venv/bin/uvicorn app.main:app --reload --port "$BACKEND_PORT" --log-level warning
+BACKEND_PID="$LAST_PID"
+wait_for_http "http://127.0.0.1:$BACKEND_PORT/api/health" backend "$BACKEND_PID"
+ok "バックエンド    http://localhost:$BACKEND_PORT/docs"
+
+start_process frontend "$FRONTEND" \
+  node_modules/.bin/vite --port "$FRONTEND_PORT" --strictPort
+FRONTEND_PID="$LAST_PID"
+wait_for_http "http://127.0.0.1:$FRONTEND_PORT/" frontend "$FRONTEND_PID"
+ok "フロントエンド  http://localhost:$FRONTEND_PORT"
+
+if [ "$OPEN_BROWSER" -eq 1 ] && command -v open >/dev/null 2>&1; then
+  open "http://localhost:$FRONTEND_PORT"
+fi
+
+info ""
+info "${DIM}Ctrl+C で両方を停止します。${OFF}"
+info ""
+
+# ログを流しながら、どちらかが落ちるまで待つ。
+tail -n 0 -f "$LOG_DIR/backend.log" "$LOG_DIR/frontend.log" &
+PIDS="$PIDS $!"
+
+while kill -0 "$BACKEND_PID" 2>/dev/null && kill -0 "$FRONTEND_PID" 2>/dev/null; do
+  sleep 1
+done
+warn "いずれかのプロセスが終了しました"
