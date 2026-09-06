@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { ChatResponse, MemoryCandidate, RunRecord } from "../types";
+import type { ChatResponse, RunRecord } from "../types";
 import { CERTAINTY_LABEL, KIND_LABEL } from "../types";
 import { SourceMessage } from "./SourceMessage";
 
@@ -8,7 +8,7 @@ interface Props {
   conversationId: number | null;
   entries: ChatResponse[];
   onEntry: (entry: ChatResponse) => void;
-  onCandidates: (candidates: MemoryCandidate[]) => void;
+  onCandidates: () => void;
   onReset: () => void;
 }
 
@@ -49,7 +49,8 @@ export function ChatPanel({
     setBusy(true);
     setError(null);
     try {
-      onCandidates(await api.endConversation(conversationId));
+      await api.endConversation(conversationId);
+      onCandidates();
       onReset();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

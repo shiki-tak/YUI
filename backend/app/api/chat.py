@@ -16,6 +16,23 @@ from app.schemas import ChatRequest, ChatResponse, MemoryOut, RetrievedMemoryOut
 router = APIRouter(tags=["chat"])
 
 
+def _ensure_open(conversation: Conversation) -> None:
+    """発言を受け付けられる状態かを確かめる。
+
+    ロックを取る前と取った後の両方で呼ぶ。待っている間に振り返りが完了して
+    いることがあり、取る前だけの判定では終了済みの会話に発言が入る。
+    """
+    if conversation.ended_at is not None or conversation.reflection_completed_at is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "この会話は終了しています。新しい会話を始めてください。"
+        )
+    if conversation.reflection_started_at is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "この会話は振り返り中です。終わるまで待つか、新しい会話を始めてください。",
+        )
+
+
 async def _resolve_conversation(
     session: AsyncSession, conversation_id: int | None
 ) -> Conversation:
@@ -23,10 +40,7 @@ async def _resolve_conversation(
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
-        if conversation.ended_at is not None:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT, "この会話は終了しています。新しい会話を始めてください。"
-            )
+        _ensure_open(conversation)
         return conversation
     conversation = Conversation(mode=ConversationMode.LOCAL.value)
     session.add(conversation)
@@ -52,6 +66,10 @@ async def chat(
     await session.commit()
 
     async with conversation_locks.hold(conversation.id):
+        # ロック待ちの間に振り返りが完了していることがあるため読み直す。
+        await session.refresh(conversation)
+        _ensure_open(conversation)
+
         try:
             result = await agent.respond(
                 session,

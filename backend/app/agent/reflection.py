@@ -27,6 +27,14 @@ from app.models import (
 
 _JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
 
+
+class ReflectionParseError(RuntimeError):
+    """振り返りの出力を候補として読み取れなかった。
+
+    「残す価値のある内容が無かった（空の配列）」とは区別する。区別しないと、
+    抽出の失敗が「候補なしの成功」として会話を終了させてしまう。
+    """
+
 _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ記憶の候補を抜き出す担当です。
 
 次の会話を読み、長期的に覚えておく価値のあることだけを JSON 配列で出力してください。
@@ -64,16 +72,27 @@ class CandidatePayload(BaseModel):
     source_message_id: int | None = None
 
 
+def _excerpt(text: str, limit: int = 200) -> str:
+    condensed = " ".join(text.split())
+    return condensed[:limit] + ("…" if len(condensed) > limit else "")
+
+
 def _parse_candidates(text: str) -> list[CandidatePayload]:
     match = _JSON_ARRAY.search(text)
     if not match:
-        return []
+        raise ReflectionParseError(
+            f"振り返りの出力にJSON配列が見つかりませんでした: {_excerpt(text)}"
+        )
     try:
         raw = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        raise ReflectionParseError(
+            f"振り返りの出力をJSONとして読み取れませんでした: {_excerpt(text)}"
+        ) from exc
     if not isinstance(raw, list):
-        return []
+        raise ReflectionParseError(
+            f"振り返りの出力が配列ではありませんでした: {_excerpt(text)}"
+        )
 
     valid_kinds = {k.value for k in MemoryKind}
     valid_certainty = {c.value for c in Certainty}

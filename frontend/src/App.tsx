@@ -31,7 +31,14 @@ export default function App() {
         setSelfSpeakerId(self ? self.id : null);
       })
       .catch(() => setSelfSpeakerId(null));
+    // 前回の会話で出た未判断の候補を拾い直す。
+    api.pendingCandidates().then(setCandidates).catch(() => setCandidates([]));
   }, []);
+
+  // 判断済みの候補は一覧から外し、残りだけを見せる。
+  const refreshCandidates = () => {
+    api.pendingCandidates().then(setCandidates).catch(() => undefined);
+  };
 
   const pendingCount = candidates.filter((c) => c.status === "pending").length;
 
@@ -62,8 +69,8 @@ export default function App() {
               setSelfSpeakerId(entry.user_message.speaker_id);
             }
           }}
-          onCandidates={(list) => {
-            setCandidates(list);
+          onCandidates={() => {
+            refreshCandidates();
             setTab("candidates");
           }}
           onReset={() => {
@@ -97,9 +104,7 @@ export default function App() {
             <CandidatePanel
               candidates={candidates}
               onDecided={(updated) => {
-                setCandidates((prev) =>
-                  prev.map((c) => (c.id === updated.id ? updated : c)),
-                );
+                setCandidates((prev) => prev.filter((c) => c.id !== updated.id));
                 if (updated.status === "accepted") {
                   setMemoryRefresh((n) => n + 1);
                 }

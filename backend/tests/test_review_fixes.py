@@ -350,12 +350,12 @@ async def test_memory_revision_records_visibility_scope(client: AsyncClient):
 # --- 再評価（phase1_review2.md）で見つかった問題 ---------------------------
 
 
-async def test_migrated_candidate_keeps_visibility_scope(client: AsyncClient, fake_llm: FakeLLM):
-    """振り返りで作る候補は、必ず参照範囲を持つ。
+async def test_new_candidate_always_has_visibility_scope(
+    client: AsyncClient, fake_llm: FakeLLM
+):
+    """振り返りで新しく作る候補は、必ず参照範囲を持つ。
 
-    移行前の候補が visible_to_speaker_id=NULL のままだと、採用したときに
-    相手を限定しない記憶になる。マイグレーションでの補完に加え、
-    新規に作る候補が空にならないことをここで固定する。
+    移行済みデータの検証は test_migration.py で行う（ここでは新規分だけ）。
     """
     first = await _say(client, "内緒の話をした", speaker=SPEAKER_A)
     speaker_a_id = first["user_message"]["speaker_id"]
@@ -467,3 +467,225 @@ async def test_completed_reflection_is_not_repeated(client: AsyncClient, fake_ll
 
     again = await client.post(f"/api/conversations/{conversation_id}/end")
     assert again.status_code == 409
+
+
+# --- 3回目のレビューで見つかった問題 ---------------------------------------
+
+
+async def test_message_is_rejected_while_reflecting(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
+):
+    """振り返り中に送った発言が、終了後の会話に追加されない。
+
+    以前は終了判定がロック取得の前だけだったため、ロック待ちの間に振り返りが
+    完了し、終了済みの会話へ発言と返答が入っていた。その分は振り返りに
+    含まれず、完了済みのため再抽出もできなかった。
+    """
+    first = await _say(client, "最初の発言")
+    conversation_id = first["conversation_id"]
+
+    fake_llm.entered.clear()
+    fake_llm.gate = asyncio.Event()
+    fake_llm.scripted = ["[]"]
+    end_task = asyncio.create_task(
+        client.post(f"/api/conversations/{conversation_id}/end")
+    )
+    await asyncio.wait_for(fake_llm.entered.wait(), timeout=5)
+
+    chat_task = asyncio.create_task(
+        client.post(
+            "/api/chat",
+            json={"text": "振り返り中に割り込む発言", "conversation_id": conversation_id},
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    gate = fake_llm.gate
+    fake_llm.gate = None
+    gate.set()
+
+    end_response = await asyncio.wait_for(end_task, timeout=10)
+    chat_response = await asyncio.wait_for(chat_task, timeout=10)
+    assert end_response.status_code == 200
+    assert chat_response.status_code == 409
+
+    detail = (await client.get(f"/api/conversations/{conversation_id}")).json()
+    assert "振り返り中に割り込む発言" not in [m["content"] for m in detail["messages"]]
+
+    async with session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        assert conversation.reflection_completed_at is not None
+
+
+async def test_running_reflection_is_not_reclaimed_after_stale_window(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
+):
+    """稼働中の振り返りが、回収期限を過ぎても二重に実行されない。
+
+    以前は開始時刻をロック取得の前に設定していたため、ロック待ちの時間が
+    回収期限に含まれ、稼働中の処理まで期限切れとみなされて候補が二重に
+    保存された。
+    """
+    first = await _say(client, "二重振り返りの検証")
+    conversation_id = first["conversation_id"]
+    payload = json.dumps(
+        [{"kind": "experience", "content": "検証用の経験", "certainty": "fact",
+          "keywords": "検証", "about_partner": False,
+          "source_message_id": first["user_message"]["id"]}],
+        ensure_ascii=False,
+    )
+
+    fake_llm.entered.clear()
+    fake_llm.gate = asyncio.Event()
+    fake_llm.scripted = [payload, payload]
+
+    running = asyncio.create_task(
+        client.post(f"/api/conversations/{conversation_id}/end")
+    )
+    await asyncio.wait_for(fake_llm.entered.wait(), timeout=5)
+
+    # 稼働中のまま、開始時刻だけ期限切れにする（ロック待ちが長引いた状況）。
+    async with session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        conversation.reflection_started_at = utcnow() - timedelta(seconds=3600)
+        await session.commit()
+
+    second = asyncio.create_task(
+        client.post(f"/api/conversations/{conversation_id}/end")
+    )
+    await asyncio.sleep(0.05)
+
+    gate = fake_llm.gate
+    fake_llm.gate = None
+    gate.set()
+
+    first_response = await asyncio.wait_for(running, timeout=10)
+    second_response = await asyncio.wait_for(second, timeout=10)
+    assert sorted([first_response.status_code, second_response.status_code]) == [200, 409]
+
+    candidates = (
+        await client.get(f"/api/conversations/{conversation_id}/candidates")
+    ).json()
+    assert len(candidates) == 1
+
+
+# --- #6 振り返りの失敗を成功として扱わないこと -----------------------------
+
+
+async def test_unparsable_reflection_is_reported_and_retryable(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
+):
+    """JSON として読めない出力を「候補なしの成功」として扱わない。"""
+    first = await _say(client, "壊れた出力を返す会話")
+    conversation_id = first["conversation_id"]
+
+    fake_llm.push("すみません、うまくまとめられませんでした。")
+    failed = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert failed.status_code == 503
+    detail = failed.json()["detail"]
+    assert "読み取れません" in detail or "見つかりません" in detail
+
+    async with session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        assert conversation.ended_at is None
+        assert conversation.reflection_completed_at is None
+
+    # 会話は続けられ、振り返りもやり直せる。
+    resumed = await client.post(
+        "/api/chat", json={"text": "続けます", "conversation_id": conversation_id}
+    )
+    assert resumed.status_code == 200
+
+    fake_llm.push("[]")
+    retried = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert retried.status_code == 200
+    assert retried.json() == []
+
+
+async def test_empty_reflection_is_a_success(client: AsyncClient, fake_llm: FakeLLM):
+    """残す価値が無い会話は、空の結果として正常に終了する。"""
+    first = await _say(client, "とくに残すことのない雑談")
+    fake_llm.push("[]")
+    response = await client.post(
+        f"/api/conversations/{first['conversation_id']}/end"
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+# --- #5 未判断の候補を会話をまたいで回収できること ---------------------------
+
+
+async def test_pending_candidates_survive_across_conversations(
+    client: AsyncClient, fake_llm: FakeLLM
+):
+    """画面を再読み込みしても、未判断の候補を採用できる。"""
+    first = await _say(client, "ひとつめの会話")
+    fake_llm.push(
+        json.dumps(
+            [{"kind": "experience", "content": "ひとつめの候補", "certainty": "fact",
+              "keywords": "ひとつめ", "about_partner": False,
+              "source_message_id": first["user_message"]["id"]}],
+            ensure_ascii=False,
+        )
+    )
+    await client.post(f"/api/conversations/{first['conversation_id']}/end")
+
+    second = await _say(client, "ふたつめの会話")
+    fake_llm.push(
+        json.dumps(
+            [{"kind": "experience", "content": "ふたつめの候補", "certainty": "fact",
+              "keywords": "ふたつめ", "about_partner": False,
+              "source_message_id": second["user_message"]["id"]}],
+            ensure_ascii=False,
+        )
+    )
+    await client.post(f"/api/conversations/{second['conversation_id']}/end")
+
+    pending = (await client.get("/api/conversations/candidates/pending")).json()
+    contents = [c["content"] for c in pending]
+    assert "ひとつめの候補" in contents
+    assert "ふたつめの候補" in contents
+
+    # 判断したものは一覧から外れる。
+    await client.post(
+        f"/api/conversations/candidates/{pending[0]['id']}/decide",
+        json={"decision": "reject"},
+    )
+    remaining = (await client.get("/api/conversations/candidates/pending")).json()
+    assert pending[0]["id"] not in [c["id"] for c in remaining]
+
+
+# --- #8 復元で日時も戻ること -----------------------------------------------
+
+
+async def test_restore_brings_back_occurred_at(client: AsyncClient):
+    created = await client.post(
+        "/api/memories",
+        json={
+            "kind": "experience",
+            "content": "日時つきの記憶",
+            "keywords": "日時",
+            "occurred_at": "2026-08-01T10:00:00+00:00",
+        },
+    )
+    memory_id = created.json()["id"]
+    await client.patch(
+        f"/api/memories/{memory_id}",
+        json={"content": "訂正後", "occurred_at": "2026-09-01T10:00:00+00:00"},
+    )
+    restored = (await client.post(f"/api/memories/{memory_id}/restore")).json()
+    assert restored["content"] == "日時つきの記憶"
+    assert restored["occurred_at"].startswith("2026-08-01T10:00:00")
+
+
+async def test_restore_brings_back_null_occurred_at(client: AsyncClient):
+    created = await client.post(
+        "/api/memories", json={"kind": "experience", "content": "日時なし", "keywords": "なし"}
+    )
+    memory_id = created.json()["id"]
+    await client.patch(
+        f"/api/memories/{memory_id}", json={"occurred_at": "2026-09-01T10:00:00+00:00"}
+    )
+    restored = (await client.post(f"/api/memories/{memory_id}/restore")).json()
+    assert restored["occurred_at"] is None

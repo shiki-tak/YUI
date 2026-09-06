@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent.memory_store import create_memory
-from app.agent.reflection import extract_candidates
+from app.agent.reflection import ReflectionParseError, extract_candidates
 from app.agent.turn_lock import conversation_locks
 from app.config import Settings, get_settings
 from app.db import get_session
@@ -60,6 +60,23 @@ async def list_conversations(
     return list((await session.execute(stmt)).scalars())
 
 
+@router.get("/candidates/pending", response_model=list[MemoryCandidateOut])
+async def list_pending_candidates(
+    limit: int = 100, session: AsyncSession = Depends(get_session)
+) -> list[MemoryCandidate]:
+    """未判断の記憶候補を会話をまたいで取得する。
+
+    画面を再読み込みしても、抽出済みの候補を採用できるようにするため。
+    """
+    stmt = (
+        select(MemoryCandidate)
+        .where(MemoryCandidate.status == CandidateStatus.PENDING.value)
+        .order_by(MemoryCandidate.id.desc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(
     conversation_id: int, session: AsyncSession = Depends(get_session)
@@ -100,37 +117,41 @@ async def end_conversation(
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
-    if conversation.reflection_completed_at is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "この会話はすでに終了しています。")
 
-    # 振り返りの開始を 1 文の UPDATE で確定させ、同時実行では片方だけを通す。
-    # 中断やプロセス停止で開始だけが残った場合は、一定時間後にやり直せる。
-    now = utcnow()
-    stale_before = now - timedelta(seconds=settings.reflection_stale_seconds)
-    claimed = await session.execute(
-        update(Conversation)
-        .where(
-            Conversation.id == conversation_id,
-            Conversation.reflection_completed_at.is_(None),
-            (Conversation.reflection_started_at.is_(None))
-            | (Conversation.reflection_started_at < stale_before),
-        )
-        .values(reflection_started_at=now)
-        # SQLite は timezone を落として返すため、条件の評価を Python 側で
-        # 行わせない。判定は SQL に任せる。
-        .execution_options(synchronize_session=False)
-    )
-    if claimed.rowcount == 0:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "この会話の振り返りは実行中です。しばらく待って再試行してください。",
-        )
-
-    partner = await _last_partner(session, conversation_id)
-    # 生成に入る前にロックを手放す（会話 API と同じ理由）。
-    await session.commit()
-
+    # 開始権の確定はロックの内側で行う。外で確定すると、ロック待ちの時間が
+    # 回収期限に含まれ、稼働中の振り返りまで期限切れとみなされてしまう。
     async with conversation_locks.hold(conversation_id):
+        await session.refresh(conversation)
+        if conversation.reflection_completed_at is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "この会話はすでに終了しています。")
+
+        # 同一プロセスではロックが排他を保証する。ここでの期限判定は、
+        # プロセスが落ちて開始だけが残った場合を回収するためのもの。
+        now = utcnow()
+        stale_before = now - timedelta(seconds=settings.reflection_stale_seconds)
+        claimed = await session.execute(
+            update(Conversation)
+            .where(
+                Conversation.id == conversation_id,
+                Conversation.reflection_completed_at.is_(None),
+                (Conversation.reflection_started_at.is_(None))
+                | (Conversation.reflection_started_at < stale_before),
+            )
+            .values(reflection_started_at=now)
+            # SQLite は timezone を落として返すため、条件の評価を Python 側で
+            # 行わせない。判定は SQL に任せる。
+            .execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount == 0:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "この会話の振り返りは実行中です。しばらく待って再試行してください。",
+            )
+
+        partner = await _last_partner(session, conversation_id)
+        # 生成に入る前に DB の書き込みロックを手放す（会話 API と同じ理由）。
+        await session.commit()
+
         try:
             candidates = await extract_candidates(
                 session,
@@ -140,8 +161,9 @@ async def end_conversation(
                 partner_name=partner.display_name if partner else "相手",
                 character_name=BASE_PERSONA.name,
             )
-        except LLMError as exc:
-            # 抽出できなかった会話を処理中のまま残すと、やり直せなくなる。
+        except (LLMError, ReflectionParseError) as exc:
+            # 抽出できなかった会話を処理中・終了済みのまま残すと、やり直せない。
+            # 特に出力の解析失敗は「候補なしの成功」と区別する必要がある。
             await _release_reflection(session, conversation_id)
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 

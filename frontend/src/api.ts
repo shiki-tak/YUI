@@ -59,6 +59,10 @@ export const api = {
   candidates: (conversationId: number) =>
     request<MemoryCandidate[]>(`/conversations/${conversationId}/candidates`),
 
+  // 再読み込みしても採用できるよう、未判断の候補を会話をまたいで取り直す。
+  pendingCandidates: () =>
+    request<MemoryCandidate[]>("/conversations/candidates/pending"),
+
   decideCandidate: (
     candidateId: number,
     body: { decision: "accept" | "reject"; content?: string; reason?: string },

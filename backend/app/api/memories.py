@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,6 +176,8 @@ async def restore_memory(
     before = snapshot(memory)
     for field, value in revision.before.items():
         if field == "occurred_at":
+            # 履歴には ISO 文字列で入っているため datetime へ戻す。NULL も戻す。
+            memory.occurred_at = datetime.fromisoformat(value) if value else None
             continue
         setattr(memory, field, value)
     await session.flush()
