@@ -34,8 +34,10 @@ class OllamaClient(LLMClient):
         temperature: float = 0.8,
         num_ctx: int = 8192,
         timeout: float = 120.0,
+        think: bool | None = False,
     ) -> None:
         self.model = model
+        self._think = think
         self._client = AsyncClient(host=host, timeout=timeout)
         self._default_options: dict[str, Any] = {
             "temperature": temperature,
@@ -65,10 +67,14 @@ class OllamaClient(LLMClient):
     ) -> LLMResponse:
         merged = {**self._default_options, **(options or {})}
         payload = [{"role": m.role, "content": m.content} for m in messages]
+        # think はオプションではなく最上位の引数。None のときは送らない。
+        extra = {} if self._think is None else {"think": self._think}
 
         started = time.perf_counter()
         try:
-            raw = await self._client.chat(model=self.model, messages=payload, options=merged)
+            raw = await self._client.chat(
+                model=self.model, messages=payload, options=merged, **extra
+            )
         except ResponseError as exc:
             raise LLMError(f"Ollama がエラーを返しました（model={self.model}）: {exc}") from exc
         except Exception as exc:
@@ -88,7 +94,8 @@ class OllamaClient(LLMClient):
             provider=self.provider,
             model=self.model,
             model_digest=await self._model_digest(),
-            options=merged,
+            # 実行記録に残す設定。think も再現に必要なので含める。
+            options={**merged, **extra},
             latency_ms=latency_ms,
             prompt_tokens=raw.prompt_eval_count,
             completion_tokens=raw.eval_count,

@@ -25,4 +25,5 @@ def get_llm_client() -> LLMClient:
         temperature=settings.ollama_temperature,
         num_ctx=settings.ollama_num_ctx,
         timeout=settings.llm_timeout_seconds,
+        think=settings.ollama_think,
     )

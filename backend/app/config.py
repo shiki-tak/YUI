@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3:8b"
     ollama_temperature: float = 0.8
     ollama_num_ctx: int = 8192
+    # 思考出力の制御。False で切る（応答が大幅に速くなる）。
+    # None にすると think を送らず、モデルの既定に任せる。
+    ollama_think: bool | None = False
     llm_timeout_seconds: float = 120.0
 
     # DB
