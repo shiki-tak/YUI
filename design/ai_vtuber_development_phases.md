@@ -54,7 +54,7 @@ VRMへの交換は図のフェーズ6に限らず、モデルが完成した任�
 
 ### 使用技術
 
-React、TypeScript、Vite、FastAPI、Uvicorn、Pydantic、Ollama、公式Python SDK、SQLite、SQLAlchemy、aiosqlite、Alembic。初期の推論候補はQwen3 8Bです。
+React、TypeScript、Vite、FastAPI、Uvicorn、Pydantic、Ollama、公式Python SDK、SQLite、SQLAlchemy、aiosqlite、Alembic。推論にはQwen3.5 9Bを思考出力なしで使います。
 
 ### 完了条件
 
