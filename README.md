@@ -33,7 +33,7 @@ backend/    FastAPI。人格・記憶・会話進行・振り返り・実行記�
   alembic/  DB のテーブル定義の変更履歴
 frontend/   React + TypeScript + Vite。開発用の操作画面
 docs/design/   設計書
-docs/codex/    レビュー結果
+docs/review/   レビュー結果と対応（codex／claude）
 ```
 
 ## 準備
