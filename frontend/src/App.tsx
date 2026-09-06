@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { AvatarPanel } from "./components/AvatarPanel";
 import { CandidatePanel } from "./components/CandidatePanel";
@@ -40,6 +40,18 @@ export default function App() {
   // 記憶検索を会話と同じ条件で行うために、自分の speaker id を解決する。
   const [selfSpeakerId, setSelfSpeakerId] = useState<number | null>(null);
 
+  // 表示している会話の世代。切り替えるたびに進める。送信・履歴の読み込み・
+  // 終了の結果は、始めたときの世代がいまも一致するときだけ反映する。
+  // そうしないと、返答を待つ間に別の会話を開いたとき、前の会話の結果が
+  // いまの画面へ混ざる。
+  const viewRef = useRef(0);
+  const [view, setView] = useState(0);
+  const switchView = useCallback(() => {
+    viewRef.current += 1;
+    setView(viewRef.current);
+    return viewRef.current;
+  }, []);
+
   // 再生の記録が変わったら、画面の発言にも反映する。
   const applyDelivery = useCallback((updated: Message) => {
     setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
@@ -71,22 +83,30 @@ export default function App() {
 
   /** 保存済みの会話を開く。終了済みなら読み取り専用として表示する。 */
   async function openConversation(id: number) {
+    const token = switchView();
+    setConversationId(null);
+    setMessages([]);
+    setLiveEntries({});
+    setConversation(null);
     setLoadingConversation(true);
     setHistoryError(null);
     try {
       const detail = await api.conversation(id);
+      // 続けて別の会話を開いた場合、遅れて届いたこちらは捨てる。
+      if (token !== viewRef.current) return;
       setConversationId(detail.id);
       setMessages(detail.messages);
-      setLiveEntries({});
       setConversation(conversationState(detail));
     } catch (e) {
+      if (token !== viewRef.current) return;
       setHistoryError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoadingConversation(false);
+      if (token === viewRef.current) setLoadingConversation(false);
     }
   }
 
   function startNewConversation() {
+    switchView();
     setConversationId(null);
     setMessages([]);
     setLiveEntries({});
@@ -131,7 +151,14 @@ export default function App() {
           loading={loadingConversation}
           speechAvailable={speechAvailable}
           player={player}
-          onEntry={(entry) => {
+          view={view}
+          onEntry={(entry, token) => {
+            // 待っている間に別の会話へ移っていたら、この画面には出さない。
+            // 発言そのものは保存済みで、会話履歴から読み直せる。
+            if (token !== viewRef.current) {
+              setHistoryRefresh((n) => n + 1);
+              return false;
+            }
             const isNew = conversationId === null;
             setConversationId(entry.conversation_id);
             setMessages((prev) => [...prev, entry.user_message, entry.reply]);
@@ -143,11 +170,13 @@ export default function App() {
               // 初回の会話で相手が作られるので、ここで解決しておく。
               setSelfSpeakerId(entry.user_message.speaker_id);
             }
+            return true;
           }}
-          onEnded={() => {
+          onEnded={(token) => {
             // 終了しても画面からは消さない。読み取り専用に切り替えるだけにして、
             // 何を話した結果の候補なのかを見比べられるようにする。
-            setConversation("ended");
+            // 別の会話へ移っていた場合、いまの表示は終了扱いにしない。
+            if (token === viewRef.current) setConversation("ended");
             setHistoryRefresh((n) => n + 1);
             refreshCandidates();
             setTab("candidates");

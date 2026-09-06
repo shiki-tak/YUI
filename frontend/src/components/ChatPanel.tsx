@@ -31,9 +31,12 @@ interface Props {
   speechAvailable: boolean;
   /** 読み上げの再生器。アバターと共有するため App が持つ。 */
   player: SpeechPlayer;
-  onEntry: (entry: ChatResponse) => void;
+  /** 表示している会話の世代。結果を反映してよいかの判定に使う。 */
+  view: number;
+  /** 返答を画面へ反映する。世代が変わっていれば false を返す。 */
+  onEntry: (entry: ChatResponse, view: number) => boolean;
   /** 終了して振り返った直後。候補の取り直しと、読み取り専用への切り替えに使う。 */
-  onEnded: () => void;
+  onEnded: (view: number) => void;
   onNewConversation: () => void;
 }
 
@@ -45,6 +48,7 @@ export function ChatPanel({
   loading,
   speechAvailable,
   player,
+  view,
   onEntry,
   onEnded,
   onNewConversation,
@@ -52,6 +56,7 @@ export function ChatPanel({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // 送信から返答が返るまで。待ち時間の内訳を見るために測る。
   const [chatMs, setChatMs] = useState<Record<number, number>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -63,31 +68,42 @@ export function ChatPanel({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, busy]);
 
-  // 別の会話を開いたら、前の会話の音声を鳴らし続けない。失敗の表示も残さない。
+  // 別の会話を開いたら、前の会話の音声を鳴らし続けない。表示も残さない。
+  // 会話 ID ではなく世代で判定する。新しい会話に ID が付いただけのときは
+  // 世代が変わらないため、1 通目で鳴らし始めた音声を打ち消さない。
   const stopSpeech = player.stop;
-  const shownConversationRef = useRef<number | null>(null);
+  const firstViewRef = useRef(true);
   useEffect(() => {
-    const previous = shownConversationRef.current;
-    shownConversationRef.current = conversationId;
-    // 新しい会話に ID が付いただけのときは切り替えではない。ここで止めると、
-    // 1 通目の返答で鳴らし始めた音声を自分で打ち消してしまう。
-    if (previous === null || previous === conversationId) return;
+    if (firstViewRef.current) {
+      firstViewRef.current = false;
+      return;
+    }
     setError(null);
+    setNotice(null);
     stopSpeech();
-  }, [conversationId, stopSpeech]);
+  }, [view, stopSpeech]);
 
   async function send() {
     const trimmed = text.trim();
     if (!trimmed || busy || readOnly) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
+    // 返答を待つ間に別の会話へ移ることがある。始めたときの世代を覚えておく。
+    const sentView = view;
     try {
       const sentAt = performance.now();
       const entry = await api.chat(trimmed, conversationId);
       const roundTrip = Math.round(performance.now() - sentAt);
       setChatMs((prev) => ({ ...prev, [entry.reply.id]: roundTrip }));
-      onEntry(entry);
       setText("");
+      if (!onEntry(entry, sentView)) {
+        // 別の会話へ移ったあとの返答。画面には出さず、読み上げもしない。
+        setNotice(
+          "別の会話へ移ったため、いまの返答はこの画面に出していません。会話履歴から読めます。",
+        );
+        return;
+      }
       // 返答が出たら読み上げる。生成しただけの状態から、再生の通知で進む。
       if (speechAvailable) player.play(entry.reply.id);
     } catch (e) {
@@ -101,9 +117,10 @@ export function ChatPanel({
     if (conversationId === null || busy || readOnly) return;
     setBusy(true);
     setError(null);
+    const endedView = view;
     try {
       await api.endConversation(conversationId);
-      onEnded();
+      onEnded(endedView);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -180,6 +197,7 @@ export function ChatPanel({
       </div>
 
       {error && <p className="error">{error}</p>}
+      {notice && <p className="notice">{notice}</p>}
       {player.error && (
         <p className="error small">
           {player.error}{" "}

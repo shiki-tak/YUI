@@ -21,13 +21,22 @@ export function HistoryPanel({ refreshKey, currentId, onOpen }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // 続けて読み直したとき、遅れて届いた古い一覧で上書きしない。
+    let cancelled = false;
     api
       .conversations()
       .then((list) => {
+        if (cancelled) return;
         setConversations(list);
         setError(null);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [refreshKey]);
 
   return (

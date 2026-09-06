@@ -13,6 +13,8 @@ import pytest
 from httpx import AsyncClient
 
 from app import main
+from app.agent.delivery import apply_delivery_state
+from app.models import DeliveryState, Message, utcnow
 from tests.conftest import FakeSpeech
 
 
@@ -264,3 +266,69 @@ async def test_retrieval_time_is_recorded_separately(client: AsyncClient):
     assert run["retrieval_ms"] is not None
     assert run["retrieval_ms"] >= 0
     assert run["latency_ms"] is not None
+
+
+async def test_stale_notice_cannot_reopen_a_finished_message(
+    client: AsyncClient, session_factory
+):
+    """古い状態を読んだ通知が、話し終えた記録を上書きしない。
+
+    再生の通知は待たずに送られるため、短い再生や直後の停止では通知が
+    並行する。反映の判定を読み込んだオブジェクト上で行うと、先に確定した
+    完了を、あとから届いた再生開始が押し戻せてしまう。
+    """
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    async with session_factory() as session:
+        # 通知が届く前の状態を読み込んでおく。
+        stale = await session.get(Message, message_id)
+        assert stale is not None and stale.delivery_state == "generated"
+
+        # 別の経路で最後まで再生され、記録が確定する。
+        await _delivery(client, message_id, "playing")
+        finished = (await _delivery(client, message_id, "completed")).json()
+
+        # 古い読み込みのまま、再生開始を反映しようとする。
+        await apply_delivery_state(
+            session, stale, DeliveryState.PLAYING, now=utcnow()
+        )
+
+    stored = (await client.get(f"/api/conversations/messages/{message_id}")).json()
+    assert stored["delivery_state"] == "completed"
+    assert stored["delivery_finished_at"] == finished["delivery_finished_at"]
+
+
+async def test_stale_finish_notice_does_not_move_the_first_record(
+    client: AsyncClient, session_factory
+):
+    """遅れて届いた中断の通知でも、確定した完了を上書きしない。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    async with session_factory() as session:
+        stale = await session.get(Message, message_id)
+        assert stale is not None
+
+        await _delivery(client, message_id, "playing")
+        finished = (await _delivery(client, message_id, "completed")).json()
+
+        await apply_delivery_state(
+            session, stale, DeliveryState.ABORTED, now=utcnow()
+        )
+
+    stored = (await client.get(f"/api/conversations/messages/{message_id}")).json()
+    assert stored["delivery_state"] == "completed"
+    assert stored["delivery_finished_at"] == finished["delivery_finished_at"]
+
+
+async def test_delivery_returns_the_confirmed_state(client: AsyncClient):
+    """反映できなかった通知でも、DB 上の確定した状態を返す。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    await _delivery(client, message_id, "playing")
+    completed = (await _delivery(client, message_id, "completed")).json()
+
+    replayed = (await _delivery(client, message_id, "playing")).json()
+    assert replayed == completed

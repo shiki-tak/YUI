@@ -153,10 +153,16 @@ brew install sevenzip
 ## テスト
 
 ```sh
-cd backend && .venv/bin/python -m pytest
+cd backend && .venv/bin/python -m pytest   # バックエンド
+cd frontend && npm test                    # フロントエンド
 ```
 
-LLM は共通インターフェース越しに差し替えるため、Ollama を起動していなくても実行できます。
+LLM と音声合成は共通インターフェース越しに差し替えるため、Ollama や VOICEVOX を
+起動していなくても実行できます。
+
+フロントエンドのテストは、再生の制御（重ねて鳴らさない・止まる・記録が残る）と
+会話の切り替えを対象にしています。どちらも画面側にあり、バックエンドのテストでは
+守れないためです。
 
 ## モデルの選定
 
