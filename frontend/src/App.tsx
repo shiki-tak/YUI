@@ -45,7 +45,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>ゆい：開発用操作画面</h1>
+        <h1>YUI：開発用操作画面</h1>
         <span className="muted small">
           {health
             ? `人格 ${health.persona.name}（${health.persona.version}） · ${

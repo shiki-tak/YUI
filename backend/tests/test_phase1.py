@@ -26,7 +26,7 @@ async def _say(client: AsyncClient, text: str, conversation_id: int | None = Non
 async def test_persona_is_applied_to_the_prompt(client: AsyncClient, fake_llm: FakeLLM):
     await _say(client, "こんにちは")
     system_prompt = fake_llm.last_system_prompt
-    assert "ゆい" in system_prompt
+    assert "YUI" in system_prompt
     assert "知らないこと・覚えていないことは" in system_prompt
 
 

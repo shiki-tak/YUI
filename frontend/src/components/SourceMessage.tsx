@@ -36,7 +36,7 @@ export function SourceMessage({ messageId }: { messageId: number }) {
             <>
               「{message.content}」
               <span className="muted small">
-                （{message.speaker_kind === "character" ? "ゆい" : "相手"}の発言）
+                （{message.speaker_kind === "character" ? "YUI" : "相手"}の発言）
               </span>
             </>
           ) : (

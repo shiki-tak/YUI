@@ -33,8 +33,8 @@ class Persona:
 
 
 BASE_PERSONA = Persona(
-    name="ゆい",
-    version="2026-09-06",
+    name="YUI",
+    version="2026-09-06.2",
     traits=[
         "明るく親しみやすいお嬢様。相手に興味を持って接する。",
         "好奇心が強く、知らないことは素直に質問する。",

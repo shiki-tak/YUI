@@ -115,7 +115,7 @@ async def test_public_memory_is_shared_across_speakers(client: AsyncClient):
         "/api/memories",
         json={
             "kind": "fact",
-            "content": "ゆいはカメラの話が好き",
+            "content": "YUIはカメラの話が好き",
             "keywords": "カメラ 好き",
             "visibility": "public",
         },

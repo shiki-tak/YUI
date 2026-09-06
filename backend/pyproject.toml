@@ -1,7 +1,7 @@
 [project]
 name = "yui-backend"
 version = "0.1.0"
-description = "AI VTuber「ゆい」バックエンド：人格・記憶・会話進行"
+description = "AI VTuber「YUI」バックエンド：人格・記憶・会話進行"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

@@ -15,7 +15,7 @@ settings = get_settings()
 app = FastAPI(
     title="yui backend",
     version="0.1.0",
-    description="AI VTuber「ゆい」：人格・記憶・会話進行（フェーズ1）",
+    description="AI VTuber「YUI」：人格・記憶・会話進行（フェーズ1）",
 )
 
 app.add_middleware(
