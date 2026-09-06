@@ -1,0 +1,34 @@
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: "#ffffff"
+    primaryBorderColor: "#2b3450"
+    primaryTextColor: "#1f2740"
+    lineColor: "#2b3450"
+    fontSize: 20px
+---
+%% images/dev_flow.png の元データ。
+%% 更新するには次を実行する:
+%%   npx -y @mermaid-js/mermaid-cli -i docs/design/dev_flow.mmd \
+%%       -o images/dev_flow.png -b white -s 3
+flowchart TD
+    P1["1：文字会話・記憶"]
+    P2["2：アバター・音声"]
+    P3["3：検索・クラウド"]
+    P4["4：YouTube配信"]
+    P5["5：経験による行動の変化"]
+    P6["6：自律的な継続配信"]
+    P7["7：学習・比較評価"]
+    VRM["並行作業：VRM制作"]
+
+    P1 --> P2
+    P2 --> P3
+    P2 -.-> VRM
+    P3 --> P4
+    P4 --> P5
+    P4 -. "教師データと評価が整い次第" .-> P7
+    P5 --> P6
+    VRM -. "完成時に表示を交換" .-> P6
+    P6 -- "新しい経験・修正例" --> P7
+    P7 -- "採用したモデル" --> P5
