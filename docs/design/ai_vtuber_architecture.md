@@ -16,7 +16,7 @@
 - アバター：用意済みの画像から始め、後からVRMへ移行。
 - 配信先：YouTube。Discord連携は設けない。
 
-自作する中心は、人格・記憶・行動判断・評価です。音声認識、音声合成、アバター表示、配信には既存技術を利用します。「しずく」の非公開実装を再現した図ではありません。
+自作する中心は、人格・記憶・行動判断・評価です。音声合成、アバター表示、配信には既存技術を利用します。「しずく」の非公開実装を再現した図ではありません。
 
 ## 2. 会話・配信中の構成
 
@@ -32,7 +32,7 @@
 
 | 部分 | 採用技術 | 役割・採用範囲 |
 | --- | --- | --- |
-| 操作画面 | React＋TypeScript＋Vite | 文字入力、録音、字幕、設定、記憶・評価の確認 |
+| 操作画面 | React＋TypeScript＋Vite | 文字入力、字幕、設定、記憶・評価の確認 |
 | PNGアバター | AITuber OnAirのReact PNGテンプレートの表示部分 | 画像表示、口パク、まばたき。会話処理はFastAPIへ差し替える |
 | 将来の3D表示 | Three.js＋@pixiv/three-vrm | VRM表示、表情、口パク、モーション |
 | APIサーバー | FastAPI＋Uvicorn | HTTP API、WebSocket、フロントとの通信 |
@@ -42,7 +42,6 @@
 | ローカル推論 | Ollama＋公式Python SDK | 通常の返答生成。Qwen3.5 9Bを思考出力なしで使用 |
 | クラウド推論 | Anthropic Python SDK＋Claude API | 難しい分析、必要時の追加判定。モデルは交換可能にする |
 | 最新情報 | Ollama Web Search APIなど＋HTTPX | 検索、公式情報の取得、出典と取得日時の保存 |
-| 音声認識 | whisper.cppのHTTPサーバー＋HTTPX | 日本語の文字起こし。必要時はFFmpegで録音形式を変換 |
 | 音声合成 | VOICEVOX Engine＋HTTPX | 音声合成用データを作り、読み上げ音声を生成 |
 | DB | SQLite＋SQLAlchemy＋aiosqlite | 会話、経験、人格、評価、利用量の永続化 |
 | DB変更管理 | Alembic | テーブル定義の変更履歴を管理 |
@@ -76,7 +75,7 @@ Ollama経由のWeb検索は外部サービスへのアクセスです。ロー�
 
 | モジュール | 責任 |
 | --- | --- |
-| 入力アダプター | ローカル文字、音声認識結果、YouTubeコメントを共通形式へ変換 |
+| 入力アダプター | ローカル文字、YouTubeコメントを共通形式へ変換 |
 | 会話進行 | 誰に答えるか、いつ話すか、中断するかを管理 |
 | 人格管理 | 基本の性格、口調、興味、目標、一時的な状態を管理 |
 | 記憶管理 | 経験の保存・検索・訂正、相手と公開範囲の管理 |
@@ -99,8 +98,6 @@ Ollama経由のWeb検索は外部サービスへのアクセスです。ロー�
 7. 確定した返答を保存し、音声合成・表示へ送る。
 8. 再生開始・完了・中断を記録する。生成しただけの文章を、実際に話し終えた内容と混同しない。
 9. 会話終了後に、長期的に残す経験や改善候補を整理する。
-
-最初は録音ボタンで交互に話す形式とし、基本動作の安定後に常時音声入力や割り込みを追加します。
 
 ## 6. 保存するデータ
 
@@ -183,7 +180,6 @@ flowchart TD
 - [Ollama：Web検索](https://docs.ollama.com/capabilities/web-search)
 - [Ollama：モデルの取り込み](https://docs.ollama.com/import)
 - [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python)
-- [whisper.cpp：HTTPサーバー](https://github.com/ggml-org/whisper.cpp/tree/master/examples/server)
 - [VOICEVOX Engine](https://github.com/VOICEVOX/voicevox_engine)
 - [AITuber OnAir](https://github.com/shinshin86/aituber-onair)
 - [three-vrm](https://github.com/pixiv/three-vrm)
