@@ -14,7 +14,6 @@ import {
   KIND_LABEL,
   formatDateTime,
 } from "../types";
-import { useSpeechPlayer } from "../useSpeechPlayer";
 import type { SpeechPlayer } from "../useSpeechPlayer";
 import { SourceMessage } from "./SourceMessage";
 
@@ -29,12 +28,12 @@ interface Props {
   loading: boolean;
   /** 読み上げを使える状態か。エンジンに接続できないときは自動再生しない。 */
   speechAvailable: boolean;
+  /** 読み上げの再生器。アバターと共有するため App が持つ。 */
+  player: SpeechPlayer;
   onEntry: (entry: ChatResponse) => void;
   /** 終了して振り返った直後。候補の取り直しと、読み取り専用への切り替えに使う。 */
   onEnded: () => void;
   onNewConversation: () => void;
-  /** 再生の記録が変わった発言。画面の状態へ反映する。 */
-  onMessageUpdated: (message: Message) => void;
 }
 
 export function ChatPanel({
@@ -44,16 +43,15 @@ export function ChatPanel({
   state,
   loading,
   speechAvailable,
+  player,
   onEntry,
   onEnded,
   onNewConversation,
-  onMessageUpdated,
 }: Props) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const player = useSpeechPlayer(onMessageUpdated);
 
   // 終了済み・振り返り中の会話は読み取り専用で開く。送っても 409 になる。
   const readOnly = state === "ended" || state === "reflecting";

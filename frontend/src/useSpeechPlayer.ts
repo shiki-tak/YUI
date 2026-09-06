@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { MutableRefObject } from "react";
 import { api } from "./api";
 import type { DeliveryNotice, Message } from "./types";
+
+declare global {
+  interface Window {
+    // Safari の旧実装。無い環境もあるため任意にしておく。
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
 
 /** 返答の読み上げ。同時に鳴らすのは常に1つだけにする。 */
 export interface SpeechPlayer {
@@ -9,6 +17,13 @@ export interface SpeechPlayer {
   /** 音声を取りに行っている発言。 */
   loadingId: number | null;
   error: string | null;
+  /**
+   * 鳴っている音声の大きさ（0〜1）。口パクに使う。
+   *
+   * 毎フレームの値を state で持つと画面全体が再描画されるため、ref で渡して
+   * 読む側が自分の描画周期で見る。
+   */
+  levelRef: MutableRefObject<number>;
   play: (messageId: number) => void;
   stop: () => void;
   clearError: () => void;
@@ -20,6 +35,12 @@ export function useSpeechPlayer(
 ): SpeechPlayer {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string | null>(null);
+  // 音量の解析。使えない環境では解析なしで再生だけ行う（口は閉じたまま）。
+  const contextRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const levelRef = useRef(0);
   // 進行中の再生要求。新しい要求が来たら古い結果は捨てる。
   const requestRef = useRef(0);
   const playingRef = useRef<number | null>(null);
@@ -44,6 +65,16 @@ export function useSpeechPlayer(
 
   /** 鳴っている音声を止めて後片付けする。中断として記録するかは呼び出し側が決める。 */
   const teardown = useCallback(() => {
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    levelRef.current = 0;
+    sourceRef.current?.disconnect();
+    sourceRef.current = null;
+    analyserRef.current?.disconnect();
+    analyserRef.current = null;
+
     const audio = audioRef.current;
     if (audio) {
       audio.onended = null;
@@ -54,6 +85,50 @@ export function useSpeechPlayer(
     if (urlRef.current) {
       URL.revokeObjectURL(urlRef.current);
       urlRef.current = null;
+    }
+  }, []);
+
+  /** 再生中の音声を解析につなぐ。つなげない場合は普通に鳴らすだけにする。 */
+  const connectAnalyser = useCallback(async (audio: HTMLAudioElement) => {
+    try {
+      const context =
+        contextRef.current ??
+        new (window.AudioContext ?? window.webkitAudioContext)();
+      contextRef.current = context;
+      if (context.state === "suspended") await context.resume();
+      // 動いていない状態でつなぐと音そのものが出なくなる。解析はあきらめ、
+      // 再生を優先する。
+      if (context.state !== "running") return;
+
+      // 音の経路を先に作る。解析はそこから枝分かれさせるだけにして、
+      // 解析側で失敗しても音が消えないようにする。
+      const source = context.createMediaElementSource(audio);
+      source.connect(context.destination);
+      sourceRef.current = source;
+
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      const samples = new Uint8Array(analyser.fftSize);
+      const tick = () => {
+        const node = analyserRef.current;
+        if (!node) return;
+        node.getByteTimeDomainData(samples);
+        // 中央（128）からのずれの二乗平均。無音なら 0 に近づく。
+        let sum = 0;
+        for (const value of samples) {
+          const centered = (value - 128) / 128;
+          sum += centered * centered;
+        }
+        levelRef.current = Math.sqrt(sum / samples.length);
+        frameRef.current = requestAnimationFrame(tick);
+      };
+      frameRef.current = requestAnimationFrame(tick);
+    } catch {
+      // 解析できない環境。再生は続け、口は閉じたままにする。
+      levelRef.current = 0;
     }
   }, []);
 
@@ -135,9 +210,10 @@ export function useSpeechPlayer(
         setLoadingId(null);
         setPlayingId(messageId);
         notify(messageId, "playing");
+        await connectAnalyser(audio);
       })();
     },
-    [notify, teardown],
+    [connectAnalyser, notify, teardown],
   );
 
   // 画面を離れるときに鳴らしっぱなしにしない。
@@ -147,6 +223,7 @@ export function useSpeechPlayer(
     playingId,
     loadingId,
     error,
+    levelRef,
     play,
     stop,
     clearError: useCallback(() => setError(null), []),

@@ -51,6 +51,8 @@ async def health(
     }
     if settings.speech_enabled:
         voice_status.update(await speech.health())
+        # 読み上げた音声を画面に出す場では、この表記が必要になる。
+        voice_status["credit"] = settings.voicevox_credit
 
     return {
         # 音声が使えなくても文字での会話は続けられるため、全体の状態には含めない。

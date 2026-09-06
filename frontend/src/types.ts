@@ -142,6 +142,8 @@ export interface Health {
     provider: string;
     engine_version?: string | null;
     speaker?: number;
+    /** 音声を公開する場に出す表記。 */
+    credit?: string;
     error?: string;
   };
 }

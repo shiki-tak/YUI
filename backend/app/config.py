@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # 「VOICEVOX:猫使ビィ」のクレジット表記が必要（話者を変えるときは規約も確認する）。
     voicevox_speaker: int = 59
     voicevox_timeout_seconds: float = 30.0
+    # 生成した音声を公開する場に出す表記。話者を変えるときは必ず一緒に直す。
+    voicevox_credit: str = "VOICEVOX:猫使ビィ"
     # 音声を切っても会話は続けられる。エンジンが無い環境で使う。
     speech_enabled: bool = True
 

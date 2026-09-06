@@ -176,6 +176,13 @@ async def test_api_health_includes_voice(client: AsyncClient):
     assert body["voice"]["provider"] == "fake-voice"
 
 
+async def test_api_health_carries_the_credit_line(client: AsyncClient):
+    """読み上げた音声を出す場では表記が要る。画面がそれを出せるように返す。"""
+    body = (await client.get("/api/health")).json()
+    assert body["voice"]["credit"] == main.settings.voicevox_credit
+    assert body["voice"]["credit"]
+
+
 async def test_api_health_reports_disabled_voice(client: AsyncClient, monkeypatch):
     """音声を切っていても、会話ができる状態なら全体は ok のまま。"""
     monkeypatch.setattr(main.settings, "speech_enabled", False)

@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
+import { AvatarPanel } from "./components/AvatarPanel";
 import { CandidatePanel } from "./components/CandidatePanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
@@ -12,6 +13,7 @@ import type {
   Message,
 } from "./types";
 import { SELF_SPEAKER, conversationState } from "./types";
+import { useSpeechPlayer } from "./useSpeechPlayer";
 
 type Tab = "memories" | "candidates" | "history";
 
@@ -37,6 +39,13 @@ export default function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   // 記憶検索を会話と同じ条件で行うために、自分の speaker id を解決する。
   const [selfSpeakerId, setSelfSpeakerId] = useState<number | null>(null);
+
+  // 再生の記録が変わったら、画面の発言にも反映する。
+  const applyDelivery = useCallback((updated: Message) => {
+    setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+  }, []);
+  // 会話欄とアバターの両方が見るため、再生器はここで持つ。
+  const player = useSpeechPlayer(applyDelivery);
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null));
@@ -104,6 +113,12 @@ export default function App() {
       </header>
 
       <main className="layout">
+        <AvatarPanel
+          levelRef={player.levelRef}
+          speaking={player.playingId !== null}
+          credit={health?.voice.credit}
+        />
+
         <ChatPanel
           conversationId={conversationId}
           messages={messages}
@@ -111,6 +126,7 @@ export default function App() {
           state={conversation}
           loading={loadingConversation}
           speechAvailable={speechAvailable}
+          player={player}
           onEntry={(entry) => {
             const isNew = conversationId === null;
             setConversationId(entry.conversation_id);
@@ -133,11 +149,6 @@ export default function App() {
             setTab("candidates");
           }}
           onNewConversation={startNewConversation}
-          onMessageUpdated={(updated) =>
-            setMessages((prev) =>
-              prev.map((m) => (m.id === updated.id ? updated : m)),
-            )
-          }
         />
 
         <div className="side">
