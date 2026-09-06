@@ -6,7 +6,7 @@
 設計は [docs/design/ai_vtuber_architecture.md](docs/design/ai_vtuber_architecture.md)（全体構成）と
 [docs/design/ai_vtuber_development_phases.md](docs/design/ai_vtuber_development_phases.md)（開発フェーズ）にあります。
 
-## いまの状態：フェーズ1（文字会話 MVP）
+## いまの状態：フェーズ1（文字会話 MVP）完了
 
 設定した人格で会話し、再起動を越えて過去の経験を使って答えられる状態までを実装しています。
 
@@ -19,6 +19,9 @@
 - 会話終了時の振り返りによる記憶候補の抽出と、開発者による採用・却下
 - 実行記録（モデルの版、生成設定、参照した記憶、応答時間、トークン数）
 - 理想の返答の記録
+
+実装の記録は [docs/result/phase1.md](docs/result/phase1.md)、残っている課題は
+[docs/issues/issues.md](docs/issues/issues.md) にあります。
 
 フェーズ2以降（音声・アバター・検索・配信・学習）は未着手です。
 
@@ -33,6 +36,8 @@ backend/    FastAPI。人格・記憶・会話進行・振り返り・実行記�
   alembic/  DB のテーブル定義の変更履歴
 frontend/   React + TypeScript + Vite。開発用の操作画面
 docs/design/   設計書
+docs/result/   フェーズごとの実装記録
+docs/issues/   残っている課題
 docs/review/   レビュー結果と対応（codex／claude）
 ```
 
