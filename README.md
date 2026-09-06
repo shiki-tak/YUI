@@ -6,9 +6,12 @@
 設計は [docs/design/ai_vtuber_architecture.md](docs/design/ai_vtuber_architecture.md)（全体構成）と
 [docs/design/ai_vtuber_development_phases.md](docs/design/ai_vtuber_development_phases.md)（開発フェーズ）にあります。
 
-## いまの状態：フェーズ1（文字会話 MVP）完了
+## いまの状態：フェーズ2（アバターと音声）完了
 
-設定した人格で会話し、再起動を越えて過去の経験を使って答えられる状態までを実装しています。
+設定した人格で会話し、再起動を越えて過去の経験を使って答え、用意した画像の
+キャラクターが声と口パクで返答する状態までを実装しています。
+
+フェーズ1（文字会話 MVP）
 
 - React の文字チャット画面
 - FastAPI から Ollama への接続（LLM 接続モジュール経由で後から差し替え可能）
@@ -20,10 +23,20 @@
 - 実行記録（モデルの版、生成設定、参照した記憶、応答時間、トークン数）
 - 理想の返答の記録
 
-実装の記録は [docs/result/phase1.md](docs/result/phase1.md)、残っている課題は
+フェーズ2（アバターと音声）
+
+- FastAPI から VOICEVOX Engine への接続（音声合成モジュール経由で差し替え可能）
+- 返答の読み上げと、重複しない再生・停止
+- 再生の開始・完了・中断の記録（生成しただけの文章と区別する）
+- PNG アバターの表示、音量に合わせた口パク、まばたき
+- 読み上げている本文をそのまま出す字幕
+- 待ち時間の計測（記憶検索・生成・合成・再生開始までを区間ごとに記録）
+
+実装の記録は [docs/result/phase1.md](docs/result/phase1.md) と
+[docs/result/phase2.md](docs/result/phase2.md)、残っている課題は
 [docs/issues/issues.md](docs/issues/issues.md) にあります。
 
-フェーズ2以降（音声・アバター・検索・配信・学習）は未着手です。
+フェーズ3以降（検索・クラウド連携・配信・学習）は未着手です。
 
 ## 構成
 
