@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import ConversationAgent, get_agent
 from app.agent.memory_store import get_or_create_speaker
+from app.agent.turn_lock import conversation_locks
 from app.db import get_session
 from app.llm.base import LLMError
 from app.models import Conversation, ConversationMode
@@ -46,20 +47,25 @@ async def chat(
         external_id=payload.speaker.external_id,
         display_name=payload.speaker.display_name,
     )
+    # 発言の保存も含めてロックの内側で行う。生成中に次の発言が割り込むと、
+    # 履歴が「質問A → 質問B → 返答B → 返答A」の順になるため。
+    await session.commit()
 
-    try:
-        result = await agent.respond(
-            session,
-            conversation=conversation,
-            speaker=speaker,
-            text=payload.text,
-        )
-    except LLMError as exc:
-        # 相手の発言は生成前にコミット済みなので、履歴に残ったまま失敗を伝える。
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    async with conversation_locks.hold(conversation.id):
+        try:
+            result = await agent.respond(
+                session,
+                conversation=conversation,
+                speaker=speaker,
+                text=payload.text,
+            )
+        except LLMError as exc:
+            # 相手の発言は生成前にコミット済みなので、履歴に残ったまま失敗を伝える。
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
-    if conversation.title is None:
-        conversation.title = payload.text[:40]
+        if conversation.title is None:
+            conversation.title = payload.text[:40]
+        await session.commit()
 
     return ChatResponse(
         conversation_id=conversation.id,

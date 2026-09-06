@@ -153,11 +153,13 @@ function Basis({ entry }: { entry: ChatResponse }) {
               {item.memory.content}
               <div className="muted small">
                 #{item.memory.id} · {item.reason} · 点数 {item.score}
-                {item.memory.source_message_id !== null && (
+                {item.memory.source_message_id !== null ? (
                   <>
                     {" · "}
                     <SourceMessage messageId={item.memory.source_message_id} />
                   </>
+                ) : (
+                  <span className="tag warn"> 根拠未確認</span>
                 )}
               </div>
             </li>

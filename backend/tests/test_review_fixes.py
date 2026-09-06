@@ -1,22 +1,35 @@
-"""レビュー指摘（docs/codex/phase1_review.md）の再発を検知するテスト。"""
+"""レビュー指摘の再発を検知するテスト。
+
+対象：docs/review/codex/phase1_review.md と phase1_review2.md
+"""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+from datetime import timedelta
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.models import Conversation, Memory
+from app.models import Conversation, Memory, utcnow
 from tests.conftest import FakeLLM
 
 
-async def _say(client: AsyncClient, text: str, speaker: dict | None = None) -> dict:
+async def _say(
+    client: AsyncClient,
+    text: str,
+    speaker: dict | None = None,
+    conversation_id: int | None = None,
+) -> dict:
+    """発言を送る。conversation_id を渡さないと新しい会話になる点に注意。"""
     payload: dict = {"text": text}
     if speaker is not None:
         payload["speaker"] = speaker
+    if conversation_id is not None:
+        payload["conversation_id"] = conversation_id
     response = await client.post("/api/chat", json=payload)
     assert response.status_code == 200, response.text
     return response.json()
@@ -202,8 +215,11 @@ async def test_candidate_keeps_its_own_source_message(
 ):
     """根拠が一律で最後の発言にならず、候補ごとの発言を指す。"""
     first = await _say(client, "写真を撮るのが趣味なんだ")
+    conversation_id = first["conversation_id"]
     photo_message_id = first["user_message"]["id"]
-    last = await _say(client, "今日はここまでにしよう")
+    last = await _say(client, "今日はここまでにしよう", conversation_id=conversation_id)
+    # 同じ会話の 2 ターン目であることを確かめる。別会話だと検証にならない。
+    assert last["conversation_id"] == conversation_id
     last_message_id = last["user_message"]["id"]
     assert photo_message_id != last_message_id
 
@@ -243,20 +259,24 @@ async def test_candidate_keeps_its_own_source_message(
     assert message["content"] == "写真を撮るのが趣味なんだ"
 
 
-async def test_invented_source_message_falls_back(client: AsyncClient, fake_llm: FakeLLM):
-    """存在しない発言番号を返されたら、その会話の発言に寄せる。"""
-    first = await _say(client, "架空の番号を返す会話")
+async def test_invented_source_message_is_left_unverified(
+    client: AsyncClient, fake_llm: FakeLLM
+):
+    """存在しない発言番号を返されたら、無関係な発言へ付け替えず未確認にする。"""
+    first = await _say(client, "写真を撮るのが趣味なんだ")
+    conversation_id = first["conversation_id"]
+    last = await _say(client, "今日はここまでにしよう", conversation_id=conversation_id)
+
     fake_llm.push(
         json.dumps(
-            [{"kind": "experience", "content": "何かの経験", "certainty": "fact",
-              "keywords": "経験", "about_partner": False, "source_message_id": 9999}],
+            [{"kind": "about_person", "content": "開発者の趣味は写真", "certainty": "fact",
+              "keywords": "写真", "about_partner": True, "source_message_id": 9999}],
             ensure_ascii=False,
         )
     )
-    candidates = (
-        await client.post(f"/api/conversations/{first['conversation_id']}/end")
-    ).json()
-    assert candidates[0]["source_message_id"] == first["user_message"]["id"]
+    candidates = (await client.post(f"/api/conversations/{conversation_id}/end")).json()
+    assert candidates[0]["source_message_id"] is None
+    assert candidates[0]["source_message_id"] != last["user_message"]["id"]
 
 
 # --- #7 画面と会話で同じ検索結果になること ---------------------------------
@@ -325,3 +345,125 @@ async def test_memory_revision_records_visibility_scope(client: AsyncClient):
     memory_id = created.json()["id"]
     revisions = (await client.get(f"/api/memories/{memory_id}/revisions")).json()
     assert revisions[0]["after"]["visible_to_speaker_id"] == speaker_id
+
+
+# --- 再評価（phase1_review2.md）で見つかった問題 ---------------------------
+
+
+async def test_migrated_candidate_keeps_visibility_scope(client: AsyncClient, fake_llm: FakeLLM):
+    """振り返りで作る候補は、必ず参照範囲を持つ。
+
+    移行前の候補が visible_to_speaker_id=NULL のままだと、採用したときに
+    相手を限定しない記憶になる。マイグレーションでの補完に加え、
+    新規に作る候補が空にならないことをここで固定する。
+    """
+    first = await _say(client, "内緒の話をした", speaker=SPEAKER_A)
+    speaker_a_id = first["user_message"]["speaker_id"]
+    fake_llm.push(
+        json.dumps(
+            [{"kind": "experience", "content": "アリスと内緒の計画を立てた", "certainty": "fact",
+              "keywords": "内緒 計画", "about_partner": False,
+              "source_message_id": first["user_message"]["id"]}],
+            ensure_ascii=False,
+        )
+    )
+    candidates = (
+        await client.post(f"/api/conversations/{first['conversation_id']}/end")
+    ).json()
+    assert candidates[0]["subject_speaker_id"] is None
+    assert candidates[0]["visible_to_speaker_id"] == speaker_a_id
+
+    accepted = await client.post(
+        f"/api/conversations/candidates/{candidates[0]['id']}/decide",
+        json={"decision": "accept"},
+    )
+    memory_id = accepted.json()["accepted_memory_id"]
+
+    # 別の相手との会話には渡らない。
+    turn_b = await _say(client, "内緒の計画はどうなった？", speaker=SPEAKER_B)
+    assert memory_id not in [m["memory"]["id"] for m in turn_b["used_memories"]]
+
+
+async def test_same_conversation_keeps_turn_order(client: AsyncClient, fake_llm: FakeLLM):
+    """同じ会話へ同時に送っても、質問と返答の順序が入れ替わらない。
+
+    生成前にトランザクションを閉じた結果、会話単位の直列化が無いと
+    「質問A → 質問B → 返答B → 返答A」の順に記録されていた。
+    """
+    first = await _say(client, "最初")
+    conversation_id = first["conversation_id"]
+
+    fake_llm.entered.clear()
+    fake_llm.gate = asyncio.Event()
+    fake_llm.scripted = ["返答A", "返答B"]
+
+    slow = asyncio.create_task(
+        _say(client, "質問A", conversation_id=conversation_id)
+    )
+    await asyncio.wait_for(fake_llm.entered.wait(), timeout=5)
+
+    second = asyncio.create_task(
+        _say(client, "質問B", conversation_id=conversation_id)
+    )
+    await asyncio.sleep(0.05)  # 2 本目がロック待ちに入る時間を与える
+    fake_llm.gate.set()
+    await asyncio.wait_for(asyncio.gather(slow, second), timeout=5)
+
+    detail = (await client.get(f"/api/conversations/{conversation_id}")).json()
+    order = [m["content"] for m in detail["messages"]]
+    assert order.index("質問A") < order.index("返答A") < order.index("質問B")
+    assert order.index("質問B") < order.index("返答B")
+
+
+async def test_interrupted_reflection_can_be_retried(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
+):
+    """振り返り中に中断されても、時間が経てばやり直せる。
+
+    以前は生成前に ended_at を確定し、戻すのは LLMError のときだけだったため、
+    キャンセルされると候補0件のまま再試行が409になっていた。
+    """
+    first = await _say(client, "中断される会話")
+    conversation_id = first["conversation_id"]
+
+    fake_llm.entered.clear()
+    fake_llm.gate = asyncio.Event()
+    task = asyncio.create_task(client.post(f"/api/conversations/{conversation_id}/end"))
+    await asyncio.wait_for(fake_llm.entered.wait(), timeout=5)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    fake_llm.gate.set()
+
+    candidates = (
+        await client.get(f"/api/conversations/{conversation_id}/candidates")
+    ).json()
+    assert candidates == []
+
+    # 処理中の間は再試行を弾く。
+    busy = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert busy.status_code == 409
+
+    # 一定時間が過ぎたら回収できる。
+    async with session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        conversation.reflection_started_at = utcnow() - timedelta(hours=1)
+        await session.commit()
+
+    fake_llm.gate = None
+    fake_llm.scripted = ["[]"]
+    retried = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert retried.status_code == 200
+
+
+async def test_completed_reflection_is_not_repeated(client: AsyncClient, fake_llm: FakeLLM):
+    """完了した振り返りは、時間が経っても再実行しない。"""
+    first = await _say(client, "一度だけ振り返る会話")
+    conversation_id = first["conversation_id"]
+    fake_llm.push("[]")
+    assert (
+        await client.post(f"/api/conversations/{conversation_id}/end")
+    ).status_code == 200
+
+    again = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert again.status_code == 409

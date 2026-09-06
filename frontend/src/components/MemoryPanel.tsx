@@ -176,11 +176,13 @@ function MemoryRow({
 
       <div className="muted small">
         {memory.keywords && `キーワード: ${memory.keywords}`}
-        {memory.source_message_id !== null && (
+        {memory.source_message_id !== null ? (
           <>
             {" · "}
             <SourceMessage messageId={memory.source_message_id} />
           </>
+        ) : (
+          <span className="tag warn"> 根拠未確認</span>
         )}
         {hint && ` · ${hint}`}
       </div>

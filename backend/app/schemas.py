@@ -84,6 +84,8 @@ class ConversationOut(ORMModel):
     title: str | None
     started_at: datetime
     ended_at: datetime | None
+    reflection_started_at: datetime | None
+    reflection_completed_at: datetime | None
 
 
 class ConversationDetail(ConversationOut):

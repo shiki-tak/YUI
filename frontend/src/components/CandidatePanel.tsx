@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api";
 import type { MemoryCandidate } from "../types";
 import { CERTAINTY_LABEL, KIND_LABEL } from "../types";
+import { SourceMessage } from "./SourceMessage";
 
 interface Props {
   candidates: MemoryCandidate[];
@@ -67,9 +68,17 @@ function CandidateRow({ candidate, onDecided }: RowProps) {
         <span className="muted small">会話 #{candidate.conversation_id}</span>
       </div>
       <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={2} />
-      {candidate.keywords && (
-        <div className="muted small">キーワード: {candidate.keywords}</div>
-      )}
+      <div className="muted small">
+        {candidate.keywords && `キーワード: ${candidate.keywords}`}
+        {candidate.source_message_id !== null ? (
+          <>
+            {candidate.keywords && " · "}
+            <SourceMessage messageId={candidate.source_message_id} />
+          </>
+        ) : (
+          <span className="tag warn"> 根拠未確認</span>
+        )}
+      </div>
       {error && <p className="error small">{error}</p>}
       <div className="row">
         <button type="button" onClick={() => decide("accept")} disabled={busy}>

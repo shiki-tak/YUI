@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/yui.db"
 
     # 記憶検索・会話履歴
+    # 振り返りが中断された場合に、やり直しを許すまでの時間。
+    # LLM 自体のタイムアウトより長くとる。
+    reflection_stale_seconds: float = 180.0
+
     memory_retrieval_limit: int = 8
     recent_message_limit: int = 12
 

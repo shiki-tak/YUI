@@ -128,6 +128,10 @@ class Conversation(Base):
     title: Mapped[str | None] = mapped_column(String(200))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 振り返りの「処理中」と「完了」を分ける。中断やプロセス停止で
+    # 開始だけが残った場合に、やり直せるようにするため。
+    reflection_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reflection_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",

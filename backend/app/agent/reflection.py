@@ -137,17 +137,14 @@ async def extract_candidates(
 
     # 存在しない発言を根拠にしないよう、この会話の発言だけを許す。
     valid_message_ids = {m.id for m in messages}
-    fallback_message_id = next(
-        (m.id for m in reversed(messages) if m.speaker_kind == SpeakerKind.USER.value),
-        None,
-    )
 
     candidates: list[MemoryCandidate] = []
     for payload in _parse_candidates(response.text):
         source_message_id = payload.source_message_id
         if source_message_id not in valid_message_ids:
-            # 番号を作られた場合は、直近の発言に寄せたうえで根拠なしとは扱わない。
-            source_message_id = fallback_message_id
+            # 番号を作られた場合は根拠未確認として残す。直近の発言へ寄せると、
+            # 無関係な発言を確かな根拠として保存してしまうため。
+            source_message_id = None
         candidate = MemoryCandidate(
             conversation_id=conversation.id,
             kind=payload.kind,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +11,8 @@ from sqlalchemy.orm import selectinload
 
 from app.agent.memory_store import create_memory
 from app.agent.reflection import extract_candidates
+from app.agent.turn_lock import conversation_locks
+from app.config import Settings, get_settings
 from app.db import get_session
 from app.llm import get_llm_client
 from app.llm.base import LLMClient, LLMError
@@ -36,6 +40,16 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+async def _release_reflection(session: AsyncSession, conversation_id: int) -> None:
+    """振り返りの開始を取り消し、やり直せる状態に戻す。"""
+    await session.execute(
+        update(Conversation)
+        .where(Conversation.id == conversation_id)
+        .values(reflection_started_at=None)
+    )
+    await session.commit()
 
 
 @router.get("", response_model=list[ConversationOut])
@@ -80,44 +94,64 @@ async def end_conversation(
     conversation_id: int,
     session: AsyncSession = Depends(get_session),
     llm: LLMClient = Depends(get_llm_client),
+    settings: Settings = Depends(get_settings),
 ) -> list[MemoryCandidate]:
     """会話を終了し、長期記憶の候補を抽出する。採用は別途 /candidates で行う。"""
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
+    if conversation.reflection_completed_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "この会話はすでに終了しています。")
 
-    # 終了状態の確定を 1 文の UPDATE で行い、同時に終了した場合でも
-    # 振り返りが二重に走らないようにする。
+    # 振り返りの開始を 1 文の UPDATE で確定させ、同時実行では片方だけを通す。
+    # 中断やプロセス停止で開始だけが残った場合は、一定時間後にやり直せる。
+    now = utcnow()
+    stale_before = now - timedelta(seconds=settings.reflection_stale_seconds)
     claimed = await session.execute(
         update(Conversation)
-        .where(Conversation.id == conversation_id, Conversation.ended_at.is_(None))
-        .values(ended_at=utcnow())
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.reflection_completed_at.is_(None),
+            (Conversation.reflection_started_at.is_(None))
+            | (Conversation.reflection_started_at < stale_before),
+        )
+        .values(reflection_started_at=now)
+        # SQLite は timezone を落として返すため、条件の評価を Python 側で
+        # 行わせない。判定は SQL に任せる。
+        .execution_options(synchronize_session=False)
     )
     if claimed.rowcount == 0:
-        raise HTTPException(status.HTTP_409_CONFLICT, "この会話はすでに終了しています。")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "この会話の振り返りは実行中です。しばらく待って再試行してください。",
+        )
 
     partner = await _last_partner(session, conversation_id)
     # 生成に入る前にロックを手放す（会話 API と同じ理由）。
     await session.commit()
 
-    try:
-        candidates = await extract_candidates(
-            session,
-            llm=llm,
-            conversation=conversation,
-            partner_speaker_id=partner.id if partner else None,
-            partner_name=partner.display_name if partner else "相手",
-            character_name=BASE_PERSONA.name,
-        )
-    except LLMError as exc:
-        # 抽出できなかった会話を終了済みのまま残すと、やり直せなくなる。
+    async with conversation_locks.hold(conversation_id):
+        try:
+            candidates = await extract_candidates(
+                session,
+                llm=llm,
+                conversation=conversation,
+                partner_speaker_id=partner.id if partner else None,
+                partner_name=partner.display_name if partner else "相手",
+                character_name=BASE_PERSONA.name,
+            )
+        except LLMError as exc:
+            # 抽出できなかった会話を処理中のまま残すと、やり直せなくなる。
+            await _release_reflection(session, conversation_id)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+        completed = utcnow()
         await session.execute(
             update(Conversation)
             .where(Conversation.id == conversation_id)
-            .values(ended_at=None)
+            .values(reflection_completed_at=completed, ended_at=completed)
         )
         await session.commit()
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
     return candidates
 
