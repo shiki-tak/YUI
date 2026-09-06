@@ -168,6 +168,7 @@ class Memory(Base):
     __tablename__ = "memories"
     __table_args__ = (
         Index("ix_memories_status_subject", "status", "subject_speaker_id"),
+        Index("ix_memories_visible_to", "visible_to_speaker_id"),
         Index("ix_memories_occurred_at", "occurred_at"),
     )
 
@@ -176,6 +177,9 @@ class Memory(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # 「誰について」の記憶か。キャラクター自身の経験なら NULL。
     subject_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+    # 「誰との会話で参照してよいか」。非公開記憶をその相手との会話に限定する。
+    # NULL は相手を限定しない記憶。「誰について」とは別の軸として持つ。
+    visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
     certainty: Mapped[str] = mapped_column(String(16), default=Certainty.FACT, nullable=False)
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default=MemoryStatus.ACTIVE, nullable=False)
@@ -192,7 +196,7 @@ class Memory(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    subject: Mapped[Speaker | None] = relationship()
+    subject: Mapped[Speaker | None] = relationship(foreign_keys=[subject_speaker_id])
     source_message: Mapped[Message | None] = relationship()
 
 
@@ -225,6 +229,7 @@ class MemoryCandidate(Base):
     kind: Mapped[str] = mapped_column(String(24), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     subject_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+    visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
     certainty: Mapped[str] = mapped_column(String(16), default=Certainty.INFERENCE, nullable=False)
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)

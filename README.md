@@ -3,8 +3,8 @@
 同じ人格と記憶を持つ AI VTuber キャラクター。普段は開発者と会話し、YouTube では視聴者と交流し、
 その経験を次の話題選びや行動に反映することを目指します。
 
-設計は [design/ai_vtuber_architecture.md](design/ai_vtuber_architecture.md)（全体構成）と
-[design/ai_vtuber_development_phases.md](design/ai_vtuber_development_phases.md)（開発フェーズ）にあります。
+設計は [docs/design/ai_vtuber_architecture.md](docs/design/ai_vtuber_architecture.md)（全体構成）と
+[docs/design/ai_vtuber_development_phases.md](docs/design/ai_vtuber_development_phases.md)（開発フェーズ）にあります。
 
 ## いまの状態：フェーズ1（文字会話 MVP）
 
@@ -32,7 +32,8 @@ backend/    FastAPI。人格・記憶・会話進行・振り返り・実行記�
     api/      HTTP API
   alembic/  DB のテーブル定義の変更履歴
 frontend/   React + TypeScript + Vite。開発用の操作画面
-design/     設計書
+docs/design/   設計書
+docs/codex/    レビュー結果
 ```
 
 ## 準備

@@ -37,7 +37,8 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
   "content": "一文で書いた覚えておく内容",
   "certainty": "fact" | "inference",
   "keywords": "検索用の語を空白区切りで3〜6個",
-  "about_partner": true | false
+  "about_partner": true | false,
+  "source_message_id": 根拠になった発言の番号（会話の [#番号] から選ぶ）
 }
 
 規則:
@@ -47,6 +48,8 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 - 明言された内容は "fact"、読み取っただけの推測は "inference" とする。
 - 次に話すと決めたことは必ず promise として残す。
 - あいさつ、その場限りのやり取り、既に一般常識であることは出さない。
+- source_message_id には、その内容の根拠になった発言の番号を1つだけ選ぶ。
+  会話に出てくる [#番号] のいずれかで、推測して番号を作らない。
 - 該当が無ければ [] とだけ出力する。
 - JSON 配列だけを出力し、説明文やコードブロックは付けない。
 """
@@ -58,6 +61,7 @@ class CandidatePayload(BaseModel):
     certainty: str = Certainty.INFERENCE.value
     keywords: str = ""
     about_partner: bool = False
+    source_message_id: int | None = None
 
 
 def _parse_candidates(text: str) -> list[CandidatePayload]:
@@ -90,6 +94,7 @@ def _parse_candidates(text: str) -> list[CandidatePayload]:
 
 
 def format_transcript(messages: list[Message], partner_name: str, character_name: str) -> str:
+    """発言IDを付けて並べる。候補ごとに根拠の発言を指せるようにするため。"""
     lines = []
     for message in messages:
         who = (
@@ -97,7 +102,7 @@ def format_transcript(messages: list[Message], partner_name: str, character_name
             if message.speaker_kind == SpeakerKind.CHARACTER.value
             else partner_name
         )
-        lines.append(f"{who}: {message.content}")
+        lines.append(f"[#{message.id}] {who}: {message.content}")
     return "\n".join(lines)
 
 
@@ -130,22 +135,30 @@ async def extract_candidates(
         options={"temperature": 0.2},
     )
 
-    last_user_message_id = next(
+    # 存在しない発言を根拠にしないよう、この会話の発言だけを許す。
+    valid_message_ids = {m.id for m in messages}
+    fallback_message_id = next(
         (m.id for m in reversed(messages) if m.speaker_kind == SpeakerKind.USER.value),
         None,
     )
 
     candidates: list[MemoryCandidate] = []
     for payload in _parse_candidates(response.text):
+        source_message_id = payload.source_message_id
+        if source_message_id not in valid_message_ids:
+            # 番号を作られた場合は、直近の発言に寄せたうえで根拠なしとは扱わない。
+            source_message_id = fallback_message_id
         candidate = MemoryCandidate(
             conversation_id=conversation.id,
             kind=payload.kind,
             content=payload.content.strip(),
             subject_speaker_id=partner_speaker_id if payload.about_partner else None,
+            # 非公開の記憶は、この会話の相手との会話でだけ参照する。
+            visible_to_speaker_id=partner_speaker_id,
             certainty=payload.certainty,
             visibility=Visibility.PRIVATE.value,
             keywords=payload.keywords.strip(),
-            source_message_id=last_user_message_id,
+            source_message_id=source_message_id,
             status=CandidateStatus.PENDING.value,
         )
         session.add(candidate)

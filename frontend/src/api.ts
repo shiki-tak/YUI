@@ -1,5 +1,6 @@
 // FastAPI への呼び出し。開発中は Vite の proxy 経由で同一オリジンになる。
 
+import { SELF_SPEAKER } from "./types";
 import type {
   ChatResponse,
   Health,
@@ -7,8 +8,10 @@ import type {
   Memory,
   MemoryCandidate,
   MemoryRevision,
+  Message,
   RetrievedMemory,
   RunRecord,
+  Speaker,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -35,8 +38,18 @@ export const api = {
   chat: (text: string, conversationId: number | null) =>
     request<ChatResponse>("/chat", {
       method: "POST",
-      body: JSON.stringify({ text, conversation_id: conversationId }),
+      // 誰として話しているかを明示する。バックエンドの既定に頼らない。
+      body: JSON.stringify({
+        text,
+        conversation_id: conversationId,
+        speaker: SELF_SPEAKER,
+      }),
     }),
+
+  speakers: () => request<Speaker[]>("/speakers"),
+
+  message: (messageId: number) =>
+    request<Message>(`/conversations/messages/${messageId}`),
 
   endConversation: (conversationId: number) =>
     request<MemoryCandidate[]>(`/conversations/${conversationId}/end`, {
@@ -67,10 +80,14 @@ export const api = {
   memories: (includeInactive: boolean) =>
     request<Memory[]>(`/memories?include_inactive=${includeInactive}`),
 
-  searchMemories: (q: string) =>
-    request<{ query: string; results: RetrievedMemory[] }>(
-      `/memories/search?q=${encodeURIComponent(q)}`,
-    ),
+  // 会話と同じ経路で検索するため、相手のIDを必ず渡す。
+  searchMemories: (q: string, speakerId: number | null) => {
+    const params = new URLSearchParams({ q });
+    if (speakerId !== null) params.set("speaker_id", String(speakerId));
+    return request<{ query: string; results: RetrievedMemory[] }>(
+      `/memories/search?${params.toString()}`,
+    );
+  },
 
   correctMemory: (
     memoryId: number,

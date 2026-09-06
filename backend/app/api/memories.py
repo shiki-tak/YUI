@@ -92,6 +92,7 @@ async def add_memory(
         kind=payload.kind.value,
         content=payload.content,
         subject_speaker_id=payload.subject_speaker_id,
+        visible_to_speaker_id=payload.visible_to_speaker_id,
         certainty=payload.certainty.value,
         visibility=payload.visibility.value,
         keywords=payload.keywords,

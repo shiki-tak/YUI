@@ -96,6 +96,12 @@ class ConversationAgent:
             user_text=text,
         )
 
+        # 生成に入る前にトランザクションを閉じる。SQLite は書き込みロックを
+        # 1 つしか持てないため、応答を待つ間ロックを保持すると、他の会話や
+        # 記憶の訂正が「database is locked」で失敗する。
+        # 相手の発言はこの時点で確定させ、生成に失敗しても履歴には残す。
+        await session.commit()
+
         # LLMError はここでは握らず、API 層で 503 として返す。
         response = await self._llm.chat(messages)
 

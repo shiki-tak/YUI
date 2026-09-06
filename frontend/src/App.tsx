@@ -4,6 +4,7 @@ import { CandidatePanel } from "./components/CandidatePanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { MemoryPanel } from "./components/MemoryPanel";
 import type { ChatResponse, Health, MemoryCandidate } from "./types";
+import { SELF_SPEAKER } from "./types";
 
 type Tab = "memories" | "candidates";
 
@@ -14,9 +15,22 @@ export default function App() {
   const [candidates, setCandidates] = useState<MemoryCandidate[]>([]);
   const [tab, setTab] = useState<Tab>("memories");
   const [memoryRefresh, setMemoryRefresh] = useState(0);
+  // 記憶検索を会話と同じ条件で行うために、自分の speaker id を解決する。
+  const [selfSpeakerId, setSelfSpeakerId] = useState<number | null>(null);
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null));
+    api
+      .speakers()
+      .then((speakers) => {
+        const self = speakers.find(
+          (s) =>
+            s.source === SELF_SPEAKER.source &&
+            s.external_id === SELF_SPEAKER.external_id,
+        );
+        setSelfSpeakerId(self ? self.id : null);
+      })
+      .catch(() => setSelfSpeakerId(null));
   }, []);
 
   const pendingCount = candidates.filter((c) => c.status === "pending").length;
@@ -43,6 +57,10 @@ export default function App() {
           onEntry={(entry) => {
             setConversationId(entry.conversation_id);
             setEntries((prev) => [...prev, entry]);
+            if (selfSpeakerId === null) {
+              // 初回の会話で相手が作られるので、ここで解決しておく。
+              setSelfSpeakerId(entry.user_message.speaker_id);
+            }
           }}
           onCandidates={(list) => {
             setCandidates(list);
@@ -74,7 +92,7 @@ export default function App() {
           </nav>
 
           {tab === "memories" ? (
-            <MemoryPanel refreshKey={memoryRefresh} />
+            <MemoryPanel refreshKey={memoryRefresh} speakerId={selfSpeakerId} />
           ) : (
             <CandidatePanel
               candidates={candidates}

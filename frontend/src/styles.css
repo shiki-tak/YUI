@@ -334,3 +334,10 @@ details summary {
   color: var(--accent);
   font-size: 12px;
 }
+
+.source-message-body {
+  display: block;
+  margin-top: 2px;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+}

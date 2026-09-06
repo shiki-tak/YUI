@@ -6,6 +6,7 @@ LLM は共通インターフェース（LLMClient）越しに差し替える。�
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -33,6 +34,9 @@ class FakeLLM(LLMClient):
         self.calls: list[list[ChatMessage]] = []
         self.scripted: list[str] = []
         self.default = "はい、覚えていますよ。"
+        # 生成中の状態を再現するための門。gate を待たせると応答待ちになる。
+        self.entered = asyncio.Event()
+        self.gate: asyncio.Event | None = None
 
     def push(self, text: str) -> None:
         self.scripted.append(text)
@@ -45,6 +49,9 @@ class FakeLLM(LLMClient):
         self, messages: list[ChatMessage], *, options: dict[str, Any] | None = None
     ) -> LLMResponse:
         self.calls.append(messages)
+        self.entered.set()
+        if self.gate is not None:
+            await self.gate.wait()
         text = self.scripted.pop(0) if self.scripted else self.default
         return LLMResponse(
             text=text,
@@ -67,12 +74,19 @@ def fake_llm() -> FakeLLM:
 
 
 @pytest_asyncio.fixture
-async def client(tmp_path, fake_llm: FakeLLM) -> AsyncIterator[AsyncClient]:
+async def session_factory(tmp_path) -> AsyncIterator[async_sessionmaker]:
+    """テスト用の一時DB。通常利用の会話・記憶は変更しない。"""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/test.db")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
 
+
+@pytest_asyncio.fixture
+async def client(
+    session_factory: async_sessionmaker, fake_llm: FakeLLM
+) -> AsyncIterator[AsyncClient]:
     async def override_session():
         async with session_factory() as session:
             try:
@@ -92,4 +106,3 @@ async def client(tmp_path, fake_llm: FakeLLM) -> AsyncIterator[AsyncClient]:
         yield http_client
 
     app.dependency_overrides.clear()
-    await engine.dispose()

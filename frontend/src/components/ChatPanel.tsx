@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { ChatResponse, MemoryCandidate, RunRecord } from "../types";
 import { CERTAINTY_LABEL, KIND_LABEL } from "../types";
+import { SourceMessage } from "./SourceMessage";
 
 interface Props {
   conversationId: number | null;
@@ -152,8 +153,12 @@ function Basis({ entry }: { entry: ChatResponse }) {
               {item.memory.content}
               <div className="muted small">
                 #{item.memory.id} · {item.reason} · 点数 {item.score}
-                {item.memory.source_message_id !== null &&
-                  ` · 根拠の発言 #${item.memory.source_message_id}`}
+                {item.memory.source_message_id !== null && (
+                  <>
+                    {" · "}
+                    <SourceMessage messageId={item.memory.source_message_id} />
+                  </>
+                )}
               </div>
             </li>
           ))}

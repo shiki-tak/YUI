@@ -103,11 +103,25 @@ async def get_or_create_speaker(
     return speaker
 
 
-def _visibility_filter(mode: str) -> list[str]:
-    """配信モードでは公開可能な記憶だけを使う。"""
+def _access_condition(mode: str, speaker_id: int | None):
+    """その会話でこの記憶を参照してよいかの条件。
+
+    「誰についての記憶か」（subject_speaker_id）とは別の軸として、
+    「誰との会話で参照してよいか」（visible_to_speaker_id）で絞る。
+    非公開記憶が、由来と関係のない相手との会話へ渡らないようにする。
+    """
     if mode == ConversationMode.STREAM:
-        return [Visibility.PUBLIC.value]
-    return [Visibility.PRIVATE.value, Visibility.PUBLIC.value]
+        # 配信では公開可能な記憶だけを使う。
+        return Memory.visibility == Visibility.PUBLIC.value
+
+    # ローカルでは、公開可能な記憶と、相手を限定しない記憶と、
+    # この相手との会話で参照してよい記憶を使う。
+    condition = (Memory.visibility == Visibility.PUBLIC.value) | (
+        Memory.visible_to_speaker_id.is_(None)
+    )
+    if speaker_id is not None:
+        condition = condition | (Memory.visible_to_speaker_id == speaker_id)
+    return condition
 
 
 async def search_memories(
@@ -129,7 +143,7 @@ async def search_memories(
     now = now or utcnow()
     stmt = select(Memory).where(
         Memory.status == MemoryStatus.ACTIVE.value,
-        Memory.visibility.in_(_visibility_filter(mode)),
+        _access_condition(mode, speaker_id),
     )
     if speaker_id is not None:
         stmt = stmt.where(
@@ -201,6 +215,7 @@ def snapshot(memory: Memory) -> dict:
         "kind": memory.kind,
         "content": memory.content,
         "subject_speaker_id": memory.subject_speaker_id,
+        "visible_to_speaker_id": memory.visible_to_speaker_id,
         "certainty": memory.certainty,
         "visibility": memory.visibility,
         "status": memory.status,
@@ -235,6 +250,7 @@ async def create_memory(
     kind: str,
     content: str,
     subject_speaker_id: int | None = None,
+    visible_to_speaker_id: int | None = None,
     certainty: str = Certainty.FACT.value,
     visibility: str = Visibility.PRIVATE.value,
     keywords: str = "",
@@ -247,6 +263,7 @@ async def create_memory(
         kind=kind,
         content=content,
         subject_speaker_id=subject_speaker_id,
+        visible_to_speaker_id=visible_to_speaker_id,
         certainty=certainty,
         visibility=visibility,
         keywords=keywords,

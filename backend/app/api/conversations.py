@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -31,6 +31,7 @@ from app.schemas import (
     IdealResponseCreate,
     IdealResponseOut,
     MemoryCandidateOut,
+    MessageOut,
     RunRecordDetail,
 )
 
@@ -85,17 +86,20 @@ async def end_conversation(
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
 
-    existing = (
-        await session.execute(
-            select(MemoryCandidate).where(MemoryCandidate.conversation_id == conversation_id)
-        )
-    ).scalars()
-    if any(True for _ in existing):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "この会話の記憶候補はすでに抽出されています。"
-        )
+    # 終了状態の確定を 1 文の UPDATE で行い、同時に終了した場合でも
+    # 振り返りが二重に走らないようにする。
+    claimed = await session.execute(
+        update(Conversation)
+        .where(Conversation.id == conversation_id, Conversation.ended_at.is_(None))
+        .values(ended_at=utcnow())
+    )
+    if claimed.rowcount == 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, "この会話はすでに終了しています。")
 
     partner = await _last_partner(session, conversation_id)
+    # 生成に入る前にロックを手放す（会話 API と同じ理由）。
+    await session.commit()
+
     try:
         candidates = await extract_candidates(
             session,
@@ -106,9 +110,15 @@ async def end_conversation(
             character_name=BASE_PERSONA.name,
         )
     except LLMError as exc:
+        # 抽出できなかった会話を終了済みのまま残すと、やり直せなくなる。
+        await session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(ended_at=None)
+        )
+        await session.commit()
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
-    conversation.ended_at = utcnow()
     return candidates
 
 
@@ -146,6 +156,7 @@ async def decide_candidate(
         kind=(payload.kind.value if payload.kind else candidate.kind),
         content=(payload.content or candidate.content),
         subject_speaker_id=candidate.subject_speaker_id,
+        visible_to_speaker_id=candidate.visible_to_speaker_id,
         certainty=(payload.certainty.value if payload.certainty else candidate.certainty),
         visibility=(payload.visibility.value if payload.visibility else candidate.visibility),
         keywords=(payload.keywords if payload.keywords is not None else candidate.keywords),
@@ -156,6 +167,17 @@ async def decide_candidate(
     candidate.status = CandidateStatus.ACCEPTED.value
     candidate.accepted_memory_id = memory.id
     return candidate
+
+
+@router.get("/messages/{message_id}", response_model=MessageOut)
+async def get_message(
+    message_id: int, session: AsyncSession = Depends(get_session)
+) -> Message:
+    """根拠の発言の本文を確認する。記憶がどの発言から作られたかを追うため。"""
+    message = await session.get(Message, message_id)
+    if message is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "発言が見つかりません。")
+    return message
 
 
 @router.get("/messages/{message_id}/run", response_model=RunRecordDetail)

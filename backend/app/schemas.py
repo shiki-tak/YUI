@@ -37,6 +37,7 @@ class MemoryOut(ORMModel):
     kind: str
     content: str
     subject_speaker_id: int | None
+    visible_to_speaker_id: int | None
     certainty: str
     visibility: str
     status: str
@@ -115,6 +116,8 @@ class MemoryCreate(BaseModel):
     kind: MemoryKind
     content: str = Field(min_length=1, max_length=2000)
     subject_speaker_id: int | None = None
+    # 非公開の記憶を、この相手との会話に限定する。None は限定しない。
+    visible_to_speaker_id: int | None = None
     certainty: Certainty = Certainty.FACT
     visibility: Visibility = Visibility.PRIVATE
     keywords: str = ""
@@ -152,6 +155,7 @@ class MemoryCandidateOut(ORMModel):
     kind: str
     content: str
     subject_speaker_id: int | None
+    visible_to_speaker_id: int | None
     certainty: str
     visibility: str
     keywords: str

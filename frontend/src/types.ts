@@ -11,6 +11,13 @@ export type Certainty = "fact" | "inference";
 export type Visibility = "private" | "public";
 export type MemoryStatus = "active" | "corrected" | "deleted";
 
+export interface Speaker {
+  id: number;
+  source: string;
+  external_id: string;
+  display_name: string;
+}
+
 export interface Message {
   id: number;
   conversation_id: number;
@@ -27,6 +34,7 @@ export interface Memory {
   kind: MemoryKind;
   content: string;
   subject_speaker_id: number | null;
+  visible_to_speaker_id: number | null;
   certainty: Certainty;
   visibility: Visibility;
   status: MemoryStatus;
@@ -74,6 +82,7 @@ export interface MemoryCandidate {
   kind: MemoryKind;
   content: string;
   subject_speaker_id: number | null;
+  visible_to_speaker_id: number | null;
   certainty: Certainty;
   visibility: Visibility;
   keywords: string;
@@ -124,3 +133,10 @@ export const VISIBILITY_LABEL: Record<Visibility, string> = {
   private: "非公開",
   public: "配信で使える",
 };
+
+/** この画面を使っている相手。表示名ではなく source と external_id で同定する。 */
+export const SELF_SPEAKER = {
+  source: "local",
+  external_id: "developer",
+  display_name: "開発者",
+} as const;

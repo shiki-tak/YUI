@@ -2,8 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { Memory, MemoryRevision, RetrievedMemory } from "../types";
 import { CERTAINTY_LABEL, KIND_LABEL, VISIBILITY_LABEL } from "../types";
+import { SourceMessage } from "./SourceMessage";
 
-export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
+interface PanelProps {
+  refreshKey: number;
+  /** 会話と同じ条件で検索するための相手のID。 */
+  speakerId: number | null;
+}
+
+export function MemoryPanel({ refreshKey, speakerId }: PanelProps) {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [includeInactive, setIncludeInactive] = useState(false);
   const [query, setQuery] = useState("");
@@ -29,7 +36,7 @@ export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
       return;
     }
     try {
-      const result = await api.searchMemories(query.trim());
+      const result = await api.searchMemories(query.trim(), speakerId);
       setSearchResults(result.results);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -169,7 +176,12 @@ function MemoryRow({
 
       <div className="muted small">
         {memory.keywords && `キーワード: ${memory.keywords}`}
-        {memory.source_message_id !== null && ` · 根拠の発言 #${memory.source_message_id}`}
+        {memory.source_message_id !== null && (
+          <>
+            {" · "}
+            <SourceMessage messageId={memory.source_message_id} />
+          </>
+        )}
         {hint && ` · ${hint}`}
       </div>
 

@@ -55,8 +55,7 @@ async def chat(
             text=payload.text,
         )
     except LLMError as exc:
-        # 発言は会話履歴に残したうえで、生成できなかったことを伝える。
-        await session.commit()
+        # 相手の発言は生成前にコミット済みなので、履歴に残ったまま失敗を伝える。
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
     if conversation.title is None:

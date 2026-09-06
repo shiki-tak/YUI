@@ -22,7 +22,7 @@
 
 外部サービス以外は、初期段階ではMac上で実行します。破線は必要時だけ利用する経路です。
 
-![architecture](../images/architecture.png)
+![architecture](../../images/architecture.png)
 
 クラウドの分析結果は必要に応じてローカルLLMに渡し、共通の人格で返答を作ります。モデルの呼び出し順序や回数は、自作エージェントが管理します。
 
