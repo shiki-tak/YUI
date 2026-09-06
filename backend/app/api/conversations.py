@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -129,18 +130,22 @@ async def end_conversation(
         # プロセスが落ちて開始だけが残った場合を回収するためのもの。
         now = utcnow()
         stale_before = now - timedelta(seconds=settings.reflection_stale_seconds)
-        claimed = await session.execute(
-            update(Conversation)
-            .where(
-                Conversation.id == conversation_id,
-                Conversation.reflection_completed_at.is_(None),
-                (Conversation.reflection_started_at.is_(None))
-                | (Conversation.reflection_started_at < stale_before),
-            )
-            .values(reflection_started_at=now)
-            # SQLite は timezone を落として返すため、条件の評価を Python 側で
-            # 行わせない。判定は SQL に任せる。
-            .execution_options(synchronize_session=False)
+        # UPDATE の結果は CursorResult。rowcount で更新できたかを判定する。
+        claimed = cast(
+            "CursorResult[Any]",
+            await session.execute(
+                update(Conversation)
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.reflection_completed_at.is_(None),
+                    (Conversation.reflection_started_at.is_(None))
+                    | (Conversation.reflection_started_at < stale_before),
+                )
+                .values(reflection_started_at=now)
+                # SQLite は timezone を落として返すため、条件の評価を Python 側で
+                # 行わせない。判定は SQL に任せる。
+                .execution_options(synchronize_session=False)
+            ),
         )
         if claimed.rowcount == 0:
             raise HTTPException(

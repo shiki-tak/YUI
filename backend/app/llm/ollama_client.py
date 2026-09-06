@@ -67,13 +67,13 @@ class OllamaClient(LLMClient):
     ) -> LLMResponse:
         merged = {**self._default_options, **(options or {})}
         payload = [{"role": m.role, "content": m.content} for m in messages]
-        # think はオプションではなく最上位の引数。None のときは送らない。
-        extra = {} if self._think is None else {"think": self._think}
 
         started = time.perf_counter()
         try:
+            # think はオプションではなく最上位の引数。None はモデルの既定に任せる
+            # 意味で、省略した場合と同じ扱いになる。
             raw = await self._client.chat(
-                model=self.model, messages=payload, options=merged, **extra
+                model=self.model, messages=payload, options=merged, think=self._think
             )
         except ResponseError as exc:
             raise LLMError(f"Ollama がエラーを返しました（model={self.model}）: {exc}") from exc
@@ -95,7 +95,7 @@ class OllamaClient(LLMClient):
             model=self.model,
             model_digest=await self._model_digest(),
             # 実行記録に残す設定。think も再現に必要なので含める。
-            options={**merged, **extra},
+            options={**merged, "think": self._think},
             latency_ms=latency_ms,
             prompt_tokens=raw.prompt_eval_count,
             completion_tokens=raw.eval_count,

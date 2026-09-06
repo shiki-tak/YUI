@@ -11,7 +11,14 @@ from app.agent.turn_lock import conversation_locks
 from app.db import get_session
 from app.llm.base import LLMError
 from app.models import Conversation, ConversationMode
-from app.schemas import ChatRequest, ChatResponse, MemoryOut, RetrievedMemoryOut
+from app.schemas import (
+    ChatRequest,
+    ChatResponse,
+    MemoryOut,
+    MessageOut,
+    RetrievedMemoryOut,
+    RunRecordOut,
+)
 
 router = APIRouter(tags=["chat"])
 
@@ -87,9 +94,9 @@ async def chat(
 
     return ChatResponse(
         conversation_id=conversation.id,
-        user_message=result.user_message,
-        reply=result.reply_message,
-        run=result.run,
+        user_message=MessageOut.model_validate(result.user_message),
+        reply=MessageOut.model_validate(result.reply_message),
+        run=RunRecordOut.model_validate(result.run),
         used_memories=[
             RetrievedMemoryOut(
                 memory=MemoryOut.model_validate(item.memory),

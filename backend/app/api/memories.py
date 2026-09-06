@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
@@ -120,9 +121,11 @@ async def correct_memory(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "変更する項目がありません。")
 
     for field, value in changes.items():
-        if value is None and field in {"content", "kind", "certainty", "visibility", "keywords"}:
+        # 空にできるのは日時だけ。他の項目を None にする指定は無視する。
+        if value is None and field != "occurred_at":
             continue
-        setattr(memory, field, value.value if hasattr(value, "value") else value)
+        # kind・certainty・visibility は Enum で返るため、保存する値を取り出す。
+        setattr(memory, field, value.value if isinstance(value, Enum) else value)
 
     await session.flush()
     record_revision(
