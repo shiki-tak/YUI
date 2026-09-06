@@ -5,6 +5,7 @@
 #   ./dev.sh            バックエンドとフロントエンドを起動する
 #   ./dev.sh --no-open  ブラウザを開かない
 #
+# 起動前に、このプロジェクトの既存プロセスがあれば停止する。
 # Ctrl+C で両方まとめて止まる。ログは logs/ に残る。
 # 環境変数 BACKEND_PORT / FRONTEND_PORT でポートを変えられる。
 #
@@ -70,6 +71,60 @@ start_process() {
 
 port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
+# そのプロセスがこのリポジトリのものか。vite のコマンドラインには絶対パスが
+# 出ないため、コマンドラインと作業ディレクトリの両方で判定する。
+process_is_ours() {
+  local pid="$1" cmd cwd
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$cmd" in
+    *"$ROOT"*) return 0 ;;
+  esac
+  cwd="$(lsof -a -d cwd -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+  case "$cwd" in
+    "$ROOT"|"$ROOT"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# 起動しているポートを握っているプロセスのうち、このリポジトリのものを止める。
+# 他のプロセスが使っている場合は、勝手に止めずに終了する。
+stop_existing() {
+  local port pid ppid pids targets="" i
+  for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+    pids="$(lsof -t -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    for pid in $pids; do
+      if process_is_ours "$pid"; then
+        targets="$targets $pid"
+        # uvicorn --reload は親が子を再起動するため、親も対象にする。
+        ppid="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ')"
+        if [ -n "$ppid" ] && [ "$ppid" != "1" ] && process_is_ours "$ppid"; then
+          targets="$targets $ppid"
+        fi
+      else
+        fail "ポート $port を、このプロジェクト以外のプロセスが使っています:
+    $(ps -p "$pid" -o command= 2>/dev/null)
+  停止するか、BACKEND_PORT / FRONTEND_PORT で別のポートを指定してください。"
+      fi
+    done
+  done
+
+  [ -n "$targets" ] || return 0
+  warn "既存のプロセスを停止します"
+  for pid in $targets; do
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+  done
+
+  for i in $(seq 1 20); do
+    if ! port_in_use "$BACKEND_PORT" && ! port_in_use "$FRONTEND_PORT"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  for pid in $targets; do kill -9 "$pid" 2>/dev/null || true; done
+  sleep 1
+}
+
 wait_for_http() {
   local url="$1" label="$2" pid="$3" i
   for i in $(seq 1 60); do
@@ -115,10 +170,12 @@ curl -fs -m 5 "$OLLAMA_HOST/api/tags" 2>/dev/null | grep -q "\"${OLLAMA_MODEL%%:
     ollama pull $OLLAMA_MODEL"
 ok "Ollama：$OLLAMA_MODEL"
 
+stop_existing
+
 for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   if port_in_use "$port"; then
-    fail "ポート $port は使用中です。先に止めてください:
-    lsof -nP -iTCP:$port -sTCP:LISTEN"
+    fail "ポート $port を解放できませんでした:
+    $(ps -p "$(lsof -t -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1)" -o command= 2>/dev/null)"
   fi
 done
 
