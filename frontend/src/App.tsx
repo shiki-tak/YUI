@@ -96,6 +96,9 @@ export default function App() {
   const pendingCount = candidates.filter((c) => c.status === "pending").length;
   // 音声は、有効で、かつエンジンに接続できているときだけ使う。
   const speechAvailable = health?.voice.enabled === true && health.voice.ok;
+  // 字幕は、読み上げている発言の本文そのもの。合成に渡すのと同じ文字列を使う。
+  const speakingText =
+    messages.find((m) => m.id === player.playingId)?.content ?? null;
 
   return (
     <div className="app">
@@ -116,6 +119,7 @@ export default function App() {
         <AvatarPanel
           levelRef={player.levelRef}
           speaking={player.playingId !== null}
+          subtitle={speakingText}
           credit={health?.voice.credit}
         />
 

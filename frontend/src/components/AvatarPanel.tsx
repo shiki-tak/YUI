@@ -25,13 +25,24 @@ interface Props {
   levelRef: MutableRefObject<number>;
   /** 読み上げ中か。止まったら口を閉じる。 */
   speaking: boolean;
+  /**
+   * いま読み上げている発言の本文。合成へ渡すのと同じ文字列を受け取るため、
+   * 読み上げた内容と字幕は常に一致する。
+   */
+  subtitle: string | null;
   /** 音声を公開する場に出す表記。 */
   credit?: string;
 }
 
-export function AvatarPanel({ levelRef, speaking, credit }: Props) {
+export function AvatarPanel({ levelRef, speaking, subtitle, credit }: Props) {
   const [mouthOpen, setMouthOpen] = useState(false);
   const [eyesOpen, setEyesOpen] = useState(true);
+  // 読み終わったあとも直前の一言は残す。読み切る前に消えないようにする。
+  const [shown, setShown] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (subtitle !== null) setShown(subtitle);
+  }, [subtitle]);
 
   // 口パク。毎フレーム見て、変わったときだけ描き直す。
   useEffect(() => {
@@ -101,6 +112,10 @@ export function AvatarPanel({ levelRef, speaking, credit }: Props) {
             }
           />
         ))}
+      </div>
+
+      <div className={subtitle !== null ? "subtitle speaking" : "subtitle"}>
+        {shown ?? <span className="muted small">まだ話していません。</span>}
       </div>
 
       {credit && <p className="avatar-credit">{credit}</p>}

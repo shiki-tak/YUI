@@ -229,7 +229,10 @@ function ReplyTurn({
 
   return (
     <div className="turn">
-      <div className="bubble character" title={formatDateTime(message.created_at)}>
+      <div
+        className={playing ? "bubble character speaking" : "bubble character"}
+        title={formatDateTime(message.created_at)}
+      >
         {message.content}
       </div>
       <div className="turn-actions">
