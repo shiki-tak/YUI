@@ -602,6 +602,106 @@ async def test_unparsable_reflection_is_reported_and_retryable(
     assert retried.json() == []
 
 
+@pytest.mark.parametrize(
+    "output,expected_reason",
+    [
+        ("[{}]", "Field required"),
+        ('[{"kind":"promise","content":42}]', "valid string"),
+        ('[{"kind":"unknown","content":"何か"}]', "種別が不正"),
+        ('[{"kind":"promise","content":"何か","certainty":"maybe"}]', "確かさが不正"),
+        ('["文字列"]', "オブジェクトではありません"),
+    ],
+)
+async def test_invalid_candidate_element_is_reported(
+    client: AsyncClient,
+    fake_llm: FakeLLM,
+    session_factory: async_sessionmaker,
+    output: str,
+    expected_reason: str,
+):
+    """配列は読めても、候補として読み取れない要素があれば失敗として扱う。
+
+    以前は要素を黙って捨てていたため、全要素が不正でも「候補なしの成功」に
+    なり、会話が終了して再抽出できなくなっていた。
+    """
+    first = await _say(client, f"不正な要素を返す会話: {output}")
+    conversation_id = first["conversation_id"]
+
+    fake_llm.push(output)
+    failed = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert failed.status_code == 503
+    detail = failed.json()["detail"]
+    assert "読み取れない候補" in detail
+    assert expected_reason in detail
+
+    async with session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        assert conversation.ended_at is None
+        assert conversation.reflection_completed_at is None
+
+    fake_llm.push("[]")
+    assert (
+        await client.post(f"/api/conversations/{conversation_id}/end")
+    ).status_code == 200
+
+
+async def test_partially_invalid_candidates_fail_as_a_whole(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
+):
+    """有効な候補が混ざっていても、1件でも読めなければ全体をやり直す。
+
+    落とした候補は記憶になり損ねた経験であり、静かに捨てると失われたことに
+    気づけない。振り返りの再実行は短時間で済む。
+    """
+    first = await _say(client, "一部だけ不正な出力の会話")
+    conversation_id = first["conversation_id"]
+    message_id = first["user_message"]["id"]
+
+    fake_llm.push(
+        json.dumps(
+            [
+                {"kind": "about_person", "content": "有効な候補", "certainty": "fact",
+                 "keywords": "有効", "about_partner": True, "source_message_id": message_id},
+                {"kind": "promise", "content": 42},
+            ],
+            ensure_ascii=False,
+        )
+    )
+    failed = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert failed.status_code == 503
+    assert "2件目" in failed.json()["detail"]
+
+    # 有効だった候補も保存しない（部分的に採らない）。
+    candidates = (
+        await client.get(f"/api/conversations/{conversation_id}/candidates")
+    ).json()
+    assert candidates == []
+
+    async with session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        assert conversation.reflection_completed_at is None
+
+
+async def test_valid_candidates_are_kept(client: AsyncClient, fake_llm: FakeLLM):
+    """すべて読み取れる場合は、そのまま候補として保存する。"""
+    first = await _say(client, "正常な出力の会話")
+    message_id = first["user_message"]["id"]
+    fake_llm.push(
+        json.dumps(
+            [
+                {"kind": "about_person", "content": "ひとつめ", "certainty": "fact",
+                 "keywords": "1", "about_partner": True, "source_message_id": message_id},
+                {"kind": "experience", "content": "ふたつめ", "certainty": "inference",
+                 "keywords": "2", "about_partner": False, "source_message_id": message_id},
+            ],
+            ensure_ascii=False,
+        )
+    )
+    response = await client.post(f"/api/conversations/{first['conversation_id']}/end")
+    assert response.status_code == 200
+    assert [c["content"] for c in response.json()] == ["ひとつめ", "ふたつめ"]
+
+
 async def test_empty_reflection_is_a_success(client: AsyncClient, fake_llm: FakeLLM):
     """残す価値が無い会話は、空の結果として正常に終了する。"""
     first = await _say(client, "とくに残すことのない雑談")

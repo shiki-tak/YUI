@@ -327,6 +327,8 @@ button.link {
 .error {
   color: var(--error);
   padding: 0 14px;
+  /* 振り返りの失敗理由は複数行で返るため、改行を保つ。 */
+  white-space: pre-wrap;
 }
 
 details summary {

@@ -33,7 +33,15 @@ class ReflectionParseError(RuntimeError):
 
     「残す価値のある内容が無かった（空の配列）」とは区別する。区別しないと、
     抽出の失敗が「候補なしの成功」として会話を終了させてしまう。
+
+    配列の要素が1つでも読み取れない場合も失敗として扱う。落とした候補は
+    「記憶になり損ねた経験」であり、静かに捨てると失われたことに気づけない。
+    振り返りの再実行は短時間で済むため、部分的に採らず全体をやり直す。
     """
+
+
+class _ItemError(ValueError):
+    """候補1件を読み取れなかった。理由を添えて上位へ伝える。"""
 
 _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ記憶の候補を抜き出す担当です。
 
@@ -77,6 +85,27 @@ def _excerpt(text: str, limit: int = 200) -> str:
     return condensed[:limit] + ("…" if len(condensed) > limit else "")
 
 
+def _parse_item(item: object) -> CandidatePayload:
+    """候補1件を読み取る。読み取れない場合は理由を添えて失敗させる。"""
+    if not isinstance(item, dict):
+        raise _ItemError("要素がオブジェクトではありません")
+    try:
+        payload = CandidatePayload.model_validate(item)
+    except ValidationError as exc:
+        reasons = "、".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()
+        )
+        raise _ItemError(f"項目を読み取れません（{reasons}）") from exc
+    if payload.kind not in {kind.value for kind in MemoryKind}:
+        raise _ItemError(f"種別が不正です: {payload.kind}")
+    # 項目が無い場合は既定の「推測」を使う。書かれていて読めない値は、
+    # 事実か推測かを決められないため失敗にする。
+    if payload.certainty not in {certainty.value for certainty in Certainty}:
+        raise _ItemError(f"確かさが不正です: {payload.certainty}")
+    return payload
+
+
 def _parse_candidates(text: str) -> list[CandidatePayload]:
     match = _JSON_ARRAY.search(text)
     if not match:
@@ -94,21 +123,20 @@ def _parse_candidates(text: str) -> list[CandidatePayload]:
             f"振り返りの出力が配列ではありませんでした: {_excerpt(text)}"
         )
 
-    valid_kinds = {k.value for k in MemoryKind}
-    valid_certainty = {c.value for c in Certainty}
     results: list[CandidatePayload] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
+    problems: list[str] = []
+    for index, item in enumerate(raw):
         try:
-            payload = CandidatePayload.model_validate(item)
-        except ValidationError:
-            continue
-        if payload.kind not in valid_kinds:
-            continue
-        if payload.certainty not in valid_certainty:
-            payload.certainty = Certainty.INFERENCE.value
-        results.append(payload)
+            results.append(_parse_item(item))
+        except _ItemError as exc:
+            dumped = json.dumps(item, ensure_ascii=False, default=str)
+            problems.append(f"{index + 1}件目: {exc} / 出力: {_excerpt(dumped, 120)}")
+
+    if problems:
+        raise ReflectionParseError(
+            f"振り返りの出力に読み取れない候補が {len(problems)} 件ありました。"
+            + "".join(f"\n- {problem}" for problem in problems)
+        )
     return results
 
 
