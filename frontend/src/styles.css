@@ -434,3 +434,40 @@ details summary {
 .bubble.character.speaking {
   border-color: var(--accent);
 }
+
+/* 待ち時間の内訳。 */
+.timings table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.timings th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--muted);
+  padding: 2px 8px 2px 0;
+  white-space: nowrap;
+}
+
+.timings td {
+  padding: 2px 8px 2px 0;
+  white-space: nowrap;
+}
+
+.timings td:first-of-type {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.timings td:last-of-type {
+  width: 100%;
+  white-space: normal;
+}
+
+.timings tr.total th,
+.timings tr.total td {
+  border-top: 1px solid var(--line);
+  padding-top: 5px;
+  color: var(--text);
+}

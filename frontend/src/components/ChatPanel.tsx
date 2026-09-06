@@ -7,6 +7,7 @@ import type {
   Message,
   RetrievedMemory,
   RunRecord,
+  SpeechRun,
 } from "../types";
 import {
   CERTAINTY_LABEL,
@@ -14,7 +15,7 @@ import {
   KIND_LABEL,
   formatDateTime,
 } from "../types";
-import type { SpeechPlayer } from "../useSpeechPlayer";
+import type { ClientSpeechTiming, SpeechPlayer } from "../useSpeechPlayer";
 import { SourceMessage } from "./SourceMessage";
 
 interface Props {
@@ -51,6 +52,8 @@ export function ChatPanel({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 送信から返答が返るまで。待ち時間の内訳を見るために測る。
+  const [chatMs, setChatMs] = useState<Record<number, number>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // 終了済み・振り返り中の会話は読み取り専用で開く。送っても 409 になる。
@@ -79,7 +82,10 @@ export function ChatPanel({
     setBusy(true);
     setError(null);
     try {
+      const sentAt = performance.now();
       const entry = await api.chat(trimmed, conversationId);
+      const roundTrip = Math.round(performance.now() - sentAt);
+      setChatMs((prev) => ({ ...prev, [entry.reply.id]: roundTrip }));
       onEntry(entry);
       setText("");
       // 返答が出たら読み上げる。生成しただけの状態から、再生の通知で進む。
@@ -165,6 +171,7 @@ export function ChatPanel({
               live={liveEntries[message.id]}
               player={player}
               speechAvailable={speechAvailable}
+              chatMs={chatMs[message.id]}
             />
           ),
         )}
@@ -215,11 +222,13 @@ function ReplyTurn({
   live,
   player,
   speechAvailable,
+  chatMs,
 }: {
   message: Message;
   live?: ChatResponse;
   player: SpeechPlayer;
   speechAvailable: boolean;
+  chatMs?: number;
 }) {
   const [showBasis, setShowBasis] = useState(false);
   const [showIdeal, setShowIdeal] = useState(false);
@@ -266,7 +275,12 @@ function ReplyTurn({
         )}
       </div>
       {showBasis && (
-        <Basis messageId={message.id} used={live ? live.used_memories : null} />
+        <Basis
+          messageId={message.id}
+          used={live ? live.used_memories : null}
+          chatMs={chatMs}
+          clientTiming={player.timings[message.id]}
+        />
       )}
       {showIdeal && <IdealForm messageId={message.id} />}
     </div>
@@ -276,12 +290,19 @@ function ReplyTurn({
 function Basis({
   messageId,
   used,
+  chatMs,
+  clientTiming,
 }: {
   messageId: number;
   /** この画面で生成した返答だけが持つ、選ばれた理由と点数。 */
   used: RetrievedMemory[] | null;
+  /** 送信から返答が返るまで（この画面で送った場合だけ分かる）。 */
+  chatMs?: number;
+  /** 音声の受け取りと再生開始（この画面で鳴らした場合だけ分かる）。 */
+  clientTiming?: ClientSpeechTiming;
 }) {
   const [run, setRun] = useState<RunRecord | null>(null);
+  const [speechRuns, setSpeechRuns] = useState<SpeechRun[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -292,6 +313,10 @@ function Basis({
         setError(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    api
+      .speechRuns(messageId)
+      .then(setSpeechRuns)
+      .catch(() => setSpeechRuns([]));
   }, [messageId]);
 
   return (
@@ -341,6 +366,83 @@ function Basis({
           )}
         </>
       )}
+
+      <h4>待ち時間</h4>
+      <Timings
+        run={run}
+        speechRun={speechRuns[0]}
+        chatMs={chatMs}
+        clientTiming={clientTiming}
+      />
+    </div>
+  );
+}
+
+/**
+ * 送信から再生開始までの内訳。どの区間が待ち時間の大半かを見る。
+ *
+ * 画面側で測った値は、この画面で送信・再生した返答にだけ付く。過去の会話を
+ * 開いた場合はサーバー側に残した記録だけを出す。
+ */
+function Timings({
+  run,
+  speechRun,
+  chatMs,
+  clientTiming,
+}: {
+  run: RunRecord | null;
+  speechRun?: SpeechRun;
+  chatMs?: number;
+  clientTiming?: ClientSpeechTiming;
+}) {
+  const synthesisMs =
+    speechRun && (speechRun.query_ms ?? 0) + (speechRun.synthesis_ms ?? 0);
+  const total =
+    chatMs !== undefined && clientTiming
+      ? chatMs + clientTiming.fetchMs + clientTiming.startMs
+      : undefined;
+
+  const rows: { label: string; value: number | undefined; note?: string }[] = [
+    { label: "記憶検索", value: run?.retrieval_ms ?? undefined },
+    { label: "返答の生成", value: run?.latency_ms ?? undefined },
+    { label: "送信 → 返答", value: chatMs, note: "上の 2 つを含む往復" },
+    {
+      label: "音声合成",
+      value: synthesisMs === undefined ? undefined : synthesisMs,
+      note: speechRun
+        ? `合成用データ ${speechRun.query_ms ?? "-"} / 音声生成 ${
+            speechRun.synthesis_ms ?? "-"
+          }`
+        : undefined,
+    },
+    {
+      label: "返答 → 音声の受け取り",
+      value: clientTiming?.fetchMs,
+      note: "上の合成を含む",
+    },
+    { label: "受け取り → 再生開始", value: clientTiming?.startMs },
+  ];
+
+  return (
+    <div className="timings">
+      <table>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.label}>
+              <th>{row.label}</th>
+              <td>{row.value === undefined ? "-" : `${row.value} ms`}</td>
+              <td className="muted small">{row.note ?? ""}</td>
+            </tr>
+          ))}
+          <tr className="total">
+            <th>送信 → 再生開始</th>
+            <td>{total === undefined ? "-" : `${total} ms`}</td>
+            <td className="muted small">
+              {speechRun?.audio_ms ? `音声の長さ ${speechRun.audio_ms} ms` : ""}
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

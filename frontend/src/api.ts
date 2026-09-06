@@ -15,6 +15,7 @@ import type {
   RetrievedMemory,
   RunRecord,
   Speaker,
+  SpeechRun,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -108,6 +109,9 @@ export const api = {
 
   run: (messageId: number) =>
     request<RunRecord>(`/conversations/messages/${messageId}/run`),
+
+  speechRuns: (messageId: number) =>
+    request<SpeechRun[]>(`/conversations/messages/${messageId}/speech-runs`),
 
   saveIdeal: (messageId: number, idealText: string, note: string | null) =>
     request<IdealResponse>(`/conversations/messages/${messageId}/ideal`, {

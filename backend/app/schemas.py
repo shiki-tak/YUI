@@ -81,6 +81,7 @@ class RunRecordOut(ORMModel):
     model_digest: str | None
     options: dict[str, Any] | None
     referenced_memory_ids: list[int] | None
+    retrieval_ms: int | None
     latency_ms: int | None
     prompt_tokens: int | None
     completion_tokens: int | None
@@ -91,6 +92,21 @@ class RunRecordDetail(RunRecordOut):
     """開発画面で根拠を確認するための詳細。"""
 
     system_prompt: str | None
+
+
+class SpeechRunOut(ORMModel):
+    """音声合成の実行記録。待ち時間の内訳を見るために使う。"""
+
+    id: int
+    message_id: int
+    provider: str
+    speaker_id: int
+    engine_version: str | None
+    query_ms: int | None
+    synthesis_ms: int | None
+    audio_ms: int | None
+    byte_size: int | None
+    created_at: UtcDatetime
 
 
 class ConversationOut(ORMModel):

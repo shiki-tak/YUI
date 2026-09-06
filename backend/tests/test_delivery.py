@@ -1,4 +1,4 @@
-"""音声の取得と再生状態（フェーズ2 Step 2）。
+"""音声の取得・再生状態・待ち時間の記録（フェーズ2 Step 2・5）。
 
 フェーズ2の完了条件のうち、次を対象にする。
 
@@ -201,3 +201,66 @@ async def test_delivery_state_survives_reload(client: AsyncClient):
     reply = next(m for m in detail["messages"] if m["id"] == message_id)
     assert reply["delivery_state"] == "completed"
     assert reply["delivery_started_at"] is not None
+
+
+async def test_speech_run_is_recorded(client: AsyncClient):
+    """合成の時間を区間ごとに残す。どこが遅いかを後から見るため。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    await client.get(f"/api/conversations/messages/{message_id}/speech")
+
+    runs = (
+        await client.get(f"/api/conversations/messages/{message_id}/speech-runs")
+    ).json()
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["provider"] == "fake-voice"
+    assert run["engine_version"] == "test"
+    # 合成用データの作成と音声生成を分けて残す。
+    assert run["query_ms"] == 1
+    assert run["synthesis_ms"] == 2
+    # 音声そのものの長さは、合成の速さと別に持つ。
+    assert run["audio_ms"] == 500
+    assert run["byte_size"] > 0
+
+
+async def test_each_synthesis_adds_a_record(client: AsyncClient):
+    """聞き直すたびに 1 行増える。同じ文章の合成にかかる時間の変化を見るため。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    for _ in range(3):
+        await client.get(f"/api/conversations/messages/{message_id}/speech")
+
+    runs = (
+        await client.get(f"/api/conversations/messages/{message_id}/speech-runs")
+    ).json()
+    assert len(runs) == 3
+    # 新しい順に返す。
+    assert [r["id"] for r in runs] == sorted((r["id"] for r in runs), reverse=True)
+
+
+async def test_failed_synthesis_leaves_no_record(client: AsyncClient, fake_speech):
+    """合成できなかった試行を、かかった時間として残さない。"""
+    fake_speech.fail = True
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    await client.get(f"/api/conversations/messages/{message_id}/speech")
+
+    runs = (
+        await client.get(f"/api/conversations/messages/{message_id}/speech-runs")
+    ).json()
+    assert runs == []
+
+
+async def test_retrieval_time_is_recorded_separately(client: AsyncClient):
+    """記憶検索の時間を、生成の時間と分けて残す。"""
+    result = await _say(client, "こんばんは")
+    run = (
+        await client.get(f"/api/conversations/messages/{result['reply']['id']}/run")
+    ).json()
+    assert run["retrieval_ms"] is not None
+    assert run["retrieval_ms"] >= 0
+    assert run["latency_ms"] is not None

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -80,6 +81,9 @@ class ConversationAgent:
         history = await self._recent_history(
             session, conversation.id, exclude_id=user_message.id
         )
+        # 記憶検索の時間は生成と分けて残す。どちらが待ち時間の大半かを
+        # 見分けられるようにするため。
+        retrieval_started = time.perf_counter()
         memories = await search_memories(
             session,
             query=text,
@@ -87,6 +91,7 @@ class ConversationAgent:
             mode=conversation.mode,
             limit=self._settings.memory_retrieval_limit,
         )
+        retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
 
         messages, system_prompt = prompt_builder.build_messages(
             persona=self._persona,
@@ -132,6 +137,7 @@ class ConversationAgent:
             options=response.options,
             referenced_memory_ids=[m.memory.id for m in memories],
             system_prompt=system_prompt,
+            retrieval_ms=retrieval_ms,
             latency_ms=response.latency_ms,
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,

@@ -261,10 +261,43 @@ class RunRecord(Base):
     # 生成時に実際に渡した記憶の id。返答の根拠を後から追える。
     referenced_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
     system_prompt: Mapped[str | None] = mapped_column(Text)
+    # 記憶検索にかかった時間。生成の時間と分けて、どこが遅いかを見る。
+    retrieval_ms: Mapped[int | None] = mapped_column(Integer)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     completion_tokens: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SpeechRun(Base):
+    """音声合成の実行記録。
+
+    設計書フェーズ2の実装内容5「送信から音声の再生開始までの時間を測り、
+    待ち時間の大きい部分を確認する」に使う。合成用データの作成と音声生成を
+    分けて残し、音声そのものの長さとも区別する。
+
+    1 つの発言を聞き直すたびに 1 行増える。同じ文章の合成にかかる時間が
+    毎回どうなるかを見られるようにするため。
+    """
+
+    __tablename__ = "speech_runs"
+    __table_args__ = (Index("ix_speech_runs_message", "message_id", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    speaker_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    engine_version: Mapped[str | None] = mapped_column(String(64))
+    # 合成用データの作成にかかった時間。
+    query_ms: Mapped[int | None] = mapped_column(Integer)
+    # 音声そのものの生成にかかった時間。
+    synthesis_ms: Mapped[int | None] = mapped_column(Integer)
+    # 生成された音声の長さ。合成の速さと区別する。
+    audio_ms: Mapped[int | None] = mapped_column(Integer)
+    byte_size: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -28,6 +28,7 @@ from app.models import (
     RunRecord,
     Speaker,
     SpeakerKind,
+    SpeechRun,
     utcnow,
 )
 from app.persona import BASE_PERSONA
@@ -41,6 +42,7 @@ from app.schemas import (
     MemoryCandidateOut,
     MessageOut,
     RunRecordDetail,
+    SpeechRunOut,
 )
 from app.voice import get_speech_client
 from app.voice.base import SpeechClient, SpeechError
@@ -294,7 +296,35 @@ async def get_speech(
     except SpeechError as exc:
         # 音声が出せなくても会話は続けられる。失敗として返し、文字は残す。
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    # 区間ごとの時間を残す。聞き直すたびに 1 行増やし、同じ文章の合成が
+    # 毎回どれだけかかるかを見られるようにする。
+    session.add(
+        SpeechRun(
+            message_id=message.id,
+            provider=result.provider,
+            speaker_id=result.speaker_id,
+            engine_version=result.engine_version,
+            query_ms=result.query_ms,
+            synthesis_ms=result.synthesis_ms,
+            audio_ms=result.audio_ms,
+            byte_size=len(result.audio),
+        )
+    )
     return Response(content=result.audio, media_type=result.media_type)
+
+
+@router.get("/messages/{message_id}/speech-runs", response_model=list[SpeechRunOut])
+async def list_speech_runs(
+    message_id: int, session: AsyncSession = Depends(get_session)
+) -> list[SpeechRun]:
+    """この発言を合成したときの記録。新しい順に返す。"""
+    stmt = (
+        select(SpeechRun)
+        .where(SpeechRun.message_id == message_id)
+        .order_by(SpeechRun.id.desc())
+    )
+    return list((await session.execute(stmt)).scalars())
 
 
 @router.post("/messages/{message_id}/delivery", response_model=MessageOut)

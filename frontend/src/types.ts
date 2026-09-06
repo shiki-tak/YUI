@@ -83,11 +83,26 @@ export interface RunRecord {
   model_digest: string | null;
   options: Record<string, unknown> | null;
   referenced_memory_ids: number[] | null;
+  retrieval_ms: number | null;
   latency_ms: number | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
   created_at: string;
   system_prompt?: string | null;
+}
+
+/** 音声合成の実行記録。待ち時間の内訳を見るために使う。 */
+export interface SpeechRun {
+  id: number;
+  message_id: number;
+  provider: string;
+  speaker_id: number;
+  engine_version: string | null;
+  query_ms: number | null;
+  synthesis_ms: number | null;
+  audio_ms: number | null;
+  byte_size: number | null;
+  created_at: string;
 }
 
 export interface ChatResponse {

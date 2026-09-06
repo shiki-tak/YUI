@@ -10,6 +10,14 @@ declare global {
   }
 }
 
+/** 画面側で測った待ち時間。サーバー側の記録と合わせて内訳を見る。 */
+export interface ClientSpeechTiming {
+  /** 音声を要求してから受け取るまで（サーバーでの合成を含む）。 */
+  fetchMs: number;
+  /** 受け取ってから鳴り始めるまで。 */
+  startMs: number;
+}
+
 /** 返答の読み上げ。同時に鳴らすのは常に1つだけにする。 */
 export interface SpeechPlayer {
   /** いま鳴っている発言。 */
@@ -24,6 +32,8 @@ export interface SpeechPlayer {
    * 読む側が自分の描画周期で見る。
    */
   levelRef: MutableRefObject<number>;
+  /** 発言ごとの、画面側で測った待ち時間。 */
+  timings: Record<number, ClientSpeechTiming>;
   play: (messageId: number) => void;
   stop: () => void;
   clearError: () => void;
@@ -48,6 +58,7 @@ export function useSpeechPlayer(
   const [playingId, setPlayingId] = useState<number | null>(null);
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [timings, setTimings] = useState<Record<number, ClientSpeechTiming>>({});
 
   // 呼び出し側が毎回新しい関数を渡しても、play / stop の同一性を保つ。
   // 変わると再生中に後片付けの副作用が走り、音声が止まってしまう。
@@ -157,6 +168,7 @@ export function useSpeechPlayer(
       setError(null);
 
       void (async () => {
+        const requestedAt = performance.now();
         let blob: Blob;
         try {
           blob = await api.speech(messageId);
@@ -168,6 +180,7 @@ export function useSpeechPlayer(
         }
         // 待っている間に別の再生が始まっていたら、この音声は捨てる。
         if (request !== requestRef.current) return;
+        const receivedAt = performance.now();
 
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
@@ -206,9 +219,17 @@ export function useSpeechPlayer(
         }
 
         if (request !== requestRef.current) return;
+        const startedAt = performance.now();
         playingRef.current = messageId;
         setLoadingId(null);
         setPlayingId(messageId);
+        setTimings((prev) => ({
+          ...prev,
+          [messageId]: {
+            fetchMs: Math.round(receivedAt - requestedAt),
+            startMs: Math.round(startedAt - receivedAt),
+          },
+        }));
         notify(messageId, "playing");
         await connectAnalyser(audio);
       })();
@@ -224,6 +245,7 @@ export function useSpeechPlayer(
     loadingId,
     error,
     levelRef,
+    timings,
     play,
     stop,
     clearError: useCallback(() => setError(null), []),
