@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 環境設定・ローカルデータ
+.env
+*.db
+*.db-journal
+*.sqlite3
+backend/data/
+
+# OS / エディタ
+.DS_Store
+.idea/
+.vscode/
