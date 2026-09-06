@@ -15,6 +15,12 @@ import { SELF_SPEAKER, conversationState } from "./types";
 
 type Tab = "memories" | "candidates" | "history";
 
+function voiceLabel(health: Health): string {
+  if (!health.voice.enabled) return "音声：無効";
+  if (!health.voice.ok) return "音声：エンジンに接続できません";
+  return `音声：${health.voice.provider} 話者 ${health.voice.speaker ?? "-"}`;
+}
+
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [conversationId, setConversationId] = useState<number | null>(null);
@@ -79,6 +85,8 @@ export default function App() {
   }
 
   const pendingCount = candidates.filter((c) => c.status === "pending").length;
+  // 音声は、有効で、かつエンジンに接続できているときだけ使う。
+  const speechAvailable = health?.voice.enabled === true && health.voice.ok;
 
   return (
     <div className="app">
@@ -90,7 +98,7 @@ export default function App() {
                 health.llm.ok
                   ? `${health.llm.provider} / ${health.llm.model}`
                   : `LLM に接続できません: ${health.llm.error ?? "不明"}`
-              }`
+              } · ${voiceLabel(health)}`
             : "バックエンドに接続できません"}
         </span>
       </header>
@@ -102,6 +110,7 @@ export default function App() {
           liveEntries={liveEntries}
           state={conversation}
           loading={loadingConversation}
+          speechAvailable={speechAvailable}
           onEntry={(entry) => {
             const isNew = conversationId === null;
             setConversationId(entry.conversation_id);
@@ -124,6 +133,11 @@ export default function App() {
             setTab("candidates");
           }}
           onNewConversation={startNewConversation}
+          onMessageUpdated={(updated) =>
+            setMessages((prev) =>
+              prev.map((m) => (m.id === updated.id ? updated : m)),
+            )
+          }
         />
 
         <div className="side">

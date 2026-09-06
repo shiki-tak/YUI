@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agent.delivery import apply_delivery_state
 from app.agent.memory_store import create_memory
 from app.agent.reflection import ReflectionParseError, extract_candidates
 from app.agent.turn_lock import conversation_locks
@@ -20,6 +21,7 @@ from app.llm.base import LLMClient, LLMError
 from app.models import (
     CandidateStatus,
     Conversation,
+    DeliveryState,
     IdealResponse,
     MemoryCandidate,
     Message,
@@ -33,12 +35,15 @@ from app.schemas import (
     CandidateDecision,
     ConversationDetail,
     ConversationOut,
+    DeliveryUpdate,
     IdealResponseCreate,
     IdealResponseOut,
     MemoryCandidateOut,
     MessageOut,
     RunRecordDetail,
 )
+from app.voice import get_speech_client
+from app.voice.base import SpeechClient, SpeechError
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -251,6 +256,60 @@ async def get_run_record(
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "実行記録が見つかりません。")
     return run
+
+
+async def _character_message(session: AsyncSession, message_id: int) -> Message:
+    message = await session.get(Message, message_id)
+    if message is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "発言が見つかりません。")
+    if message.speaker_kind != SpeakerKind.CHARACTER.value:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "読み上げの対象はキャラクターの発言です。"
+        )
+    return message
+
+
+@router.get(
+    "/messages/{message_id}/speech",
+    response_class=Response,
+    responses={200: {"content": {"audio/wav": {}}}},
+)
+async def get_speech(
+    message_id: int,
+    session: AsyncSession = Depends(get_session),
+    speech: SpeechClient = Depends(get_speech_client),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """返答を読み上げた音声。字幕は発言の本文をそのまま使う。
+
+    音声は都度合成する。保存や先読みは、どの区間が遅いかを測ってから判断する。
+    """
+    if not settings.speech_enabled:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "音声合成は無効になっています。"
+        )
+    message = await _character_message(session, message_id)
+    try:
+        result = await speech.synthesize(message.content)
+    except SpeechError as exc:
+        # 音声が出せなくても会話は続けられる。失敗として返し、文字は残す。
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return Response(content=result.audio, media_type=result.media_type)
+
+
+@router.post("/messages/{message_id}/delivery", response_model=MessageOut)
+async def update_delivery(
+    message_id: int,
+    payload: DeliveryUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> Message:
+    """再生の開始・完了・中断を記録する。
+
+    すでに話し終えた発言への通知は、聞き直しとみなして記録を変えない。
+    """
+    message = await _character_message(session, message_id)
+    apply_delivery_state(message, DeliveryState(payload.state), now=utcnow())
+    return message
 
 
 @router.post("/messages/{message_id}/ideal", response_model=IdealResponseOut)

@@ -8,7 +8,14 @@ import type {
   RetrievedMemory,
   RunRecord,
 } from "../types";
-import { CERTAINTY_LABEL, KIND_LABEL, formatDateTime } from "../types";
+import {
+  CERTAINTY_LABEL,
+  DELIVERY_LABEL,
+  KIND_LABEL,
+  formatDateTime,
+} from "../types";
+import { useSpeechPlayer } from "../useSpeechPlayer";
+import type { SpeechPlayer } from "../useSpeechPlayer";
 import { SourceMessage } from "./SourceMessage";
 
 interface Props {
@@ -20,10 +27,14 @@ interface Props {
   /** 会話の状態。新しい会話（未作成）は null。 */
   state: ConversationState | null;
   loading: boolean;
+  /** 読み上げを使える状態か。エンジンに接続できないときは自動再生しない。 */
+  speechAvailable: boolean;
   onEntry: (entry: ChatResponse) => void;
   /** 終了して振り返った直後。候補の取り直しと、読み取り専用への切り替えに使う。 */
   onEnded: () => void;
   onNewConversation: () => void;
+  /** 再生の記録が変わった発言。画面の状態へ反映する。 */
+  onMessageUpdated: (message: Message) => void;
 }
 
 export function ChatPanel({
@@ -32,14 +43,17 @@ export function ChatPanel({
   liveEntries,
   state,
   loading,
+  speechAvailable,
   onEntry,
   onEnded,
   onNewConversation,
+  onMessageUpdated,
 }: Props) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const player = useSpeechPlayer(onMessageUpdated);
 
   // 終了済み・振り返り中の会話は読み取り専用で開く。送っても 409 になる。
   const readOnly = state === "ended" || state === "reflecting";
@@ -48,10 +62,18 @@ export function ChatPanel({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, busy]);
 
-  // 別の会話を開いたら、前の会話に対する失敗の表示を残さない。
+  // 別の会話を開いたら、前の会話の音声を鳴らし続けない。失敗の表示も残さない。
+  const stopSpeech = player.stop;
+  const shownConversationRef = useRef<number | null>(null);
   useEffect(() => {
+    const previous = shownConversationRef.current;
+    shownConversationRef.current = conversationId;
+    // 新しい会話に ID が付いただけのときは切り替えではない。ここで止めると、
+    // 1 通目の返答で鳴らし始めた音声を自分で打ち消してしまう。
+    if (previous === null || previous === conversationId) return;
     setError(null);
-  }, [conversationId]);
+    stopSpeech();
+  }, [conversationId, stopSpeech]);
 
   async function send() {
     const trimmed = text.trim();
@@ -62,6 +84,8 @@ export function ChatPanel({
       const entry = await api.chat(trimmed, conversationId);
       onEntry(entry);
       setText("");
+      // 返答が出たら読み上げる。生成しただけの状態から、再生の通知で進む。
+      if (speechAvailable) player.play(entry.reply.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -101,6 +125,14 @@ export function ChatPanel({
           </button>
           <button
             type="button"
+            onClick={player.stop}
+            disabled={player.playingId === null && player.loadingId === null}
+            title="再生中の音声を止めます"
+          >
+            音声を止める
+          </button>
+          <button
+            type="button"
             onClick={endConversation}
             disabled={conversationId === null || busy || readOnly}
             title="会話を終了し、長期記憶の候補を抽出します"
@@ -133,6 +165,8 @@ export function ChatPanel({
               key={message.id}
               message={message}
               live={liveEntries[message.id]}
+              player={player}
+              speechAvailable={speechAvailable}
             />
           ),
         )}
@@ -141,6 +175,14 @@ export function ChatPanel({
       </div>
 
       {error && <p className="error">{error}</p>}
+      {player.error && (
+        <p className="error small">
+          {player.error}{" "}
+          <button type="button" className="link" onClick={player.clearError}>
+            閉じる
+          </button>
+        </p>
+      )}
 
       <div className="composer">
         <textarea
@@ -170,9 +212,22 @@ export function ChatPanel({
 }
 
 /** キャラクターの返答と、その根拠への入り口。 */
-function ReplyTurn({ message, live }: { message: Message; live?: ChatResponse }) {
+function ReplyTurn({
+  message,
+  live,
+  player,
+  speechAvailable,
+}: {
+  message: Message;
+  live?: ChatResponse;
+  player: SpeechPlayer;
+  speechAvailable: boolean;
+}) {
   const [showBasis, setShowBasis] = useState(false);
   const [showIdeal, setShowIdeal] = useState(false);
+
+  const playing = player.playingId === message.id;
+  const loading = player.loadingId === message.id;
 
   return (
     <div className="turn">
@@ -180,6 +235,16 @@ function ReplyTurn({ message, live }: { message: Message; live?: ChatResponse })
         {message.content}
       </div>
       <div className="turn-actions">
+        {speechAvailable && (
+          <button
+            type="button"
+            className="link"
+            onClick={() => (playing ? player.stop() : player.play(message.id))}
+            disabled={loading}
+          >
+            {loading ? "音声を用意中…" : playing ? "止める" : "再生"}
+          </button>
+        )}
         <button type="button" className="link" onClick={() => setShowBasis((v) => !v)}>
           {showBasis
             ? "根拠を隠す"
@@ -190,6 +255,9 @@ function ReplyTurn({ message, live }: { message: Message; live?: ChatResponse })
         <button type="button" className="link" onClick={() => setShowIdeal((v) => !v)}>
           理想の返答を記録
         </button>
+        {message.delivery_state !== "completed" && (
+          <span className="tag subtle">{DELIVERY_LABEL[message.delivery_state]}</span>
+        )}
         {live && (
           <span className="muted small">
             {live.run.model} / {live.run.latency_ms ?? "-"} ms

@@ -42,6 +42,8 @@ class MessageOut(ORMModel):
     source: str
     content: str
     delivery_state: str
+    delivery_started_at: UtcDatetime | None
+    delivery_finished_at: UtcDatetime | None
     created_at: UtcDatetime
 
 
@@ -125,6 +127,12 @@ class ChatResponse(BaseModel):
     reply: MessageOut
     run: RunRecordOut
     used_memories: list[RetrievedMemoryOut]
+
+
+class DeliveryUpdate(BaseModel):
+    """再生の通知。generated は生成時の状態なので受け付けない。"""
+
+    state: Literal["playing", "completed", "aborted"]
 
 
 class MemoryCreate(BaseModel):

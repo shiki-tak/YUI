@@ -18,6 +18,12 @@ export interface Speaker {
   display_name: string;
 }
 
+/** 発話の状態。生成しただけの文章と、実際に話し終えた内容を区別する。 */
+export type DeliveryState = "generated" | "playing" | "completed" | "aborted";
+
+/** 再生側から通知できる状態。generated は生成時の状態なので送らない。 */
+export type DeliveryNotice = "playing" | "completed" | "aborted";
+
 export interface Message {
   id: number;
   conversation_id: number;
@@ -25,7 +31,9 @@ export interface Message {
   speaker_id: number | null;
   source: string;
   content: string;
-  delivery_state: string;
+  delivery_state: DeliveryState;
+  delivery_started_at: string | null;
+  delivery_finished_at: string | null;
   created_at: string;
 }
 
@@ -128,6 +136,14 @@ export interface Health {
   ok: boolean;
   persona: { name: string; version: string };
   llm: { ok: boolean; provider: string; model?: string; error?: string };
+  voice: {
+    ok: boolean;
+    enabled: boolean;
+    provider: string;
+    engine_version?: string | null;
+    speaker?: number;
+    error?: string;
+  };
 }
 
 export const KIND_LABEL: Record<MemoryKind, string> = {
@@ -184,3 +200,10 @@ export function formatDateTime(iso: string): string {
     minute: "2-digit",
   });
 }
+
+export const DELIVERY_LABEL: Record<DeliveryState, string> = {
+  generated: "生成のみ",
+  playing: "再生中",
+  completed: "話し終えた",
+  aborted: "中断",
+};

@@ -106,17 +106,20 @@ class ConversationAgent:
         response = await self._llm.chat(messages)
 
         now = utcnow()
+        # 読み上げる構成では、生成しただけの状態から始める。実際に鳴ったかは
+        # 再生側の通知で進める。読み上げない構成では、画面に出た時点で届く。
+        spoken = self._settings.speech_enabled
         reply_message = Message(
             conversation_id=conversation.id,
             speaker_kind=SpeakerKind.CHARACTER.value,
             speaker_id=None,
             source=source,
             content=response.text,
-            # 文字会話では生成した時点で相手に届く。フェーズ2で音声再生の
-            # 開始・完了・中断に応じて状態を進める。
-            delivery_state=DeliveryState.COMPLETED.value,
-            delivery_started_at=now,
-            delivery_finished_at=now,
+            delivery_state=(
+                DeliveryState.GENERATED.value if spoken else DeliveryState.COMPLETED.value
+            ),
+            delivery_started_at=None if spoken else now,
+            delivery_finished_at=None if spoken else now,
         )
         session.add(reply_message)
         await session.flush()

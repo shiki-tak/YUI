@@ -3,6 +3,7 @@
 import { SELF_SPEAKER } from "./types";
 import type {
   ChatResponse,
+  DeliveryNotice,
   Conversation,
   ConversationDetail,
   Health,
@@ -78,6 +79,31 @@ export const api = {
     request<MemoryCandidate>(`/conversations/candidates/${candidateId}/decide`, {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+
+  /** 返答を読み上げた音声。JSON ではないので request() を通さない。 */
+  speech: async (messageId: number): Promise<Blob> => {
+    const response = await fetch(
+      `/api/conversations/messages/${messageId}/speech`,
+    );
+    if (!response.ok) {
+      let detail = `${response.status} ${response.statusText}`;
+      try {
+        const body = await response.json();
+        if (typeof body.detail === "string") detail = body.detail;
+      } catch {
+        // JSON でない応答はそのまま扱う。
+      }
+      throw new Error(detail);
+    }
+    return await response.blob();
+  },
+
+  // 再生の開始・完了・中断を記録する。聞き直しでは記録は変わらない。
+  notifyDelivery: (messageId: number, state: DeliveryNotice) =>
+    request<Message>(`/conversations/messages/${messageId}/delivery`, {
+      method: "POST",
+      body: JSON.stringify({ state }),
     }),
 
   run: (messageId: number) =>

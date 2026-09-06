@@ -24,7 +24,7 @@ from app.main import app
 from app.models import Base
 from app.persona import BASE_PERSONA
 from app.voice import get_speech_client
-from app.voice.base import SpeechClient, SpeechResult
+from app.voice.base import SpeechClient, SpeechError, SpeechResult
 
 
 class FakeLLM(LLMClient):
@@ -78,9 +78,13 @@ class FakeSpeech(SpeechClient):
     def __init__(self) -> None:
         self.calls: list[tuple[str, int | None]] = []
         self.ok = True
+        # 合成に失敗する状況を作る。会話が続けられることを確かめるため。
+        self.fail = False
 
     async def synthesize(self, text: str, *, speaker_id: int | None = None) -> SpeechResult:
         self.calls.append((text, speaker_id))
+        if self.fail:
+            raise SpeechError("音声合成に失敗しました（テスト）。")
         return SpeechResult(
             audio=b"RIFF\x00\x00\x00\x00WAVE",
             media_type="audio/wav",
