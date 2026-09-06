@@ -1,0 +1,62 @@
+---
+config:
+  theme: neutral
+---
+%% images/architecture.png の元データ。
+%% 更新するには次を実行する:
+%%   npx -y @mermaid-js/mermaid-cli -i docs/design/architecture.mmd \
+%%       -o images/architecture.png -b white -s 3
+flowchart TB
+    ME["自分：文字入力"]
+
+    subgraph BROWSER["ブラウザ：React・TypeScript"]
+        UI["操作画面・記憶の確認"]
+        AVATAR["アバター・字幕・音声再生"]
+    end
+
+    YTIN["YouTube：視聴者コメント"]
+
+    subgraph BACKEND["Pythonバックエンド"]
+        API["FastAPI：HTTP・WebSocket"]
+        INPUT["入力整理・コメント選択・発話キュー"]
+        AGENT["自作エージェント：人格・記憶・行動判断"]
+        LLMMOD["LLM接続モジュール"]
+        CHECK["出力検査・必要時の再生成"]
+        DB[("SQLite：SQLAlchemy")]
+    end
+
+    subgraph LOCALAI["ローカルAIサービス"]
+        OLLAMA["Ollama：通常の推論"]
+        MLX["MLX-LM：将来の推論候補"]
+        VOICEVOX["VOICEVOX Engine：音声合成"]
+    end
+
+    subgraph EXTERNAL["外部サービス"]
+        SEARCH["検索API・公式情報API"]
+        CLAUDE["Claude API：分析・追加判定"]
+    end
+
+    OBS["OBS Studio"]
+    YTLIVE["YouTube Live"]
+
+    ME --> UI
+    UI -- "HTTP・WebSocket" --> API
+    API -- "文字入力" --> INPUT
+    YTIN -- "YouTube API" --> INPUT
+    INPUT --> AGENT
+    AGENT --> LLMMOD
+    AGENT -- "確定した返答" --> DB
+    LLMMOD --> OLLAMA
+    LLMMOD -. "将来の切り替え先" .-> MLX
+    AGENT -. "最新情報が必要" .-> SEARCH
+    SEARCH -. "出典・日時付きの情報" .-> AGENT
+    LLMMOD -. "難しい分析" .-> CLAUDE
+    CLAUDE -. "分析結果" .-> LLMMOD
+    LLMMOD --> CHECK
+    CHECK -. "追加判定" .-> CLAUDE
+    CLAUDE -. "判定結果" .-> CHECK
+    CHECK -- "読み上げる文章" --> VOICEVOX
+    VOICEVOX -- "生成音声" --> API
+    API -- "字幕・表情" --> AVATAR
+    AVATAR --> OBS
+    OBS --> YTLIVE

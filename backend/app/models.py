@@ -40,10 +40,12 @@ class Base(DeclarativeBase):
 
 
 class SourceKind(StrEnum):
-    """入力元。フェーズ2以降で local_voice・youtube が増える。"""
+    """入力元。フェーズ4で youtube が増える。
+
+    利用者の音声入力は設計の対象外としたため、ローカルの入力は文字だけ。
+    """
 
     LOCAL_TEXT = "local_text"
-    LOCAL_VOICE = "local_voice"
     YOUTUBE = "youtube"
 
 
