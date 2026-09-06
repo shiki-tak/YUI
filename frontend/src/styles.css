@@ -87,8 +87,24 @@ body {
   font-weight: 600;
 }
 
-.panel-header button {
+.panel-header > button,
+.panel-header .header-actions {
   margin-left: auto;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 読み取り専用など、その会話でできることを最初に伝える。 */
+.notice {
+  margin: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .messages {
@@ -258,6 +274,18 @@ button.link {
 
 .memory.inactive {
   opacity: 0.55;
+}
+
+.history {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--panel-2);
+}
+
+.history.current {
+  border-color: var(--accent);
 }
 
 .memory-head {

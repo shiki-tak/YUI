@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from app.models import Certainty, MemoryKind, Visibility
+
+
+def _as_utc(value: datetime) -> datetime:
+    """timezone を持たない日時に UTC を補う。
+
+    保存は UTC（models.utcnow）で行っているが、SQLite は timezone を落として
+    返す。補わずに返すと、受け取った側が自分の地域の時刻として解釈し、
+    表示が実際の時刻とずれる。
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+UtcDatetime = Annotated[datetime, AfterValidator(_as_utc)]
 
 
 class ORMModel(BaseModel):
@@ -29,7 +42,7 @@ class MessageOut(ORMModel):
     source: str
     content: str
     delivery_state: str
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class MemoryOut(ORMModel):
@@ -42,12 +55,12 @@ class MemoryOut(ORMModel):
     visibility: str
     status: str
     keywords: str
-    occurred_at: datetime | None
+    occurred_at: UtcDatetime | None
     source_message_id: int | None
     source_conversation_id: int | None
     superseded_by_id: int | None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class RetrievedMemoryOut(BaseModel):
@@ -69,7 +82,7 @@ class RunRecordOut(ORMModel):
     latency_ms: int | None
     prompt_tokens: int | None
     completion_tokens: int | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class RunRecordDetail(RunRecordOut):
@@ -82,10 +95,10 @@ class ConversationOut(ORMModel):
     id: int
     mode: str
     title: str | None
-    started_at: datetime
-    ended_at: datetime | None
-    reflection_started_at: datetime | None
-    reflection_completed_at: datetime | None
+    started_at: UtcDatetime
+    ended_at: UtcDatetime | None
+    reflection_started_at: UtcDatetime | None
+    reflection_completed_at: UtcDatetime | None
 
 
 class ConversationDetail(ConversationOut):
@@ -148,7 +161,7 @@ class MemoryRevisionOut(ORMModel):
     before: dict[str, Any] | None
     after: dict[str, Any] | None
     reason: str | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class MemoryCandidateOut(ORMModel):
@@ -164,7 +177,7 @@ class MemoryCandidateOut(ORMModel):
     source_message_id: int | None
     status: str
     accepted_memory_id: int | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class CandidateDecision(BaseModel):
@@ -189,7 +202,7 @@ class IdealResponseOut(ORMModel):
     message_id: int
     ideal_text: str
     note: str | None
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class MemorySearchResult(BaseModel):

@@ -86,6 +86,21 @@ async def search(
     )
 
 
+@router.get("/memories/{memory_id}", response_model=MemoryOut)
+async def get_memory(
+    memory_id: int, session: AsyncSession = Depends(get_session)
+) -> Memory:
+    """記憶を1件取得する。過去の返答が参照した記憶を、IDから辿るために使う。
+
+    訂正・削除済みでも返す。当時どの記憶を渡したかを確認するためで、
+    「今は無い記憶を根拠にしていた」ことも分かる必要がある。
+    """
+    memory = await session.get(Memory, memory_id)
+    if memory is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "記憶が見つかりません。")
+    return memory
+
+
 @router.post("/memories", response_model=MemoryOut, status_code=status.HTTP_201_CREATED)
 async def add_memory(
     payload: MemoryCreate, session: AsyncSession = Depends(get_session)

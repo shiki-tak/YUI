@@ -1,36 +1,61 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { ChatResponse, RunRecord } from "../types";
-import { CERTAINTY_LABEL, KIND_LABEL } from "../types";
+import type {
+  ChatResponse,
+  ConversationState,
+  Memory,
+  Message,
+  RetrievedMemory,
+  RunRecord,
+} from "../types";
+import { CERTAINTY_LABEL, KIND_LABEL, formatDateTime } from "../types";
 import { SourceMessage } from "./SourceMessage";
 
 interface Props {
   conversationId: number | null;
-  entries: ChatResponse[];
+  /** 表示している発言。過去の会話を開いた場合は保存済みの履歴。 */
+  messages: Message[];
+  /** この画面で生成した返答の根拠。キーは返答の発言ID。 */
+  liveEntries: Record<number, ChatResponse>;
+  /** 会話の状態。新しい会話（未作成）は null。 */
+  state: ConversationState | null;
+  loading: boolean;
   onEntry: (entry: ChatResponse) => void;
-  onCandidates: () => void;
-  onReset: () => void;
+  /** 終了して振り返った直後。候補の取り直しと、読み取り専用への切り替えに使う。 */
+  onEnded: () => void;
+  onNewConversation: () => void;
 }
 
 export function ChatPanel({
   conversationId,
-  entries,
+  messages,
+  liveEntries,
+  state,
+  loading,
   onEntry,
-  onCandidates,
-  onReset,
+  onEnded,
+  onNewConversation,
 }: Props) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  // 終了済み・振り返り中の会話は読み取り専用で開く。送っても 409 になる。
+  const readOnly = state === "ended" || state === "reflecting";
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entries.length, busy]);
+  }, [messages.length, busy]);
+
+  // 別の会話を開いたら、前の会話に対する失敗の表示を残さない。
+  useEffect(() => {
+    setError(null);
+  }, [conversationId]);
 
   async function send() {
     const trimmed = text.trim();
-    if (!trimmed || busy) return;
+    if (!trimmed || busy || readOnly) return;
     setBusy(true);
     setError(null);
     try {
@@ -45,13 +70,12 @@ export function ChatPanel({
   }
 
   async function endConversation() {
-    if (conversationId === null || busy) return;
+    if (conversationId === null || busy || readOnly) return;
     setBusy(true);
     setError(null);
     try {
       await api.endConversation(conversationId);
-      onCandidates();
-      onReset();
+      onEnded();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -66,23 +90,52 @@ export function ChatPanel({
         <span className="muted">
           {conversationId === null ? "新しい会話" : `会話 #${conversationId}`}
         </span>
-        <button
-          type="button"
-          onClick={endConversation}
-          disabled={conversationId === null || busy}
-          title="会話を終了し、長期記憶の候補を抽出します"
-        >
-          終了して振り返る
-        </button>
+        <div className="header-actions">
+          <button
+            type="button"
+            onClick={onNewConversation}
+            disabled={conversationId === null || busy}
+            title="いまの会話から離れ、新しい会話を始めます"
+          >
+            新しい会話
+          </button>
+          <button
+            type="button"
+            onClick={endConversation}
+            disabled={conversationId === null || busy || readOnly}
+            title="会話を終了し、長期記憶の候補を抽出します"
+          >
+            終了して振り返る
+          </button>
+        </div>
       </header>
 
+      {readOnly && (
+        <p className="notice">
+          {state === "ended"
+            ? "終了した会話です。読み取り専用で表示しています。"
+            : "振り返り中の会話です。終わるまで発言を追加できません。"}
+        </p>
+      )}
+
       <div className="messages">
-        {entries.length === 0 && (
+        {loading && <p className="muted center">読み込み中…</p>}
+        {!loading && messages.length === 0 && (
           <p className="muted center">まだ会話がありません。話しかけてください。</p>
         )}
-        {entries.map((entry) => (
-          <Turn key={entry.reply.id} entry={entry} />
-        ))}
+        {messages.map((message) =>
+          message.speaker_kind === "user" ? (
+            <div key={message.id} className="bubble user" title={formatDateTime(message.created_at)}>
+              {message.content}
+            </div>
+          ) : (
+            <ReplyTurn
+              key={message.id}
+              message={message}
+              live={liveEntries[message.id]}
+            />
+          ),
+        )}
         {busy && <p className="muted center">考えています…</p>}
         <div ref={bottomRef} />
       </div>
@@ -96,11 +149,19 @@ export function ChatPanel({
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
           }}
-          placeholder="話しかける（⌘/Ctrl + Enter で送信）"
+          placeholder={
+            readOnly
+              ? "この会話には発言を追加できません"
+              : "話しかける（⌘/Ctrl + Enter で送信）"
+          }
           rows={3}
-          disabled={busy}
+          disabled={busy || readOnly}
         />
-        <button type="button" onClick={send} disabled={busy || !text.trim()}>
+        <button
+          type="button"
+          onClick={send}
+          disabled={busy || readOnly || !text.trim()}
+        >
           送信
         </button>
       </div>
@@ -108,79 +169,189 @@ export function ChatPanel({
   );
 }
 
-function Turn({ entry }: { entry: ChatResponse }) {
+/** キャラクターの返答と、その根拠への入り口。 */
+function ReplyTurn({ message, live }: { message: Message; live?: ChatResponse }) {
   const [showBasis, setShowBasis] = useState(false);
   const [showIdeal, setShowIdeal] = useState(false);
 
   return (
     <div className="turn">
-      <div className="bubble user">{entry.user_message.content}</div>
-      <div className="bubble character">{entry.reply.content}</div>
+      <div className="bubble character" title={formatDateTime(message.created_at)}>
+        {message.content}
+      </div>
       <div className="turn-actions">
         <button type="button" className="link" onClick={() => setShowBasis((v) => !v)}>
-          {showBasis ? "根拠を隠す" : `根拠（記憶 ${entry.used_memories.length} 件）`}
+          {showBasis
+            ? "根拠を隠す"
+            : live
+              ? `根拠（記憶 ${live.used_memories.length} 件）`
+              : "根拠"}
         </button>
         <button type="button" className="link" onClick={() => setShowIdeal((v) => !v)}>
           理想の返答を記録
         </button>
-        <span className="muted small">
-          {entry.run.model} / {entry.run.latency_ms ?? "-"} ms
-        </span>
+        {live && (
+          <span className="muted small">
+            {live.run.model} / {live.run.latency_ms ?? "-"} ms
+          </span>
+        )}
       </div>
-      {showBasis && <Basis entry={entry} />}
-      {showIdeal && <IdealForm messageId={entry.reply.id} />}
+      {showBasis && (
+        <Basis messageId={message.id} used={live ? live.used_memories : null} />
+      )}
+      {showIdeal && <IdealForm messageId={message.id} />}
     </div>
   );
 }
 
-function Basis({ entry }: { entry: ChatResponse }) {
+function Basis({
+  messageId,
+  used,
+}: {
+  messageId: number;
+  /** この画面で生成した返答だけが持つ、選ばれた理由と点数。 */
+  used: RetrievedMemory[] | null;
+}) {
   const [run, setRun] = useState<RunRecord | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.run(entry.reply.id).then(setRun).catch(() => setRun(null));
-  }, [entry.reply.id]);
+    api
+      .run(messageId)
+      .then((record) => {
+        setRun(record);
+        setError(null);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [messageId]);
 
   return (
     <div className="basis">
       <h4>渡した記憶</h4>
-      {entry.used_memories.length === 0 ? (
-        <p className="muted small">この返答に記憶は渡していません。</p>
+      {used ? (
+        used.length === 0 ? (
+          <p className="muted small">この返答に記憶は渡していません。</p>
+        ) : (
+          <ul>
+            {used.map((item) => (
+              <li key={item.memory.id}>
+                <MemoryLine
+                  memory={item.memory}
+                  hint={`${item.reason} · 点数 ${item.score}`}
+                />
+              </li>
+            ))}
+          </ul>
+        )
+      ) : error ? (
+        <p className="muted small">
+          実行記録を読めないため、渡した記憶を確認できません。
+        </p>
       ) : (
-        <ul>
-          {entry.used_memories.map((item) => (
-            <li key={item.memory.id}>
-              <span className="tag">{KIND_LABEL[item.memory.kind]}</span>
-              <span className="tag subtle">{CERTAINTY_LABEL[item.memory.certainty]}</span>
-              {item.memory.content}
-              <div className="muted small">
-                #{item.memory.id} · {item.reason} · 点数 {item.score}
-                {item.memory.source_message_id !== null ? (
-                  <>
-                    {" · "}
-                    <SourceMessage messageId={item.memory.source_message_id} />
-                  </>
-                ) : (
-                  <span className="tag warn"> 根拠未確認</span>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
+        // 過去の会話は、実行記録に残した記憶IDから引き直す。選ばれた理由と
+        // 点数は保存していないため、当時の内容だけを示す。
+        <ReferencedMemories ids={run ? (run.referenced_memory_ids ?? []) : null} />
       )}
+
       <h4>実行記録</h4>
-      <div className="muted small">
-        {entry.run.provider} / {entry.run.model}
-        {entry.run.model_digest && ` (${entry.run.model_digest.slice(0, 16)}…)`} ·
-        トークン {entry.run.prompt_tokens ?? "-"} / {entry.run.completion_tokens ?? "-"} ·
-        設定 {JSON.stringify(entry.run.options ?? {})}
-      </div>
-      {run?.system_prompt && (
-        <details>
-          <summary>実際に渡したプロンプト</summary>
-          <pre>{run.system_prompt}</pre>
-        </details>
+      {error && <p className="error small">{error}</p>}
+      {!run && !error && <p className="muted small">読み込み中…</p>}
+      {run && (
+        <>
+          <div className="muted small">
+            {run.provider} / {run.model}
+            {run.model_digest && ` (${run.model_digest.slice(0, 16)}…)`} · 応答{" "}
+            {run.latency_ms ?? "-"} ms · トークン {run.prompt_tokens ?? "-"} /{" "}
+            {run.completion_tokens ?? "-"} · 設定 {JSON.stringify(run.options ?? {})}
+          </div>
+          {run.system_prompt && (
+            <details>
+              <summary>実際に渡したプロンプト</summary>
+              <pre>{run.system_prompt}</pre>
+            </details>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+/** 実行記録に残った記憶IDから、当時渡した記憶を引き直す。 */
+function ReferencedMemories({ ids }: { ids: number[] | null }) {
+  const [memories, setMemories] = useState<Record<number, Memory | null>>({});
+  const key = (ids ?? []).join(",");
+
+  useEffect(() => {
+    if (!ids || ids.length === 0) return;
+    let cancelled = false;
+    // 1件が取れなくても残りは見せる。取れなかったことは行として示す。
+    Promise.all(
+      ids.map(async (id) => [id, await api.memory(id).catch(() => null)] as const),
+    ).then((pairs) => {
+      if (!cancelled) setMemories(Object.fromEntries(pairs));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // ids は毎回別の配列になるため、中身で比較する。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  if (ids === null) return <p className="muted small">読み込み中…</p>;
+  if (ids.length === 0)
+    return <p className="muted small">この返答に記憶は渡していません。</p>;
+
+  return (
+    <ul>
+      {ids.map((id) => {
+        const memory = memories[id];
+        if (memory === undefined) {
+          return (
+            <li key={id} className="muted small">
+              #{id} 読み込み中…
+            </li>
+          );
+        }
+        if (memory === null) {
+          return (
+            <li key={id}>
+              <span className="tag warn">取得できません</span>
+              <span className="muted small"> #{id}</span>
+            </li>
+          );
+        }
+        return (
+          <li key={id}>
+            <MemoryLine
+              memory={memory}
+              hint={memory.status !== "active" ? `現在は ${memory.status}` : undefined}
+            />
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function MemoryLine({ memory, hint }: { memory: Memory; hint?: string }) {
+  return (
+    <>
+      <span className="tag">{KIND_LABEL[memory.kind]}</span>
+      <span className="tag subtle">{CERTAINTY_LABEL[memory.certainty]}</span>
+      {memory.content}
+      <div className="muted small">
+        #{memory.id}
+        {hint && ` · ${hint}`}
+        {memory.source_message_id !== null ? (
+          <>
+            {" · "}
+            <SourceMessage messageId={memory.source_message_id} />
+          </>
+        ) : (
+          <span className="tag warn"> 根拠未確認</span>
+        )}
+      </div>
+    </>
   );
 }
 

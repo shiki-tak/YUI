@@ -2,19 +2,33 @@ import { useEffect, useState } from "react";
 import { api } from "./api";
 import { CandidatePanel } from "./components/CandidatePanel";
 import { ChatPanel } from "./components/ChatPanel";
+import { HistoryPanel } from "./components/HistoryPanel";
 import { MemoryPanel } from "./components/MemoryPanel";
-import type { ChatResponse, Health, MemoryCandidate } from "./types";
-import { SELF_SPEAKER } from "./types";
+import type {
+  ChatResponse,
+  ConversationState,
+  Health,
+  MemoryCandidate,
+  Message,
+} from "./types";
+import { SELF_SPEAKER, conversationState } from "./types";
 
-type Tab = "memories" | "candidates";
+type Tab = "memories" | "candidates" | "history";
 
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [conversationId, setConversationId] = useState<number | null>(null);
-  const [entries, setEntries] = useState<ChatResponse[]>([]);
+  // 表示している発言。過去の会話を開いた場合は保存済みの履歴が入る。
+  const [messages, setMessages] = useState<Message[]>([]);
+  // この画面で生成した返答の根拠。過去の会話には無いので、実行記録から引き直す。
+  const [liveEntries, setLiveEntries] = useState<Record<number, ChatResponse>>({});
+  const [conversation, setConversation] = useState<ConversationState | null>(null);
+  const [loadingConversation, setLoadingConversation] = useState(false);
   const [candidates, setCandidates] = useState<MemoryCandidate[]>([]);
   const [tab, setTab] = useState<Tab>("memories");
   const [memoryRefresh, setMemoryRefresh] = useState(0);
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   // 記憶検索を会話と同じ条件で行うために、自分の speaker id を解決する。
   const [selfSpeakerId, setSelfSpeakerId] = useState<number | null>(null);
 
@@ -40,6 +54,30 @@ export default function App() {
     api.pendingCandidates().then(setCandidates).catch(() => undefined);
   };
 
+  /** 保存済みの会話を開く。終了済みなら読み取り専用として表示する。 */
+  async function openConversation(id: number) {
+    setLoadingConversation(true);
+    setHistoryError(null);
+    try {
+      const detail = await api.conversation(id);
+      setConversationId(detail.id);
+      setMessages(detail.messages);
+      setLiveEntries({});
+      setConversation(conversationState(detail));
+    } catch (e) {
+      setHistoryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingConversation(false);
+    }
+  }
+
+  function startNewConversation() {
+    setConversationId(null);
+    setMessages([]);
+    setLiveEntries({});
+    setConversation(null);
+  }
+
   const pendingCount = candidates.filter((c) => c.status === "pending").length;
 
   return (
@@ -60,24 +98,32 @@ export default function App() {
       <main className="layout">
         <ChatPanel
           conversationId={conversationId}
-          entries={entries}
+          messages={messages}
+          liveEntries={liveEntries}
+          state={conversation}
+          loading={loadingConversation}
           onEntry={(entry) => {
+            const isNew = conversationId === null;
             setConversationId(entry.conversation_id);
-            setEntries((prev) => [...prev, entry]);
+            setMessages((prev) => [...prev, entry.user_message, entry.reply]);
+            setLiveEntries((prev) => ({ ...prev, [entry.reply.id]: entry }));
+            setConversation("open");
+            // 新しい会話が作られたときだけ一覧を取り直す。
+            if (isNew) setHistoryRefresh((n) => n + 1);
             if (selfSpeakerId === null) {
               // 初回の会話で相手が作られるので、ここで解決しておく。
               setSelfSpeakerId(entry.user_message.speaker_id);
             }
           }}
-          onCandidates={() => {
+          onEnded={() => {
+            // 終了しても画面からは消さない。読み取り専用に切り替えるだけにして、
+            // 何を話した結果の候補なのかを見比べられるようにする。
+            setConversation("ended");
+            setHistoryRefresh((n) => n + 1);
             refreshCandidates();
             setTab("candidates");
           }}
-          onReset={() => {
-            // 終了した会話には続けられないので、次は新しい会話として始める。
-            setConversationId(null);
-            setEntries([]);
-          }}
+          onNewConversation={startNewConversation}
         />
 
         <div className="side">
@@ -96,11 +142,19 @@ export default function App() {
             >
               記憶の候補{pendingCount > 0 ? `（${pendingCount}）` : ""}
             </button>
+            <button
+              type="button"
+              className={tab === "history" ? "active" : ""}
+              onClick={() => setTab("history")}
+            >
+              会話履歴
+            </button>
           </nav>
 
-          {tab === "memories" ? (
+          {tab === "memories" && (
             <MemoryPanel refreshKey={memoryRefresh} speakerId={selfSpeakerId} />
-          ) : (
+          )}
+          {tab === "candidates" && (
             <CandidatePanel
               candidates={candidates}
               onDecided={(updated) => {
@@ -110,6 +164,16 @@ export default function App() {
                 }
               }}
             />
+          )}
+          {tab === "history" && (
+            <>
+              {historyError && <p className="error">{historyError}</p>}
+              <HistoryPanel
+                refreshKey={historyRefresh}
+                currentId={conversationId}
+                onOpen={openConversation}
+              />
+            </>
           )}
         </div>
       </main>

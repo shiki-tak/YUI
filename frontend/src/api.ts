@@ -3,6 +3,8 @@
 import { SELF_SPEAKER } from "./types";
 import type {
   ChatResponse,
+  Conversation,
+  ConversationDetail,
   Health,
   IdealResponse,
   Memory,
@@ -51,6 +53,12 @@ export const api = {
   message: (messageId: number) =>
     request<Message>(`/conversations/messages/${messageId}`),
 
+  conversations: (limit = 50) =>
+    request<Conversation[]>(`/conversations?limit=${limit}`),
+
+  conversation: (conversationId: number) =>
+    request<ConversationDetail>(`/conversations/${conversationId}`),
+
   endConversation: (conversationId: number) =>
     request<MemoryCandidate[]>(`/conversations/${conversationId}/end`, {
       method: "POST",
@@ -80,6 +88,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ideal_text: idealText, note }),
     }),
+
+  // 過去の返答が参照した記憶を ID から引く。訂正・削除済みでも返る。
+  memory: (memoryId: number) => request<Memory>(`/memories/${memoryId}`),
 
   memories: (includeInactive: boolean) =>
     request<Memory[]>(`/memories?include_inactive=${includeInactive}`),

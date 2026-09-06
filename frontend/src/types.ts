@@ -29,6 +29,20 @@ export interface Message {
   created_at: string;
 }
 
+export interface Conversation {
+  id: number;
+  mode: string;
+  title: string | null;
+  started_at: string;
+  ended_at: string | null;
+  reflection_started_at: string | null;
+  reflection_completed_at: string | null;
+}
+
+export interface ConversationDetail extends Conversation {
+  messages: Message[];
+}
+
 export interface Memory {
   id: number;
   kind: MemoryKind;
@@ -140,3 +154,33 @@ export const SELF_SPEAKER = {
   external_id: "developer",
   display_name: "開発者",
 } as const;
+
+/** 会話が続けられるか。終了済み・振り返り中は読み取り専用として開く。 */
+export type ConversationState = "open" | "reflecting" | "ended";
+
+export function conversationState(
+  conversation: Conversation,
+): ConversationState {
+  if (conversation.reflection_completed_at !== null || conversation.ended_at !== null) {
+    return "ended";
+  }
+  if (conversation.reflection_started_at !== null) return "reflecting";
+  return "open";
+}
+
+export const CONVERSATION_STATE_LABEL: Record<ConversationState, string> = {
+  open: "続きを話せる",
+  reflecting: "振り返り中",
+  ended: "終了",
+};
+
+/** API が返す UTC の日時を、この端末の時刻で表示する。 */
+export function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
