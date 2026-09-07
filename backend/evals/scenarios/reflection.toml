@@ -125,3 +125,45 @@ text = "最近は朝の光を撮るのが気に入っててね"
 run = true
 expect_similar_marked = true
 human_check = "二重に覚えるのではなく、既存の記憶と結び付けて判断できる形になっているか"
+
+# ISSUE-021：残すべき内容の種類ごとに、抽出が落ちないかを見る。
+# 好み・習慣が丸ごと落ちていたことがあるため、種類を並べて測る。
+
+[[scenario]]
+id = "plan-is-kept"
+aspect = "reflection"
+description = "相手の予定が残るか（ISSUE-021 の種類別）。"
+
+[[scenario.turns]]
+text = "来週の土曜、友人の結婚式で名古屋に行くんだ"
+
+[scenario.reflection]
+run = true
+expect_any = ["結婚式", "名古屋"]
+
+[[scenario]]
+id = "situation-is-kept"
+aspect = "reflection"
+description = "相手のいまの状況が残るか（ISSUE-021 の種類別）。"
+
+[[scenario.turns]]
+text = "今週は仕事が立て込んでいて、あまり眠れていないんだ"
+
+[scenario.reflection]
+run = true
+expect_any = ["仕事", "眠", "忙"]
+
+[[scenario]]
+id = "impression-is-kept"
+aspect = "reflection"
+description = "キャラクター側の受け止めが残るか（ISSUE-021 の種類別）。"
+
+[[scenario.turns]]
+text = "苦しくても山を登るのは、頂上の景色を知ってるからなんだよ"
+
+[[scenario.turns]]
+text = "一度見ると忘れられなくてね"
+
+[scenario.reflection]
+run = true
+expect_kinds = ["impression|experience|about_person"]

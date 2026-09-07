@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models import Certainty, MemoryKind, SourceKind, Visibility
+from app.models import Certainty, MemoryKind, SourceKind, StateKind, Visibility
 
 # 設計書 ISSUE-006 が挙げている観点。ファイルの分け方と対応させる。
 ASPECTS = {
@@ -64,6 +64,28 @@ class MemorySpec(BaseModel):
             raise ValueError(f"certainty が不正です: {self.certainty}")
         if self.visibility not in {v.value for v in Visibility}:
             raise ValueError(f"visibility が不正です: {self.visibility}")
+        return self
+
+
+class StateSpec(BaseModel):
+    """会話を始める前に採用しておく、変化する状態（関心・相手との関係）。
+
+    固定人格とは別に渡されることと、相手の意見でその場で反転しないことを
+    見るために使う（設計書フェーズ3の3B）。
+    """
+
+    kind: str = StateKind.INTEREST.value
+    content: str = Field(min_length=1)
+    topic: str | None = None
+    # 関係性のとき：誰との関係か。
+    subject: str | None = None
+
+    @model_validator(mode="after")
+    def _check_kind(self) -> StateSpec:
+        if self.kind not in {k.value for k in StateKind}:
+            raise ValueError(f"状態の種類が不正です: {self.kind}")
+        if self.kind == StateKind.RELATIONSHIP.value and self.subject is None:
+            raise ValueError("関係性には subject が要ります。")
         return self
 
 
@@ -126,6 +148,7 @@ class Scenario(BaseModel):
     description: str = ""
     speakers: list[SpeakerSpec] = Field(default_factory=list)
     memories: list[MemorySpec] = Field(default_factory=list)
+    states: list[StateSpec] = Field(default_factory=list)
     turns: list[TurnSpec] = Field(min_length=1)
     reflection: ReflectionSpec | None = None
 
@@ -155,6 +178,10 @@ class Scenario(BaseModel):
             for field, value in (("subject", memory.subject), ("visible_to", memory.visible_to)):
                 if value is not None and value not in keys:
                     raise ValueError(f"memories.{field} が speakers にありません: {value}")
+
+        for state in self.states:
+            if state.subject is not None and state.subject not in keys:
+                raise ValueError(f"states.subject が speakers にありません: {state.subject}")
 
         default_speaker = self.speakers[0].key
         for turn in self.turns:

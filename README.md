@@ -32,8 +32,9 @@
 - 読み上げている本文をそのまま出す字幕
 - 待ち時間の計測（記憶検索・生成・合成・再生開始までを区間ごとに記録）
 
-実装の記録は [docs/result/phase1.md](docs/result/phase1.md) と
-[docs/result/phase2.md](docs/result/phase2.md)、残っている課題は
+実装の記録は [docs/result/phase1.md](docs/result/phase1.md)、
+[docs/result/phase2.md](docs/result/phase2.md)、
+[docs/result/phase3.md](docs/result/phase3.md)（進行中）、残っている課題は
 [docs/issues/issues.md](docs/issues/issues.md) にあります。
 
 フェーズ3以降は未着手です。2026-09-07 に開発計画を組み直し、

@@ -15,13 +15,14 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
 from app.agent.memory_store import create_memory, get_or_create_speaker
 from app.agent.reflection import ReflectionParseError, extract_candidates
 from app.config import LOCAL_TZ, Settings
 from app.evaluation.scenario import Scenario, TurnSpec
 from app.llm.base import LLMClient, LLMError
-from app.models import Base, Conversation, ConversationMode, Memory, Speaker
+from app.models import Base, Conversation, ConversationMode, Memory, Speaker, StateStatus
 from app.persona import Persona
 
 
@@ -176,6 +177,18 @@ async def _seed(session, scenario: Scenario) -> tuple[dict[str, Speaker], dict[i
             source=spec.source,
             external_id=spec.external_id,
             display_name=spec.display_name,
+        )
+
+    for spec in scenario.states:
+        await create_state(
+            session,
+            kind=spec.kind,
+            content=spec.content,
+            topic=spec.topic,
+            subject_speaker_id=speakers[spec.subject].id if spec.subject else None,
+            # 会話で使われる状態として置く。採用の流れ自体は pytest で確かめる。
+            status=StateStatus.ACTIVE.value,
+            reason="評価用会話の準備",
         )
 
     memory_keys: dict[int, str] = {}
