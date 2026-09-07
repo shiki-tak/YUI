@@ -215,8 +215,11 @@ BACKEND_PID="$LAST_PID"
 wait_for_http "http://127.0.0.1:$BACKEND_PORT/api/health" backend "$BACKEND_PID"
 ok "バックエンド    http://localhost:$BACKEND_PORT/docs"
 
+# --host を明示しないと、Node のバージョンによっては vite が "localhost" を
+# IPv6（::1）にしか解決せずバインドすることがある。起動確認は 127.0.0.1（IPv4）
+# を叩くため、その場合は起動していても応答しないと誤判定してしまう。
 start_process frontend "$FRONTEND" \
-  node_modules/.bin/vite --port "$FRONTEND_PORT" --strictPort
+  node_modules/.bin/vite --port "$FRONTEND_PORT" --strictPort --host 127.0.0.1
 FRONTEND_PID="$LAST_PID"
 wait_for_http "http://127.0.0.1:$FRONTEND_PORT/" frontend "$FRONTEND_PID"
 ok "フロントエンド  http://localhost:$FRONTEND_PORT"
