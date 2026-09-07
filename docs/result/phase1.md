@@ -164,4 +164,4 @@ Codex による5回のレビューを受け、指摘15件に対応した。
 
 - 残課題は [docs/issues/issues.md](../issues/issues.md) に記録した。
 - フェーズ2（アバターと音声）では、`messages.delivery_state` を音声再生の開始・完了・中断に対応させる。
-- フェーズ4（YouTube配信）では、`turn_lock.py` の順序制御を発話キューへ発展させ、`visibility` による配信時の記憶の絞り込みを実際に使う。
+- フェーズ6A（YouTube接続、旧フェーズ4）では、`turn_lock.py` の順序制御を発話キューへ発展させ、`visibility` による配信時の記憶の絞り込みを実際に使う。
