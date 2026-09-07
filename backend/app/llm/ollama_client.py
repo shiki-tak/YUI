@@ -46,7 +46,7 @@ class OllamaClient(LLMClient):
         self._digest_cache: dict[str, str] = {}
 
     async def _model_digest(self) -> str | None:
-        """モデルの版。フェーズ7で採用モデルを追えるように記録する。"""
+        """モデルの版。並行改善（学習）で採用モデルを追えるように記録する。"""
         if self.model in self._digest_cache:
             return self._digest_cache[self.model]
         try:
