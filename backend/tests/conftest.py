@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent import ConversationAgent, get_agent
+from app.agent.reflection import _PICKUP_INSTRUCTION as PICKUP_INSTRUCTION
 from app.agent.state_reflection import _INSTRUCTION as STATE_INSTRUCTION
 from app.config import get_settings
 from app.db import get_session
@@ -42,6 +43,10 @@ class FakeLLM(LLMClient):
         # 用意しなくても済むようにする。
         self.state_scripted: list[str] = []
         self.state_default = "[]"
+        # 記憶の抽出は2段階（拾う → 選ぶ）。1段階目は既定で1件拾ったことに
+        # して、テストは「選ぶ」側の出力だけを書けばよいようにする。
+        self.pickup_scripted: list[str] = []
+        self.pickup_default = '[{"content": "会話に出てきた内容", "source_message_id": null}]' 
         # 生成中の状態を再現するための門。gate を待たせると応答待ちになる。
         self.entered = asyncio.Event()
         self.gate: asyncio.Event | None = None
@@ -52,6 +57,10 @@ class FakeLLM(LLMClient):
     def push_state(self, text: str) -> None:
         """関心・関係性の抽出が返す内容。"""
         self.state_scripted.append(text)
+
+    def push_pickup(self, text: str) -> None:
+        """記憶の抽出の1段階目（拾う）が返す内容。"""
+        self.pickup_scripted.append(text)
 
     @property
     def last_system_prompt(self) -> str:
@@ -66,6 +75,8 @@ class FakeLLM(LLMClient):
             await self.gate.wait()
         if messages and messages[0].content == STATE_INSTRUCTION:
             text = self.state_scripted.pop(0) if self.state_scripted else self.state_default
+        elif messages and messages[0].content == PICKUP_INSTRUCTION:
+            text = self.pickup_scripted.pop(0) if self.pickup_scripted else self.pickup_default
         else:
             text = self.scripted.pop(0) if self.scripted else self.default
         return LLMResponse(

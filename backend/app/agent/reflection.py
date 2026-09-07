@@ -70,9 +70,33 @@ class ReflectionParseError(RuntimeError):
 class _ItemError(ValueError):
     """候補1件を読み取れなかった。理由を添えて上位へ伝える。"""
 
-_INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ記憶の候補を抜き出す担当です。
+_PICKUP_INSTRUCTION = """あなたは会話ログから、後で話題にできそうな内容を
+**すべて拾い出す**担当です。残すかどうかの判断はしません。それは次の担当が行います。
 
-次の会話を読み、長期的に覚えておく価値のあることだけを JSON 配列で出力してください。
+次の会話を読み、後の会話で「あの話」として触れられそうな内容を、短い文で並べて
+ください。相手が話した出来事、事情、好み、習慣、興味、これからの予定、いまの状況、
+体調や気分、約束、キャラクター側の受け止め方が当たります。
+
+出力は JSON 配列です。各要素の形式:
+{
+  "content": "一文で書いた内容",
+  "source_message_id": 根拠になった発言の番号（会話の [#番号] から選ぶ）
+}
+
+規則:
+- **迷ったら挙げてください。**ここで挙がらなかったものは、この先で拾い直せません。
+- 会話の中で実際に言われたことだけを挙げる。書かれていないことを補わない。
+- あいさつそのもの（「こんにちは」など）は挙げない。
+- source_message_id は、会話に出てくる [#番号] のいずれかを1つだけ選ぶ。
+  推測して番号を作らない。
+- 該当が無ければ [] とだけ出力する。
+- JSON 配列だけを出力し、説明文やコードブロックは付けない。
+"""
+
+
+_INSTRUCTION = """あなたは、拾い出された内容から、長期的に覚えておくものを選ぶ担当です。
+
+拾い出された内容がそれぞれ与えられます。**残すものだけ**を JSON 配列で出力してください。
 
 各要素の形式:
 {
@@ -87,6 +111,8 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 }
 
 規則:
+- 拾い出された内容を1件ずつ見て、残すものだけを出す。**内容を書き換えず、
+  そのまま使ってよい。**まとめられるものは1件にしてよい。
 - kind の意味は experience=出来事、about_person=相手について知ったこと、promise=約束、
   impression=キャラクター側の受け止め方。
 - promise は「次に話す」「次にする」と決めた内容。「次は◯◯の話をしよう」
@@ -117,6 +143,64 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 - 該当が無ければ [] とだけ出力する。
 - JSON 配列だけを出力し、説明文やコードブロックは付けない。
 """
+
+
+class PickupPayload(BaseModel):
+    """拾い出しの1件。ここでは残すかどうかを決めない。"""
+
+    content: str = Field(min_length=1, max_length=500)
+    source_message_id: int | None = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _strip(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+def _parse_pickups(text: str) -> list[PickupPayload]:
+    """拾い出しの結果を読み取る。
+
+    ここで失敗しても既定へ寄せない。拾えなかったものは、この先で拾い直せない
+    （ISSUE-021 の「一度も記憶にならない」がまさにこの形）。
+    """
+    match = _JSON_ARRAY.search(text)
+    if not match:
+        raise ReflectionParseError(
+            f"拾い出しの出力にJSON配列が見つかりませんでした: {_excerpt(text)}"
+        )
+    try:
+        raw = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise ReflectionParseError(
+            f"拾い出しの出力をJSONとして読み取れませんでした: {_excerpt(text)}"
+        ) from exc
+    if not isinstance(raw, list):
+        raise ReflectionParseError("拾い出しの出力が配列ではありませんでした。")
+
+    results: list[PickupPayload] = []
+    problems: list[str] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            problems.append(f"{index}件目: 要素がオブジェクトではありません")
+            continue
+        try:
+            results.append(PickupPayload.model_validate(item))
+        except ValidationError:
+            problems.append(f"{index}件目: 項目を読み取れません")
+    if problems:
+        raise ReflectionParseError(
+            f"拾い出しの出力に読み取れないものが {len(problems)} 件ありました。"
+            + "".join(f"\n- {problem}" for problem in problems)
+        )
+    return results
+
+
+def format_pickups(pickups: list[PickupPayload]) -> str:
+    lines = ["拾い出された内容:"]
+    for pickup in pickups:
+        source = f"（根拠 [#{pickup.source_message_id}]）" if pickup.source_message_id else ""
+        lines.append(f"- {pickup.content}{source}")
+    return "\n".join(lines)
 
 
 class CandidatePayload(BaseModel):
@@ -238,12 +322,30 @@ async def extract_candidates(
     transcript = format_transcript(messages, partner_name, character_name)
     # 「先週」「昨日」を日付へ直すには、今日が何日かが要る。
     today = utcnow().astimezone(LOCAL_TZ).date()
+
+    # 1段階目：拾う。残すかどうかを判断させない。1回の呼び出しで「拾う」と
+    # 「選ぶ」を同時にさせると、種類によっては一度も挙がらなかった（ISSUE-021）。
+    picked = await llm.chat(
+        [
+            ChatMessage(role="system", content=_PICKUP_INSTRUCTION),
+            ChatMessage(role="user", content=f"会話:\n{transcript}"),
+        ],
+        options={"temperature": 0.2},
+    )
+    pickups = _parse_pickups(picked.text)
+    if not pickups:
+        return []
+
+    # 2段階目：選ぶ。拾ったものだけを見て、残すものを決める。
     response = await llm.chat(
         [
             ChatMessage(role="system", content=_INSTRUCTION),
             ChatMessage(
                 role="user",
-                content=f"今日の日付: {today.isoformat()}\n\n会話:\n{transcript}",
+                content=(
+                    f"今日の日付: {today.isoformat()}\n\n"
+                    f"{format_pickups(pickups)}\n\n会話:\n{transcript}"
+                ),
             ),
         ],
         # 抽出は毎回同じ結果になってほしいので、返答生成より温度を下げる。
