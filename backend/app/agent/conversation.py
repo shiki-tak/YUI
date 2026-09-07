@@ -1,11 +1,12 @@
-"""会話進行。設計書「5. 1回の会話の流れ」のフェーズ1相当。
+"""会話進行。設計書「6. 会話・自発的行動の流れ」のうち、現在実装している範囲。
 
 1. 発言を受け取り、会話履歴に保存する。
 2. 相手・話題に合う長期記憶を検索する。
 3. 人格・記憶・直近の会話を LLM へ渡す。
 4. 返答を保存し、実行記録（モデル・設定・参照した記憶・応答時間）を残す。
 
-検索・クラウド・出力検査はフェーズ3以降で 2 と 3 の間に入る。
+検索・クラウド分析・出力検査はフェーズ5Aで 2 と 3 の間に入る。行動選択
+（回答・確認質問・話題提案・調査・待機）はフェーズ4で 2 の後に入る。
 """
 
 from __future__ import annotations
@@ -66,7 +67,11 @@ class ConversationAgent:
         speaker: Speaker,
         text: str,
         source: str = SourceKind.LOCAL_TEXT.value,
+        persona: Persona | None = None,
     ) -> ReplyResult:
+        # 人格は会話ごとに差し替えられる。3A で同じ入力を別の版へ通し、
+        # 着眼点や口調の違いを比べるため。指定が無ければ設定の版を使う。
+        persona = persona or self._persona
         user_message = Message(
             conversation_id=conversation.id,
             speaker_kind=SpeakerKind.USER.value,
@@ -94,7 +99,7 @@ class ConversationAgent:
         retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
 
         messages, system_prompt = prompt_builder.build_messages(
-            persona=self._persona,
+            persona=persona,
             memories=memories,
             speaker=speaker,
             history=history,
@@ -134,6 +139,7 @@ class ConversationAgent:
             provider=response.provider,
             model=response.model,
             model_digest=response.model_digest,
+            persona_version=persona.version,
             options=response.options,
             referenced_memory_ids=[m.memory.id for m in memories],
             system_prompt=system_prompt,

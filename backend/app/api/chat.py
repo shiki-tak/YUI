@@ -11,6 +11,7 @@ from app.agent.turn_lock import conversation_locks
 from app.db import get_session
 from app.llm.base import LLMError
 from app.models import Conversation, ConversationMode
+from app.persona import Persona, available_versions, load_persona
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -40,6 +41,23 @@ def _ensure_open(conversation: Conversation) -> None:
         )
 
 
+def _resolve_persona(version: str | None) -> Persona | None:
+    """指定された人格の版を読む。指定が無ければ既定の版に任せる。
+
+    版の名前はファイル名になるため、用意されている版だけを許す。要求された
+    版が無い場合に既定へ落とすと、実行記録の版と実際の文面が食い違う。
+    """
+    if version is None:
+        return None
+    if version not in available_versions():
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"人格の版が見つかりません: {version}。"
+            f"用意されている版: {'、'.join(available_versions()) or 'なし'}",
+        )
+    return load_persona(version)
+
+
 async def _resolve_conversation(
     session: AsyncSession, conversation_id: int | None
 ) -> Conversation:
@@ -61,6 +79,7 @@ async def chat(
     session: AsyncSession = Depends(get_session),
     agent: ConversationAgent = Depends(get_agent),
 ) -> ChatResponse:
+    persona = _resolve_persona(payload.persona_version)
     conversation = await _resolve_conversation(session, payload.conversation_id)
     speaker = await get_or_create_speaker(
         session,
@@ -83,6 +102,7 @@ async def chat(
                 conversation=conversation,
                 speaker=speaker,
                 text=payload.text,
+                persona=persona,
             )
         except LLMError as exc:
             # 相手の発言は生成前にコミット済みなので、履歴に残ったまま失敗を伝える。

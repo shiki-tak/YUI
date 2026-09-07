@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # 音声を切っても会話は続けられる。エンジンが無い環境で使う。
     speech_enabled: bool = True
 
+    # 固定人格。personas/<版>.toml を読む。版を増やして比較できるようにし、
+    # 生成に使った版は実行記録に残す（設計書フェーズ3の3A）。
+    persona_version: str = "2026-09-06.2"
+    persona_dir: str = "personas"
+
     # DB
     database_url: str = "sqlite+aiosqlite:///./data/yui.db"
 
@@ -54,6 +59,12 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def persona_path(self) -> Path:
+        """人格の版を置くディレクトリ。相対指定は backend/ からとして解く。"""
+        path = Path(self.persona_dir)
+        return path if path.is_absolute() else (BACKEND_ROOT / path).resolve()
 
     @property
     def sqlite_path(self) -> Path | None:

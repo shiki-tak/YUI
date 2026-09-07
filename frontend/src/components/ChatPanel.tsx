@@ -376,7 +376,8 @@ function Basis({
         <>
           <div className="muted small">
             {run.provider} / {run.model}
-            {run.model_digest && ` (${run.model_digest.slice(0, 16)}…)`} · 応答{" "}
+            {run.model_digest && ` (${run.model_digest.slice(0, 16)}…)`} · 人格{" "}
+            {run.persona_version ?? "版の記録なし"} · 応答{" "}
             {run.latency_ms ?? "-"} ms · トークン {run.prompt_tokens ?? "-"} /{" "}
             {run.completion_tokens ?? "-"} · 設定 {JSON.stringify(run.options ?? {})}
           </div>

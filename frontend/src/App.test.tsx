@@ -64,6 +64,7 @@ function chatResponse(): ChatResponse {
       provider: "fake",
       model: "fake",
       model_digest: null,
+  persona_version: "2026-09-06.2",
       options: null,
       referenced_memory_ids: [],
       retrieval_ms: 1,

@@ -31,7 +31,7 @@ from app.models import (
     SpeechRun,
     utcnow,
 )
-from app.persona import BASE_PERSONA
+from app.persona import load_persona
 from app.schemas import (
     CandidateDecision,
     ConversationDetail,
@@ -127,6 +127,11 @@ async def end_conversation(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
 
     # 開始権の確定はロックの内側で行う。外で確定すると、ロック待ちの時間が
+    # 振り返りの開始権を取る前に人格を解決する。開始権を取った後に失敗すると、
+    # 解放されないまま reflection_stale_seconds を過ぎるまで再試行できない。
+    # 人格の読み込みはファイルを読むため、ここで失敗しうる。
+    character_name = load_persona().name
+
     # 回収期限に含まれ、稼働中の振り返りまで期限切れとみなされてしまう。
     async with conversation_locks.hold(conversation_id):
         await session.refresh(conversation)
@@ -171,7 +176,7 @@ async def end_conversation(
                 conversation=conversation,
                 partner_speaker_id=partner.id if partner else None,
                 partner_name=partner.display_name if partner else "相手",
-                character_name=BASE_PERSONA.name,
+                character_name=character_name,
             )
         except (LLMError, ReflectionParseError) as exc:
             # 抽出できなかった会話を処理中・終了済みのまま残すと、やり直せない。
@@ -349,7 +354,7 @@ async def create_ideal_response(
     payload: IdealResponseCreate,
     session: AsyncSession = Depends(get_session),
 ) -> IdealResponse:
-    """理想の返答を記録する。フェーズ7の教師データと比較評価に使う。"""
+    """理想の返答を記録する。並行改善（学習）の教師データと比較評価に使う。"""
     message = await session.get(Message, message_id)
     if message is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "発言が見つかりません。")

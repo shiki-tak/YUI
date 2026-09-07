@@ -7,7 +7,7 @@ from functools import lru_cache
 from app.agent.conversation import ConversationAgent, ReplyResult
 from app.config import get_settings
 from app.llm import get_llm_client
-from app.persona import BASE_PERSONA
+from app.persona import load_persona
 
 __all__ = ["ConversationAgent", "ReplyResult", "get_agent"]
 
@@ -16,6 +16,6 @@ __all__ = ["ConversationAgent", "ReplyResult", "get_agent"]
 def get_agent() -> ConversationAgent:
     return ConversationAgent(
         llm=get_llm_client(),
-        persona=BASE_PERSONA,
+        persona=load_persona(),
         settings=get_settings(),
     )

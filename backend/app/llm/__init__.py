@@ -15,7 +15,7 @@ __all__ = ["ChatMessage", "LLMClient", "LLMError", "LLMResponse", "get_llm_clien
 def get_llm_client() -> LLMClient:
     """通常の推論に使うクライアント。
 
-    フェーズ3でクラウド、フェーズ7で MLX を足すときは、ここで
+    フェーズ5A でクラウド、並行改善（学習）で MLX を足すときは、ここで
     用途に応じた LLMClient を返すようにする。
     """
     settings = get_settings()

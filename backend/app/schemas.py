@@ -79,6 +79,7 @@ class RunRecordOut(ORMModel):
     provider: str
     model: str
     model_digest: str | None
+    persona_version: str | None
     options: dict[str, Any] | None
     referenced_memory_ids: list[int] | None
     retrieval_ms: int | None
@@ -135,6 +136,24 @@ class ChatRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     conversation_id: int | None = None
     speaker: SpeakerRef = SpeakerRef()
+    # 固定人格の版。省略すると設定の版を使う。同じ会話へ別の版で答えさせて
+    # 比べられるようにする（設計書フェーズ3の3A）。用意されている版だけを許す。
+    persona_version: str | None = Field(default=None, max_length=64)
+
+
+class PersonaOut(BaseModel):
+    """固定人格の内容。開発画面で、どの版で話しているかを確認する。"""
+
+    name: str
+    version: str
+    traits: list[str]
+    speech: list[str]
+    rules: list[str]
+    identity: list[str]
+    curiosity: list[str]
+    boundaries: list[str]
+    prompt: str
+    available_versions: list[str]
 
 
 class ChatResponse(BaseModel):

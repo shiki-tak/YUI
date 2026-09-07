@@ -1,6 +1,7 @@
 """SQLAlchemy モデル。
 
-設計書「6. 保存するデータ」に対応する。特に次の区別を構造として持たせている。
+設計書「5. 記憶・経験・目標のデータ設計」に対応する。特に次の区別を構造として
+持たせている。
 
 - 会話履歴（messages）と長期記憶（memories）を分ける。
 - 事実（fact）と推測（inference）を certainty で区別する。
@@ -40,9 +41,10 @@ class Base(DeclarativeBase):
 
 
 class SourceKind(StrEnum):
-    """入力元。フェーズ4で youtube が増える。
+    """入力元。フェーズ6A（YouTube接続）で youtube が増える。
 
-    利用者の音声入力は設計の対象外としたため、ローカルの入力は文字だけ。
+    ローカルの入力は現在は文字だけ。マイク入力はフェーズ10で追加する。
+    その場合も文字起こしを同じ入力受付へ送るため、この列は文字入力と同じ扱いになる。
     """
 
     LOCAL_TEXT = "local_text"
@@ -50,7 +52,7 @@ class SourceKind(StrEnum):
 
 
 class ConversationMode(StrEnum):
-    """会話モード。stream では公開可能な記憶だけを参照する（フェーズ4）。"""
+    """会話モード。stream では公開可能な記憶だけを参照する（フェーズ6A）。"""
 
     LOCAL = "local"
     STREAM = "stream"
@@ -189,7 +191,8 @@ class Memory(Base):
     certainty: Mapped[str] = mapped_column(String(16), default=Certainty.FACT, nullable=False)
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default=MemoryStatus.ACTIVE, nullable=False)
-    # 記憶検索のキーワード。フェーズ1は語の一致で検索し、意味検索は後から足す。
+    # 記憶検索のキーワード。いまは語の一致で検索する。意味検索は、検索漏れが
+    # 具体的に確認された段階で足す（ISSUE-008）。
     keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 根拠の会話。どの発言からこの記憶ができたかを追える。
@@ -257,6 +260,11 @@ class RunRecord(Base):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     model_digest: Mapped[str | None] = mapped_column(String(128))
+    # 生成に使った固定人格の版（personas/<版>.toml）。版を変えた前後を
+    # 同じ会話例で比べられるようにする（設計書フェーズ3の3A）。
+    # system_prompt も引き続き残す。版の定義を後から書き換えても、
+    # そのとき実際に渡した文面は変わらないため。
+    persona_version: Mapped[str | None] = mapped_column(String(64))
     options: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 生成時に実際に渡した記憶の id。返答の根拠を後から追える。
     referenced_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
@@ -273,7 +281,7 @@ class RunRecord(Base):
 class SpeechRun(Base):
     """音声合成の実行記録。
 
-    設計書フェーズ2の実装内容5「送信から音声の再生開始までの時間を測り、
+    設計書フェーズ2の実装内容6「送信から音声の再生開始までの時間を測り、
     待ち時間の大きい部分を確認する」に使う。合成用データの作成と音声生成を
     分けて残し、音声そのものの長さとも区別する。
 
@@ -302,7 +310,7 @@ class SpeechRun(Base):
 
 
 class IdealResponse(Base):
-    """理想の返答。フェーズ7の教師データと、フェーズ5の比較評価に使う。"""
+    """理想の返答。並行改善（学習）の教師データと、フェーズ3の比較評価に使う。"""
 
     __tablename__ = "ideal_responses"
 

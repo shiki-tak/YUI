@@ -81,6 +81,8 @@ export interface RunRecord {
   provider: string;
   model: string;
   model_digest: string | null;
+  /** 生成に使った固定人格の版。版を変えた前後を見分けるために出す。 */
+  persona_version: string | null;
   options: Record<string, unknown> | null;
   referenced_memory_ids: number[] | null;
   retrieval_ms: number | null;

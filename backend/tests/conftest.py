@@ -22,7 +22,7 @@ from app.llm import get_llm_client
 from app.llm.base import ChatMessage, LLMClient, LLMResponse
 from app.main import app
 from app.models import Base
-from app.persona import BASE_PERSONA
+from app.persona import load_persona
 from app.voice import get_speech_client
 from app.voice.base import SpeechClient, SpeechError, SpeechResult
 
@@ -136,7 +136,7 @@ async def client(
                 await session.rollback()
                 raise
 
-    agent = ConversationAgent(llm=fake_llm, persona=BASE_PERSONA, settings=get_settings())
+    agent = ConversationAgent(llm=fake_llm, persona=load_persona(), settings=get_settings())
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_agent] = lambda: agent
     app.dependency_overrides[get_llm_client] = lambda: fake_llm
