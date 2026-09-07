@@ -98,3 +98,28 @@ human_check = "要求に流されて口調を変えていないか"
 [scenario.reflection]
 run = true
 expect_empty = true
+
+[[scenario]]
+id = "repeated-story-is-marked"
+aspect = "reflection"
+description = "同じ内容を別の会話でもう一度話したとき、既存の記憶と近いと分かるか（3C）。"
+
+[[scenario.memories]]
+key = "camera"
+kind = "about_person"
+content = "開発者は写真を撮るのが好き"
+certainty = "fact"
+keywords = "写真 趣味 撮影"
+
+# 1ターンだけの会話は抽出が不安定なため（ISSUE-017 の残り risk）、
+# 実運用に近い長さにしてある。
+[[scenario.turns]]
+text = "私、写真を撮るのが好きなんだよ。休みの日はカメラを持って歩いてる"
+
+[[scenario.turns]]
+text = "最近は朝の光を撮るのが気に入っててね"
+
+[scenario.reflection]
+run = true
+expect_similar_marked = true
+human_check = "二重に覚えるのではなく、既存の記憶と結び付けて判断できる形になっているか"

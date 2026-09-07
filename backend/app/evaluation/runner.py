@@ -312,6 +312,19 @@ async def _run_reflection(
                 ),
             )
         )
+    if spec.expect_similar_marked:
+        marked = [c for c in candidates if c.similar_memory_ids]
+        result.checks.append(
+            Check(
+                name="近い記憶の印",
+                ok=bool(marked),
+                detail=(
+                    f"{len(marked)} 件に付いた"
+                    if marked
+                    else "既存の記憶と近いのに、印が付かなかった"
+                ),
+            )
+        )
     if spec.expect_kinds:
         kinds = {c.kind for c in candidates}
         missing = [

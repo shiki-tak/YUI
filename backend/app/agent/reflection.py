@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.memory_store import find_similar_memories
 from app.llm.base import ChatMessage, LLMClient
 from app.models import (
     CandidateStatus,
@@ -65,8 +66,8 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 - promise は「次に話す」「次にする」と決めた内容。「次は◯◯の話をしよう」
   「今度◯◯しよう」のような話題の予告も含む。会話に出てきたら、他に何を出すかに
   関わらず必ず1件残す。
-- 相手が話した出来事や事情は、一度しか出てこなくても残す。後の会話で「その話」
-  として触れられる内容かどうかで判断する。
+- 相手が話した出来事・事情・好み・習慣・興味は、一度しか出てこなくても残す。
+  後の会話で「その話」として触れられる内容かどうかで判断する。
 - 会話の中で相手が実際に言ったことだけを根拠にする。書かれていないことを補わない。
 - キャラクター自身の経験や過去を作らない。会話に出てきていない体験を、
   どの種別でもキャラクターのものとして書かない。impression はキャラクター側の
@@ -226,6 +227,15 @@ async def extract_candidates(
         # 話した」を A さんの好みとして保存すると、次の会話で A さんの好みとして
         # 使われる。モデルの about_partner を、伝聞のときは採らない。
         about_partner = payload.about_partner and payload.provenance != Provenance.HEARSAY.value
+        # 同じ出来事を二重に覚えないよう、近い記憶を控えておく。ここでは
+        # 捨てず、採用を判断するときに見せる（ISSUE-018）。
+        similar = await find_similar_memories(
+            session,
+            content=payload.content,
+            keywords=payload.keywords,
+            speaker_id=partner_speaker_id,
+            mode=conversation.mode,
+        )
         candidate = MemoryCandidate(
             conversation_id=conversation.id,
             kind=payload.kind,
@@ -238,6 +248,7 @@ async def extract_candidates(
             visibility=Visibility.PRIVATE.value,
             keywords=payload.keywords.strip(),
             source_message_id=source_message_id,
+            similar_memory_ids=[item.memory.id for item in similar] or None,
             status=CandidateStatus.PENDING.value,
         )
         session.add(candidate)

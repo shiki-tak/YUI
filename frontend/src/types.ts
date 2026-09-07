@@ -115,17 +115,23 @@ export interface ChatResponse {
   used_memories: RetrievedMemory[];
 }
 
+export type Provenance = "firsthand" | "hearsay" | "unknown";
+
 export interface MemoryCandidate {
   id: number;
   conversation_id: number;
   kind: MemoryKind;
   content: string;
+  /** どうやって知ったか。伝聞を本人の発言と区別する。 */
+  provenance: Provenance;
   subject_speaker_id: number | null;
   visible_to_speaker_id: number | null;
   certainty: Certainty;
   visibility: Visibility;
   keywords: string;
   source_message_id: number | null;
+  /** 内容が近い既存の記憶。二重に覚えないための手がかりとして出す。 */
+  similar_memory_ids: number[] | null;
   status: "pending" | "accepted" | "rejected";
   accepted_memory_id: number | null;
   created_at: string;

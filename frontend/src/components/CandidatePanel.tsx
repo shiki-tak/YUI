@@ -65,8 +65,20 @@ function CandidateRow({ candidate, onDecided }: RowProps) {
       <div className="memory-head">
         <span className="tag">{KIND_LABEL[candidate.kind]}</span>
         <span className="tag subtle">{CERTAINTY_LABEL[candidate.certainty]}</span>
+        {candidate.provenance === "hearsay" && (
+          <span className="tag subtle">人づてに聞いた</span>
+        )}
         <span className="muted small">会話 #{candidate.conversation_id}</span>
       </div>
+      {candidate.similar_memory_ids && candidate.similar_memory_ids.length > 0 && (
+        // 同じ出来事を二重に覚えないための手がかり。自動では捨てないので、
+        // 採用するか、既存の記憶を訂正するかは開発者が決める。
+        <p className="tag warn">
+          既存の記憶と近い（
+          {candidate.similar_memory_ids.map((id) => `#${id}`).join("、")}
+          ）。二重に覚えるか、既存を訂正するか確かめてください。
+        </p>
+      )}
       <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={2} />
       <div className="muted small">
         {candidate.keywords && `キーワード: ${candidate.keywords}`}

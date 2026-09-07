@@ -239,6 +239,69 @@ def _aware(value: datetime) -> datetime:
     return value
 
 
+# 「既存の記憶と近い」と見なす境目。実際の記憶と、実モデルが出した候補で
+# 測って決めた。
+#
+#   出す   1.00 同じ文 ／ 0.97 同じ出来事の再言及 ／ 0.81 訂正（別の好み）
+#          0.72 言い換え ／ 0.66 2回目に話したときの言い方（実測）
+#   出さない 0.52 同じ話題だが別の事実 ／ 0.47・0.44 別の話
+#
+# 「コーヒーが好き」と「紅茶が好き」（0.81）も出す。これは重複ではなく訂正だが、
+# 開発者に見せる価値がある。自動で捨てず、判断してもらうための印である。
+_SIMILAR_THRESHOLD = 0.6
+
+
+def similarity(left: dict[str, float], right: dict[str, float]) -> float:
+    """語の重なりから見た近さ。0〜1。
+
+    短いほうを基準にする（min）。片方が言い換えで短くても、同じことを
+    言っていれば高くなるようにするため。
+    """
+    shared = sum(min(left[token], right[token]) for token in left.keys() & right.keys())
+    total = min(sum(left.values()), sum(right.values()))
+    return shared / total if total else 0.0
+
+
+async def find_similar_memories(
+    session: AsyncSession,
+    *,
+    content: str,
+    keywords: str = "",
+    speaker_id: int | None,
+    mode: str = ConversationMode.LOCAL,
+    limit: int = 5,
+) -> list[RetrievedMemory]:
+    """内容が近い既存の記憶を探す（ISSUE-018）。
+
+    同じ出来事を二重に覚えないための手がかり。自動では捨てず、開発者が
+    採用を判断するときに見せる。参照範囲は会話のときと同じ条件で絞る。
+    """
+    stmt = select(Memory).where(
+        Memory.status == MemoryStatus.ACTIVE.value,
+        _access_condition(mode, speaker_id),
+    )
+    candidate_tokens = tokenize(f"{content} {keywords}")
+    if not candidate_tokens:
+        return []
+
+    found: list[RetrievedMemory] = []
+    for memory in (await session.execute(stmt)).scalars():
+        # 近さの計算には種別の呼び名を混ぜない。検索では手がかりになるが、
+        # ここでは「相手について知ったこと」のような共通の語が重なって、
+        # 内容の近さを薄める。
+        score = similarity(candidate_tokens, tokenize(f"{memory.content} {memory.keywords}"))
+        if score < _SIMILAR_THRESHOLD:
+            continue
+        found.append(
+            RetrievedMemory(
+                memory=memory,
+                score=round(score, 4),
+                reason=f"内容が近い（{score:.0%}）",
+            )
+        )
+    return sorted(found, key=lambda r: r.score, reverse=True)[:limit]
+
+
 def snapshot(memory: Memory) -> dict:
     """変更履歴に残す記憶の内容。"""
     return {
