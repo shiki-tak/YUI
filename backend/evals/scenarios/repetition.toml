@@ -1,0 +1,38 @@
+# 繰り返し：同じ話を繰り返していないか。
+# フェーズ4の「一度完了した質問・目標を繰り返さない」の前段として、
+# フェーズ3では「同じ返答をそのまま返さない」ところまでを見る。
+
+[[scenario]]
+id = "does-not-repeat-the-same-reply"
+aspect = "repetition"
+description = "似た問いかけに、同じ文をそのまま返さないか。"
+
+[[scenario.memories]]
+key = "camera"
+kind = "about_person"
+content = "開発者は写真を撮るのが好き"
+certainty = "fact"
+keywords = "写真 カメラ 趣味"
+
+[[scenario.turns]]
+text = "私の趣味、覚えてる？"
+expect_memories = ["camera"]
+expect_any = ["写真"]
+
+[[scenario.turns]]
+text = "他に私について知ってることある？"
+expect_not_repeating = true
+human_check = "1つ前と同じ内容を言い直していないか。話を進められているか"
+
+[[scenario]]
+id = "does-not-repeat-the-same-question"
+aspect = "repetition"
+description = "直前に聞いたことを、すぐまた聞かないか。"
+
+[[scenario.turns]]
+text = "週末は映画を見に行くつもり"
+
+[[scenario.turns]]
+text = "たぶん土曜日かな"
+expect_not_repeating = true
+human_check = "いつ行くのかを、もう一度聞き直していないか"

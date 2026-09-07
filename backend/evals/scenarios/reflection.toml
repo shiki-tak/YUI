@@ -1,0 +1,61 @@
+# 振り返り：残すべき経験・約束が候補に含まれるか。
+# ISSUE-002（明示的な約束の取りこぼし）を測る場所。取りこぼしは頻度で見る
+# 必要があるため、--repeat を付けて流す。
+
+[[scenario]]
+id = "promise-running-shoes"
+aspect = "reflection"
+description = "ISSUE-002 の再現例。qwen3.5:9b が3回とも [] を返した会話。"
+
+[[scenario.turns]]
+text = "最近はランニングを始めたよ。朝5キロ走ってる。次はシューズの話をしよう"
+human_check = "返答自体が約束を受け止めているか"
+
+[scenario.reflection]
+run = true
+expect_kinds = ["promise"]
+expect_any = ["シューズ"]
+
+[[scenario]]
+id = "promise-guitar-chords"
+aspect = "reflection"
+description = "同じ構造で候補が出ていた会話。ISSUE-002 の対照。"
+
+[[scenario.turns]]
+text = "実は最近ギターを始めたんだ。指が痛くてなかなか進まないけど楽しいよ"
+
+[[scenario.turns]]
+text = "好きなバンドのバラードかな。次はコードの練習の話をしよう"
+
+[scenario.reflection]
+run = true
+expect_kinds = ["promise"]
+expect_any = ["コード", "練習"]
+
+[[scenario]]
+id = "experience-is-kept"
+aspect = "reflection"
+description = "約束ではない経験も、後で使える形で残るか。"
+
+[[scenario.turns]]
+text = "先週、実家の犬が18歳になったんだ。まだ散歩に行きたがるんだよ"
+
+[scenario.reflection]
+run = true
+# 実家の犬の話は、出来事とも相手について知ったこととも読める。分類の揺れは
+# 問わず、内容が残ることを見る。
+expect_kinds = ["experience|about_person"]
+expect_any = ["犬"]
+human_check = "キャラクター自身の経験として、会話に無い体験を作っていないか"
+
+[[scenario]]
+id = "small-talk-is-not-kept"
+aspect = "reflection"
+description = "その場限りのやり取りを、記憶の候補にしないか。"
+
+[[scenario.turns]]
+text = "こんにちは。今日はいい天気だね"
+
+[scenario.reflection]
+run = true
+expect_empty = true

@@ -177,6 +177,34 @@ LLM と音声合成は共通インターフェース越しに差し替えるた�
 会話の切り替えを対象にしています。どちらも画面側にあり、バックエンドのテストでは
 守れないためです。
 
+## 評価用会話
+
+テストが実装の振る舞いを固定するのに対し、こちらは人格・記憶・根拠の質を
+**実際のモデルで**測ります。Ollama が起動している必要があります。
+
+```sh
+cd backend
+.venv/bin/python -m app.evaluation.run --repeat 3          # 全シナリオ
+.venv/bin/python -m app.evaluation.run --aspect reflection # 観点で絞る
+.venv/bin/python -m app.evaluation.run --only promise-running-shoes
+.venv/bin/python -m app.evaluation.run --persona-version <別の版>
+```
+
+シナリオは `backend/evals/scenarios/*.toml`（記憶・根拠・人格・振り返り・繰り返し）。
+結果は `logs/evals/<日時>-<人格の版>/` に Markdown と JSON で出ます。
+
+人格の版は `backend/personas/*.toml` にあり、版ごとの比較と採用の記録は
+[docs/result/persona_versions.md](docs/result/persona_versions.md) にあります。
+
+合否を1つの数字にまとめません。同じシナリオを複数回流し、機械で判定できる
+観点は「通った回数／試行回数」で出します（生成の揺れと本当の失敗を分けるため）。
+口調・着眼点・迎合していないかは、レポートの「人が見る点」を読んで判断します。
+
+人格の版を変えて2回流すと、2つのレポートを並べて比べられます。レポートの
+先頭に、人格の版・モデル・モデルの版・生成設定が残ります。
+
+通常利用のDBは使いません。シナリオごとに使い捨てのDBを作ります。
+
 ## モデルの選定
 
 同じ会話・同じプロンプトで、記憶に答えがある質問（「私の趣味が何なのか知っていますか？」）を
