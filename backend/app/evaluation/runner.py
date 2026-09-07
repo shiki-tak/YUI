@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.agent.conversation import ConversationAgent
 from app.agent.memory_store import create_memory, get_or_create_speaker
 from app.agent.reflection import ReflectionParseError, extract_candidates
-from app.config import Settings
+from app.config import LOCAL_TZ, Settings
 from app.evaluation.scenario import Scenario, TurnSpec
 from app.llm.base import LLMClient, LLMError
 from app.models import Base, Conversation, ConversationMode, Memory, Speaker
@@ -309,6 +309,21 @@ async def _run_reflection(
                     "候補なし"
                     if not candidates
                     else f"{len(candidates)} 件出た: {'、'.join(c.content for c in candidates)}"
+                ),
+            )
+        )
+    if spec.expect_occurred_at:
+        dated = [c for c in candidates if c.occurred_at is not None]
+        result.checks.append(
+            Check(
+                name="出来事の日付",
+                ok=bool(dated),
+                detail=(
+                    "、".join(
+                        c.occurred_at.astimezone(LOCAL_TZ).strftime("%Y-%m-%d") for c in dated
+                    )
+                    if dated
+                    else "会話に日付の手がかりがあるのに、入らなかった"
                 ),
             )
         )

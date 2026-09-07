@@ -246,6 +246,7 @@ async def decide_candidate(
         provenance=(payload.provenance.value if payload.provenance else candidate.provenance),
         visibility=(payload.visibility.value if payload.visibility else candidate.visibility),
         keywords=(payload.keywords if payload.keywords is not None else candidate.keywords),
+        occurred_at=candidate.occurred_at,
         source_message_id=candidate.source_message_id,
         source_conversation_id=candidate.conversation_id,
         reason=payload.reason or "会話の振り返りから採用",

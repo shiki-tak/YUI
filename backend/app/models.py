@@ -267,6 +267,8 @@ class MemoryCandidate(Base):
     )
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # いつの出来事か（ISSUE-004）。会話に日付の手がかりが無ければ NULL。
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id"))
     # 内容が近い既存の記憶（ISSUE-018）。二重に覚えないための手がかりとして
     # 採用の判断時に見せる。自動では捨てない。

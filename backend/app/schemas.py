@@ -247,6 +247,7 @@ class MemoryCandidateOut(ORMModel):
     certainty: str
     visibility: str
     keywords: str
+    occurred_at: UtcDatetime | None
     source_message_id: int | None
     # 内容が近い既存の記憶。二重に覚えないための手がかり。
     similar_memory_ids: list[int] | None

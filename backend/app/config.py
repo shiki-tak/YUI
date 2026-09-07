@@ -2,10 +2,14 @@
 
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+
+# 表示と、会話に出てくる日付の解釈に使う地域時刻。保存は UTC のまま。
+LOCAL_TZ = ZoneInfo("Asia/Tokyo")
 
 
 class Settings(BaseSettings):

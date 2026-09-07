@@ -8,14 +8,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from app.agent.memory_store import KIND_LABEL, RetrievedMemory
+from app.config import LOCAL_TZ
 from app.llm.base import ChatMessage
 from app.models import Certainty, Message, Provenance, Speaker, SpeakerKind, utcnow
 from app.persona import Persona
 
-JST = ZoneInfo("Asia/Tokyo")
+JST = LOCAL_TZ
 
 def _format_memory(item: RetrievedMemory) -> str:
     memory = item.memory

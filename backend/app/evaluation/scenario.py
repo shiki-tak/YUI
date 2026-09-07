@@ -96,6 +96,9 @@ class ReflectionSpec(BaseModel):
     expect_kinds: list[str] = Field(default_factory=list)
     # 候補の本文に含まれてほしい語。いずれか1つでも含まれれば通す。
     expect_any: list[str] = Field(default_factory=list)
+    # 出来事の日付が入ること（ISSUE-004）。会話に日付の手がかりがある
+    # シナリオで使う。
+    expect_occurred_at: bool = False
     # 候補に「近い既存の記憶」が印として付くこと。同じ出来事を二重に
     # 覚えないための手がかりが働いているかを見る（ISSUE-018）。
     expect_similar_marked: bool = False

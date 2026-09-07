@@ -42,6 +42,8 @@ text = "先週、実家の犬が18歳になったんだ。まだ散歩に行き�
 
 [scenario.reflection]
 run = true
+# 「先週」を日付へ直せているか（ISSUE-004）。
+expect_occurred_at = true
 # 実家の犬の話は、出来事とも相手について知ったこととも読める。分類の揺れは
 # 問わず、内容が残ることを見る。
 expect_kinds = ["experience|about_person"]

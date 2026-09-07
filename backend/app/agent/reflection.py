@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, date, datetime, time
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.memory_store import find_similar_memories
+from app.config import LOCAL_TZ
 from app.llm.base import ChatMessage, LLMClient
 from app.models import (
     CandidateStatus,
@@ -25,9 +27,32 @@ from app.models import (
     Provenance,
     SpeakerKind,
     Visibility,
+    utcnow,
 )
 
 _JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
+
+
+def _parse_occurred_on(value: str | None, *, today: date) -> datetime | None:
+    """出来事の日付を読み取る。読み取れなければ日付なしとして扱う。
+
+    ここは source_message_id と同じ考え方で、失敗を全体の失敗にしない。
+    日付は多くの記憶で決まらないもので、null が正しい値であるため。
+    ただし、読めない値や未来の日付を、それらしい日付へ寄せることはしない。
+    間違った日付は、日付が無いことより悪い。
+    """
+    if not value:
+        return None
+    try:
+        parsed = date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed > today:
+        return None
+    # 日付だけを扱う。地域時刻のその日の始まりを、UTC に直して返す。
+    # SQLite は timezone を落とすため、他の日時と同じく UTC で保存しないと、
+    # 読み戻したときに地域時刻の値を UTC として解釈してずれる（ISSUE-003）。
+    return datetime.combine(parsed, time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
 
 
 class ReflectionParseError(RuntimeError):
@@ -54,6 +79,7 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
   "kind": "experience" | "about_person" | "promise" | "impression",
   "content": "一文で書いた覚えておく内容",
   "certainty": "fact" | "inference",
+  "occurred_on": "YYYY-MM-DD" または null,
   "provenance": "firsthand" | "hearsay" | "unknown",
   "keywords": "検索用の語を空白区切りで3〜6個",
   "about_partner": true | false,
@@ -81,6 +107,10 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
   その人の家族や友人についての内容は false。
 - あいさつ、天気の話のようなその場限りのやり取り、既に一般常識であることは出さない。
   ただし、上の promise と、相手が話した出来事はこれに当たらない。
+- occurred_on：会話に「先週」「昨日」「3日前」「今朝」のような、いつのことかを
+  示す言い方があれば、**必ず**日付へ直して入れる。会話の冒頭にある今日の日付を
+  もとに数える。手がかりが無い内容（好み、性格など、いつのことか決まらないもの）
+  だけ null にする。推測で日付を作らない。未来の日付は書かない。
 - source_message_id には、その内容の根拠になった発言の番号を1つだけ選ぶ。
   会話に出てくる [#番号] のいずれかで、推測して番号を作らない。
 - 該当が無ければ [] とだけ出力する。
@@ -90,6 +120,7 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 
 class CandidatePayload(BaseModel):
     kind: str
+    occurred_on: str | None = None
     provenance: str = Provenance.UNKNOWN.value
     content: str = Field(min_length=1, max_length=500)
 
@@ -204,10 +235,15 @@ async def extract_candidates(
         return []
 
     transcript = format_transcript(messages, partner_name, character_name)
+    # 「先週」「昨日」を日付へ直すには、今日が何日かが要る。
+    today = utcnow().astimezone(LOCAL_TZ).date()
     response = await llm.chat(
         [
             ChatMessage(role="system", content=_INSTRUCTION),
-            ChatMessage(role="user", content=f"会話:\n{transcript}"),
+            ChatMessage(
+                role="user",
+                content=f"今日の日付: {today.isoformat()}\n\n会話:\n{transcript}",
+            ),
         ],
         # 抽出は毎回同じ結果になってほしいので、返答生成より温度を下げる。
         options={"temperature": 0.2},
@@ -247,6 +283,7 @@ async def extract_candidates(
             certainty=payload.certainty,
             visibility=Visibility.PRIVATE.value,
             keywords=payload.keywords.strip(),
+            occurred_at=_parse_occurred_on(payload.occurred_on, today=today),
             source_message_id=source_message_id,
             similar_memory_ids=[item.memory.id for item in similar] or None,
             status=CandidateStatus.PENDING.value,
