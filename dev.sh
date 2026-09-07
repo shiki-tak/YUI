@@ -13,6 +13,11 @@
 # 環境によって違うため）。起動していれば使い、無ければ警告して続行する。
 #
 # macOS 標準の bash 3.2 で動くように書いている（wait -n や連想配列は使わない）。
+#
+# 変数展開のすぐ後に全角文字を続けない（$VAR）のように書くと、日本語ロケール
+# （例：LANG=ja_JP.UTF-8）の bash 3.2 が set -u のもとで変数名の走査を誤り、
+# 存在しない変数への参照として nounset エラーになることがある。${VAR} と
+# 波括弧で囲むことで避ける。
 
 set -euo pipefail
 
@@ -134,7 +139,7 @@ wait_for_http() {
     fi
     sleep 0.5
   done
-  fail "$label が応答しません（$url）。logs/ を確認してください。"
+  fail "${label} が応答しません（${url}）。logs/ を確認してください。"
 }
 
 # --- 事前確認 ---------------------------------------------------------------
@@ -164,7 +169,7 @@ OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:9b}"
 
 curl -fs -m 3 -o /dev/null "$OLLAMA_HOST/api/tags" 2>/dev/null \
-  || fail "Ollama に接続できません（$OLLAMA_HOST）。\`ollama serve\` を起動してください。"
+  || fail "Ollama に接続できません（${OLLAMA_HOST}）。\`ollama serve\` を起動してください。"
 curl -fs -m 5 "$OLLAMA_HOST/api/tags" 2>/dev/null | grep -q "\"${OLLAMA_MODEL%%:*}" \
   || fail "モデル $OLLAMA_MODEL がありません。次を実行してください:
     ollama pull $OLLAMA_MODEL"
@@ -177,9 +182,9 @@ SPEECH_ENABLED="$(read_env YUI_SPEECH_ENABLED)"
 if [ "${SPEECH_ENABLED:-true}" = "false" ]; then
   warn "音声合成：無効（YUI_SPEECH_ENABLED=false）"
 elif VOICEVOX_VERSION="$(curl -fs -m 3 "$VOICEVOX_HOST/version" 2>/dev/null)"; then
-  ok "VOICEVOX：$(printf '%s' "$VOICEVOX_VERSION" | tr -d '\"')（$VOICEVOX_HOST）"
+  ok "VOICEVOX：$(printf '%s' "$VOICEVOX_VERSION" | tr -d '\"')（${VOICEVOX_HOST}）"
 else
-  warn "VOICEVOX に接続できません（$VOICEVOX_HOST）。音声なしで起動します。
+  warn "VOICEVOX に接続できません（${VOICEVOX_HOST}）。音声なしで起動します。
   エンジンを起動してから開き直すと音声を使えます。"
 fi
 
