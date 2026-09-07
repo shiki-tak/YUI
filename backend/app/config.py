@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # 固定人格。personas/<版>.toml を読む。版を増やして比較できるようにし、
     # 生成に使った版は実行記録に残す（設計書フェーズ3の3A）。
-    persona_version: str = "2026-09-06.2"
+    persona_version: str = "2026-09-07.1"
     persona_dir: str = "personas"
 
     # DB

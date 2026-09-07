@@ -98,9 +98,10 @@ def test_unknown_version_is_an_error() -> None:
 
 
 async def test_run_record_keeps_the_persona_version_used(client: AsyncClient) -> None:
+    """記録に残るのは、そのとき使った版。既定の版を変えても追随する。"""
     response = await client.post("/api/chat", json={"text": "こんにちは"})
     assert response.status_code == 200
-    assert response.json()["run"]["persona_version"] == BASELINE_VERSION
+    assert response.json()["run"]["persona_version"] == get_settings().persona_version
 
 
 async def test_persona_version_can_be_chosen_per_request(
@@ -148,12 +149,18 @@ async def test_unknown_version_does_not_fall_back_to_the_default(client: AsyncCl
 
 
 async def test_persona_api_returns_the_version_and_the_list(client: AsyncClient) -> None:
+    default = load_persona()
     response = await client.get("/api/persona")
     assert response.status_code == 200
     body = response.json()
-    assert body["version"] == BASELINE_VERSION
-    assert body["prompt"] == BASELINE_PROMPT
-    assert BASELINE_VERSION in body["available_versions"]
+    assert body["version"] == default.version
+    assert body["prompt"] == default.to_prompt()
+    # 採用済みの版も、基準版も、どちらも選べる状態で残っている。
+    assert {default.version, BASELINE_VERSION} <= set(body["available_versions"])
+
+    # 版を指定すると、その版の定義を返す。基準版との比較に使う。
+    baseline = await client.get(f"/api/persona?version={BASELINE_VERSION}")
+    assert baseline.json()["prompt"] == BASELINE_PROMPT
 
     missing = await client.get("/api/persona?version=2099-01-01")
     assert missing.status_code == 404
