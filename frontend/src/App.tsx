@@ -12,7 +12,7 @@ import type {
   MemoryCandidate,
   Message,
 } from "./types";
-import { SELF_SPEAKER, conversationState } from "./types";
+import { SELF_SPEAKER, conversationState, shouldApplyDelivery } from "./types";
 import { useSpeechPlayer } from "./useSpeechPlayer";
 
 type Tab = "memories" | "candidates" | "history";
@@ -53,8 +53,16 @@ export default function App() {
   }, []);
 
   // 再生の記録が変わったら、画面の発言にも反映する。
+  // 通知の応答が入れ替わって届くことがあるため、進んだ状態からは戻さない。
   const applyDelivery = useCallback((updated: Message) => {
-    setMessages((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === updated.id &&
+        shouldApplyDelivery(m.delivery_state, updated.delivery_state)
+          ? updated
+          : m,
+      ),
+    );
   }, []);
   // 会話欄とアバターの両方が見るため、再生器はここで持つ。
   const player = useSpeechPlayer(applyDelivery);

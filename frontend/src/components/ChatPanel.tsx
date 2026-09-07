@@ -85,7 +85,9 @@ export function ChatPanel({
 
   async function send() {
     const trimmed = text.trim();
-    if (!trimmed || busy || readOnly) return;
+    // 読み込み中は送信先が決まっていない。ここで送ると、開こうとしている
+    // 会話ではなく新しい会話へ発言が入る。
+    if (!trimmed || busy || readOnly || loading) return;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -215,17 +217,19 @@ export function ChatPanel({
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
           }}
           placeholder={
-            readOnly
-              ? "この会話には発言を追加できません"
-              : "話しかける（⌘/Ctrl + Enter で送信）"
+            loading
+              ? "会話を読み込んでいます…"
+              : readOnly
+                ? "この会話には発言を追加できません"
+                : "話しかける（⌘/Ctrl + Enter で送信）"
           }
           rows={3}
-          disabled={busy || readOnly}
+          disabled={busy || readOnly || loading}
         />
         <button
           type="button"
           onClick={send}
-          disabled={busy || readOnly || !text.trim()}
+          disabled={busy || readOnly || loading || !text.trim()}
         >
           送信
         </button>

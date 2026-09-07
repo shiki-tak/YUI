@@ -224,3 +224,28 @@ export const DELIVERY_LABEL: Record<DeliveryState, string> = {
   completed: "話し終えた",
   aborted: "中断",
 };
+
+/**
+ * 状態の進み具合。generated → playing → completed／aborted と一方向に進む。
+ * completed と aborted はどちらも終わりで、そこから戻らない。
+ */
+const DELIVERY_RANK: Record<DeliveryState, number> = {
+  generated: 0,
+  playing: 1,
+  completed: 2,
+  aborted: 2,
+};
+
+/**
+ * 受け取った状態を表示へ反映してよいか。
+ *
+ * 通知の応答は、サーバーが作った時点の確定状態である。開始の通知が先に
+ * 反映され、その応答だけ遅れて届くと、すでに話し終えた表示が「再生中」へ
+ * 戻ってしまう。進んだ状態からは戻さない。
+ */
+export function shouldApplyDelivery(
+  current: DeliveryState,
+  incoming: DeliveryState,
+): boolean {
+  return DELIVERY_RANK[incoming] >= DELIVERY_RANK[current];
+}
