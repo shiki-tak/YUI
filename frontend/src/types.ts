@@ -85,6 +85,8 @@ export interface RunRecord {
   persona_version: string | null;
   options: Record<string, unknown> | null;
   referenced_memory_ids: number[] | null;
+  /** 返答に渡した可変状態。記憶と分けて残す。 */
+  referenced_state_ids: number[] | null;
   retrieval_ms: number | null;
   latency_ms: number | null;
   prompt_tokens: number | null;
@@ -135,6 +137,26 @@ export interface MemoryCandidate {
   status: "pending" | "accepted" | "rejected";
   accepted_memory_id: number | null;
   created_at: string;
+}
+
+/** 変化する状態：YUI の関心と、相手との関係。固定人格とは別に扱う。 */
+export interface CharacterState {
+  id: number;
+  kind: "interest" | "relationship";
+  subject_speaker_id: number | null;
+  topic: string | null;
+  content: string;
+  /** 根拠にした記憶。訂正・削除されると要確認の印が付く。 */
+  basis_memory_ids: number[] | null;
+  needs_review: boolean;
+  review_reason: string | null;
+  status: "pending" | "active" | "rejected" | "superseded" | "withdrawn";
+  visibility: Visibility;
+  visible_to_speaker_id: number | null;
+  superseded_by_id: number | null;
+  source_conversation_id: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface MemoryRevision {

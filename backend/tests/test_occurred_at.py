@@ -61,7 +61,12 @@ async def _reflect(client: AsyncClient, fake_llm: FakeLLM, text: str, output: st
 async def test_today_is_given_to_the_model(client: AsyncClient, fake_llm: FakeLLM) -> None:
     """「先週」を日付へ直すには、今日が何日かが要る。"""
     await _reflect(client, fake_llm, "先週の話なんだけど", "[]")
-    sent = fake_llm.calls[-1][-1].content
+    # 振り返りは2回呼ぶ（記憶の抽出と、関心・関係性の抽出）。日付を渡すのは
+    # 記憶の抽出のほう。
+    memory_call = next(
+        call for call in fake_llm.calls if "occurred_on" in call[0].content
+    )
+    sent = memory_call[-1].content
     assert "今日の日付:" in sent
     assert datetime.now(LOCAL_TZ).date().isoformat() in sent
 

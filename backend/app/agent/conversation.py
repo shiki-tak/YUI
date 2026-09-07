@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent import prompt as prompt_builder
+from app.agent.character_state import active_states
 from app.agent.memory_store import RetrievedMemory, search_memories
 from app.config import Settings
 from app.llm.base import LLMClient
@@ -100,6 +101,9 @@ class ConversationAgent:
             mode=conversation.mode,
             limit=self._settings.memory_retrieval_limit,
         )
+        # 可変状態（関心・関係性）も、記憶と同じ区間で読む。固定人格とは
+        # 分けて渡し、どれを使ったかを実行記録に残す。
+        states = await active_states(session, speaker_id=speaker.id, mode=conversation.mode)
         retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
 
         messages, system_prompt = prompt_builder.build_messages(
@@ -108,6 +112,7 @@ class ConversationAgent:
             speaker=speaker,
             history=history,
             user_text=text,
+            states=states,
         )
 
         # 生成に入る前にトランザクションを閉じる。SQLite は書き込みロックを
@@ -146,6 +151,7 @@ class ConversationAgent:
             persona_version=persona.version,
             options=response.options,
             referenced_memory_ids=[m.memory.id for m in memories],
+            referenced_state_ids=[state.id for state in states] or None,
             system_prompt=system_prompt,
             retrieval_ms=retrieval_ms,
             latency_ms=response.latency_ms,

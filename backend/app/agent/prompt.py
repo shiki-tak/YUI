@@ -9,10 +9,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.agent.character_state import KIND_LABEL as STATE_LABEL
 from app.agent.memory_store import KIND_LABEL, RetrievedMemory
 from app.config import LOCAL_TZ
 from app.llm.base import ChatMessage
-from app.models import Certainty, Message, Provenance, Speaker, SpeakerKind, utcnow
+from app.models import (
+    Certainty,
+    CharacterState,
+    Message,
+    Provenance,
+    Speaker,
+    SpeakerKind,
+    utcnow,
+)
 from app.persona import Persona
 
 JST = LOCAL_TZ
@@ -52,11 +61,34 @@ def build_memory_section(memories: list[RetrievedMemory]) -> str:
     return "\n".join(lines)
 
 
+def build_state_section(states: list[CharacterState]) -> str:
+    """いまの関心と、相手との関係。
+
+    固定人格とは別の見出しで渡す。人格は変わらない基準、こちらは経験で
+    変わっていくもので、混ぜると「いま思っていること」が人格の一部として
+    扱われる（設計書 4.1）。
+    """
+    if not states:
+        return ""
+    lines = ["# いまの自分", ""]
+    for state in states:
+        label = STATE_LABEL.get(state.kind, state.kind)
+        topic = f"／{state.topic}" if state.topic else ""
+        lines.append(f"- [{label}{topic}] {state.content}")
+    lines.append("")
+    lines.append(
+        "これは経験から変わっていくものです。相手の意見に合わせて、"
+        "その場で反転させないでください。"
+    )
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     *,
     persona: Persona,
     memories: list[RetrievedMemory],
     speaker: Speaker | None,
+    states: list[CharacterState] | None = None,
     now: datetime | None = None,
 ) -> str:
     now = (now or utcnow()).astimezone(JST)
@@ -68,6 +100,10 @@ def build_system_prompt(
     sections.append(f"- 話している相手：{partner}")
     sections.append("- 場所：開発者との個人的な会話。配信ではありません。")
     sections.append("")
+    state_section = build_state_section(states or [])
+    if state_section:
+        sections.append(state_section)
+        sections.append("")
     sections.append(build_memory_section(memories))
     return "\n".join(sections)
 
@@ -79,11 +115,12 @@ def build_messages(
     speaker: Speaker | None,
     history: list[Message],
     user_text: str,
+    states: list[CharacterState] | None = None,
     now: datetime | None = None,
 ) -> tuple[list[ChatMessage], str]:
     """LLM へ渡すメッセージ列と、記録用のシステムプロンプトを返す。"""
     system_prompt = build_system_prompt(
-        persona=persona, memories=memories, speaker=speaker, now=now
+        persona=persona, memories=memories, speaker=speaker, states=states, now=now
     )
     messages: list[ChatMessage] = [ChatMessage(role="system", content=system_prompt)]
     # 相手が複数いる会話では、発言に誰のものかを付ける。付けないと、履歴の

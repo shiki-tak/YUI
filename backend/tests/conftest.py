@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent import ConversationAgent, get_agent
+from app.agent.state_reflection import _INSTRUCTION as STATE_INSTRUCTION
 from app.config import get_settings
 from app.db import get_session
 from app.llm import get_llm_client
@@ -36,12 +37,21 @@ class FakeLLM(LLMClient):
         self.calls: list[list[ChatMessage]] = []
         self.scripted: list[str] = []
         self.default = "はい、覚えていますよ。"
+        # 関心・関係性の抽出は別の呼び出しなので、返す内容も別に持つ。
+        # 既定は「更新なし」。記憶の抽出を確かめるテストが、状態の抽出まで
+        # 用意しなくても済むようにする。
+        self.state_scripted: list[str] = []
+        self.state_default = "[]"
         # 生成中の状態を再現するための門。gate を待たせると応答待ちになる。
         self.entered = asyncio.Event()
         self.gate: asyncio.Event | None = None
 
     def push(self, text: str) -> None:
         self.scripted.append(text)
+
+    def push_state(self, text: str) -> None:
+        """関心・関係性の抽出が返す内容。"""
+        self.state_scripted.append(text)
 
     @property
     def last_system_prompt(self) -> str:
@@ -54,7 +64,10 @@ class FakeLLM(LLMClient):
         self.entered.set()
         if self.gate is not None:
             await self.gate.wait()
-        text = self.scripted.pop(0) if self.scripted else self.default
+        if messages and messages[0].content == STATE_INSTRUCTION:
+            text = self.state_scripted.pop(0) if self.state_scripted else self.state_default
+        else:
+            text = self.scripted.pop(0) if self.scripted else self.default
         return LLMResponse(
             text=text,
             provider=self.provider,

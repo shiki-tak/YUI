@@ -67,6 +67,7 @@ function chatResponse(): ChatResponse {
   persona_version: "2026-09-06.2",
       options: null,
       referenced_memory_ids: [],
+  referenced_state_ids: null,
       retrieval_ms: 1,
       latency_ms: 10,
       prompt_tokens: null,

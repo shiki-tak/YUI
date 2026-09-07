@@ -84,6 +84,7 @@ class RunRecordOut(ORMModel):
     persona_version: str | None
     options: dict[str, Any] | None
     referenced_memory_ids: list[int] | None
+    referenced_state_ids: list[int] | None
     retrieval_ms: int | None
     latency_ms: int | None
     prompt_tokens: int | None
@@ -287,6 +288,80 @@ class IdealResponseOut(ORMModel):
     message_id: int
     ideal_text: str
     note: str | None
+    created_at: UtcDatetime
+
+
+class CharacterStateOut(ORMModel):
+    """変化する状態：YUI の関心と、相手との関係。"""
+
+    id: int
+    kind: str
+    subject_speaker_id: int | None
+    topic: str | None
+    content: str
+    basis_memory_ids: list[int] | None
+    needs_review: bool
+    review_reason: str | None
+    status: str
+    visibility: str
+    visible_to_speaker_id: int | None
+    superseded_by_id: int | None
+    source_conversation_id: int | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class CharacterStateCreate(BaseModel):
+    """状態の追加。既定は候補（pending）で、採用するまで会話に使わない。"""
+
+    kind: Literal["interest", "relationship"]
+    content: str = Field(min_length=1, max_length=2000)
+    topic: str | None = Field(default=None, max_length=120)
+    subject_speaker_id: int | None = None
+    # 根拠にした記憶。ここに挙げた記憶が訂正・削除されると、再評価の印が付く。
+    basis_memory_ids: list[int] = Field(default_factory=list)
+    visibility: Visibility = Visibility.PRIVATE
+    visible_to_speaker_id: int | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _check_target(self) -> CharacterStateCreate:
+        if self.kind == "relationship" and self.subject_speaker_id is None:
+            raise ValueError(
+                "関係性には subject_speaker_id が要ります。誰との関係かを決めてください。"
+            )
+        if self.kind == "interest" and self.subject_speaker_id is not None:
+            raise ValueError(
+                "関心は YUI 自身のものです。subject_speaker_id は指定しないでください。"
+            )
+        return self
+
+
+class CharacterStateDecision(BaseModel):
+    """候補の採用・却下。採用時に内容を直せる。"""
+
+    decision: Literal["accept", "reject"]
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    reason: str | None = None
+
+
+class CharacterStateUpdate(BaseModel):
+    """採用済みの状態を直す。再評価の印を下ろすときにも使う。"""
+
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    status: Literal["active", "withdrawn"] | None = None
+    # 確認したので印を下ろす。内容を直したかどうかとは別に指定する。
+    reviewed: bool = False
+    reason: str | None = None
+
+
+class CharacterStateRevisionOut(ORMModel):
+    id: int
+    state_id: int
+    action: str
+    before: dict[str, Any] | None
+    after: dict[str, Any] | None
+    reason: str | None
     created_at: UtcDatetime
 
 

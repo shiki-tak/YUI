@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import chat, conversations, memories
+from app.api import chat, conversations, memories, states
 from app.config import get_settings
 from app.llm import get_llm_client
 from app.llm.base import LLMClient
@@ -65,6 +65,7 @@ async def persona_error_handler(_: Request, exc: PersonaError) -> JSONResponse:
 app.include_router(chat.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api")
 app.include_router(memories.router, prefix="/api")
+app.include_router(states.router, prefix="/api")
 
 
 @app.get("/api/health", tags=["system"])

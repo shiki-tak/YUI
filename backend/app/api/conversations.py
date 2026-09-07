@@ -10,9 +10,11 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agent.character_state import active_states
 from app.agent.delivery import apply_delivery_state
 from app.agent.memory_store import create_memory
-from app.agent.reflection import ReflectionParseError, extract_candidates
+from app.agent.reflection import ReflectionParseError, extract_candidates, format_transcript
+from app.agent.state_reflection import StateReflectionError, extract_state_candidates
 from app.agent.turn_lock import conversation_locks
 from app.config import Settings, get_settings
 from app.db import get_session
@@ -114,6 +116,15 @@ async def _last_partner(session: AsyncSession, conversation_id: int) -> Speaker 
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def _conversation_messages(session: AsyncSession, conversation_id: int) -> list[Message]:
+    stmt = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.id)
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
 @router.post("/{conversation_id}/end", response_model=list[MemoryCandidateOut])
 async def end_conversation(
     conversation_id: int,
@@ -178,7 +189,25 @@ async def end_conversation(
                 partner_name=partner.display_name if partner else "相手",
                 character_name=character_name,
             )
-        except (LLMError, ReflectionParseError) as exc:
+            # 関心・関係性の更新候補は、別の呼び出しで作る。同じ指示文へ項目を
+            # 足すと記憶の抽出が落ちるため（ISSUE-017 で実測）。
+            await extract_state_candidates(
+                session,
+                llm=llm,
+                conversation=conversation,
+                transcript=format_transcript(
+                    await _conversation_messages(session, conversation_id),
+                    partner.display_name if partner else "相手",
+                    character_name,
+                ),
+                partner_speaker_id=partner.id if partner else None,
+                current_states=await active_states(
+                    session,
+                    speaker_id=partner.id if partner else None,
+                    mode=conversation.mode,
+                ),
+            )
+        except (LLMError, ReflectionParseError, StateReflectionError) as exc:
             # 抽出できなかった会話を処理中・終了済みのまま残すと、やり直せない。
             # 特に出力の解析失敗は「候補なしの成功」と区別する必要がある。
             await _release_reflection(session, conversation_id)

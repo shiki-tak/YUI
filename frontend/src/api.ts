@@ -12,6 +12,7 @@ import type {
   MemoryCandidate,
   MemoryRevision,
   Message,
+  CharacterState,
   RetrievedMemory,
   RunRecord,
   Speaker,
@@ -150,6 +151,24 @@ export const api = {
 
   restoreMemory: (memoryId: number) =>
     request<Memory>(`/memories/${memoryId}/restore`, { method: "POST" }),
+
+  // 変化する状態（関心・相手との関係）。採用したものだけが会話に渡る。
+  states: () => request<CharacterState[]>("/states"),
+
+  decideState: (stateId: number, body: { decision: "accept" | "reject"; reason?: string }) =>
+    request<CharacterState>(`/states/${stateId}/decide`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateState: (
+    stateId: number,
+    body: { content?: string; status?: "active" | "withdrawn"; reviewed?: boolean; reason?: string },
+  ) =>
+    request<CharacterState>(`/states/${stateId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
 
   revisions: (memoryId: number) =>
     request<MemoryRevision[]>(`/memories/${memoryId}/revisions`),

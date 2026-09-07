@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -116,6 +117,39 @@ class MemoryStatus(StrEnum):
     ACTIVE = "active"
     CORRECTED = "corrected"  # 訂正され、後続の記憶に置き換わった
     DELETED = "deleted"
+
+
+class StateKind(StrEnum):
+    """可変状態の種類（設計書 4.1「固定人格と変化する状態」）。
+
+    固定人格（口調・価値観・自己設定）は personas/<版>.toml にあり、ここでは
+    扱わない。ここに置くのは、経験によって変わっていくものだけ。
+
+    目標（次に感想を聞く、一緒に調べる）はフェーズ4の担当なので、まだ持たない。
+    ただし「候補 → 開発者が採用 → 根拠を残す」という流れは同じ形にしてあり、
+    フェーズ4では kind を1つ増やし、実行条件・期限・完了条件の列を足せば足りる
+    ようにしている。
+    """
+
+    # YUI 自身の関心・好み。相手の好みとは別に持つ。
+    INTEREST = "interest"
+    # 相手との関係。共有した経験、距離感、相手への理解。
+    RELATIONSHIP = "relationship"
+
+
+class StateStatus(StrEnum):
+    """可変状態の扱い。候補から採用までを同じ表で追う。"""
+
+    # 振り返りが出した更新候補。開発者が確認するまで会話には使わない。
+    PENDING = "pending"
+    # 採用済み。会話で参照する。
+    ACTIVE = "active"
+    # 採用しなかった。
+    REJECTED = "rejected"
+    # 新しい版に置き換えられた。
+    SUPERSEDED = "superseded"
+    # 取り消した。
+    WITHDRAWN = "withdrawn"
 
 
 class CandidateStatus(StrEnum):
@@ -278,6 +312,66 @@ class MemoryCandidate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CharacterState(Base):
+    """変化する状態：YUI の関心と、相手との関係（設計書 4.1・5、ISSUE-015）。
+
+    固定人格と分ける。人格は版として管理し、日常の振り返りで上書きしない。
+    こちらは経験を根拠に更新していく。
+
+    単一の好感度の数値にしない。何を根拠にそう思っているかを本文と根拠で残し、
+    後から訂正できるようにする。
+    """
+
+    __tablename__ = "character_states"
+    __table_args__ = (Index("ix_character_states_kind_status", "kind", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 関係性のとき：誰との関係か。関心のときは NULL。
+    subject_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+    # 関心のとき：どの分野・話題についてか。関係性のときは NULL。
+    topic: Mapped[str | None] = mapped_column(String(120))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # 根拠になった記憶。訂正・削除されたら再評価が要る（ISSUE-016）。
+    basis_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    # 根拠が変わった。開発者が確認するまで印を残す。自動では消さない。
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    review_reason: Mapped[str | None] = mapped_column(Text)
+
+    status: Mapped[str] = mapped_column(String(16), default=StateStatus.PENDING, nullable=False)
+    # 参照範囲。記憶と同じ考え方で、非公開のものを配信で使わない。
+    visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
+    visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+
+    superseded_by_id: Mapped[int | None] = mapped_column(ForeignKey("character_states.id"))
+    source_conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    subject: Mapped[Speaker | None] = relationship(foreign_keys=[subject_speaker_id])
+
+
+class CharacterStateRevision(Base):
+    """状態の変更履歴。何を根拠に、誰が採用したかを残して戻せるようにする。"""
+
+    __tablename__ = "character_state_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state_id: Mapped[int] = mapped_column(
+        ForeignKey("character_states.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class RunRecord(Base):
     """実行記録。モデルの版・生成設定・参照した記憶・応答時間を残す。"""
 
@@ -298,6 +392,9 @@ class RunRecord(Base):
     options: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     # 生成時に実際に渡した記憶の id。返答の根拠を後から追える。
     referenced_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    # 返答に渡した可変状態（関心・関係性）。完了条件「参照した記憶・人格版・
+    # 可変状態を追跡できる」のために、記憶と分けて残す。
+    referenced_state_ids: Mapped[list[int] | None] = mapped_column(JSON)
     system_prompt: Mapped[str | None] = mapped_column(Text)
     # 記憶検索にかかった時間。生成の時間と分けて、どこが遅いかを見る。
     retrieval_ms: Mapped[int | None] = mapped_column(Integer)
