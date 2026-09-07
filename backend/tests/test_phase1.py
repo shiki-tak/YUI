@@ -37,6 +37,7 @@ async def test_memory_survives_a_new_conversation(client: AsyncClient, fake_llm:
     created = await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "promise",
             "content": "次は山で撮った写真の話をする約束をした",
             "certainty": "fact",
@@ -61,6 +62,7 @@ async def test_promise_is_retrieved_even_without_keyword_overlap(client: AsyncCl
     await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "promise",
             "content": "次回はカメラのレンズの話をすると決めた",
             "certainty": "fact",
@@ -80,6 +82,7 @@ async def test_correction_is_reflected_in_the_next_reply(
     created = await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "about_person",
             "content": "開発者はりんごが好き",
             "certainty": "fact",
@@ -114,7 +117,12 @@ async def test_correction_can_be_rolled_back(client: AsyncClient):
     await _say(client, "はじめまして")
     created = await client.post(
         "/api/memories",
-        json={"kind": "experience", "content": "元の内容", "keywords": "元"},
+        json={
+            "visible_to_all": True,
+            "kind": "experience",
+            "content": "元の内容",
+            "keywords": "元",
+        },
     )
     memory_id = created.json()["id"]
     await client.patch(f"/api/memories/{memory_id}", json={"content": "変更後の内容"})
@@ -129,6 +137,7 @@ async def test_deleted_memory_is_not_used(client: AsyncClient, fake_llm: FakeLLM
     created = await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "about_person",
             "content": "開発者は犬を飼っている",
             "keywords": "犬 ペット",
@@ -147,6 +156,7 @@ async def test_run_record_shows_the_basis_of_the_reply(client: AsyncClient):
     created = await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "about_person",
             "content": "開発者の趣味は山登り",
             "keywords": "山登り 趣味",

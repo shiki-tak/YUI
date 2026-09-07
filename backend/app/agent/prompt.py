@@ -83,8 +83,31 @@ def build_messages(
         persona=persona, memories=memories, speaker=speaker, now=now
     )
     messages: list[ChatMessage] = [ChatMessage(role="system", content=system_prompt)]
+    # 相手が複数いる会話では、発言に誰のものかを付ける。付けないと、履歴の
+    # 発言がすべて同じ「user」に見え、直前の相手の発言を目の前の相手のものと
+    # して扱う（Bさんに「Aさんの場合でも」と返すなど）。設計書の3Cが求める
+    # 「別人の相反する好みを共存させる」「人物を特定できない場合は同一人物と
+    # 決めつけない」に必要な情報である。
+    speaker_ids = {
+        message.speaker_id
+        for message in history
+        if message.speaker_kind != SpeakerKind.CHARACTER.value
+    }
+    if speaker is not None:
+        speaker_ids.add(speaker.id)
+    label_speakers = len(speaker_ids) > 1
+
     for message in history:
-        role = "assistant" if message.speaker_kind == SpeakerKind.CHARACTER.value else "user"
-        messages.append(ChatMessage(role=role, content=message.content))
+        if message.speaker_kind == SpeakerKind.CHARACTER.value:
+            messages.append(ChatMessage(role="assistant", content=message.content))
+            continue
+        content = message.content
+        if label_speakers:
+            name = message.speaker.display_name if message.speaker else "相手"
+            content = f"{name}：{content}"
+        messages.append(ChatMessage(role="user", content=content))
+
+    if label_speakers and speaker is not None:
+        user_text = f"{speaker.display_name}：{user_text}"
     messages.append(ChatMessage(role="user", content=user_text))
     return messages, system_prompt

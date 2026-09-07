@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from app.models import Certainty, MemoryKind, Visibility
 
@@ -171,11 +171,20 @@ class DeliveryUpdate(BaseModel):
 
 
 class MemoryCreate(BaseModel):
+    """手動で追加する記憶。
+
+    参照範囲は必ず指定させる。既定で「誰との会話でも参照してよい」にすると、
+    ある相手との会話から作られた記憶が、別の相手へ黙って渡る（ISSUE-010）。
+    限定しないこと自体は選べるが、選んだ結果としてそうなるようにする。
+    """
+
     kind: MemoryKind
     content: str = Field(min_length=1, max_length=2000)
     subject_speaker_id: int | None = None
-    # 非公開の記憶を、この相手との会話に限定する。None は限定しない。
+    # この相手との会話に限定する。
     visible_to_speaker_id: int | None = None
+    # 相手を限定しない。visible_to_speaker_id と同時には指定できない。
+    visible_to_all: bool = False
     certainty: Certainty = Certainty.FACT
     visibility: Visibility = Visibility.PRIVATE
     keywords: str = ""
@@ -184,10 +193,27 @@ class MemoryCreate(BaseModel):
     source_conversation_id: int | None = None
     reason: str | None = None
 
+    @model_validator(mode="after")
+    def _require_explicit_scope(self) -> MemoryCreate:
+        if self.visible_to_all and self.visible_to_speaker_id is not None:
+            raise ValueError(
+                "visible_to_speaker_id と visible_to_all は同時に指定できません。"
+            )
+        if not self.visible_to_all and self.visible_to_speaker_id is None:
+            raise ValueError(
+                "参照範囲を指定してください。"
+                "特定の相手との会話に限る場合は visible_to_speaker_id、"
+                "限定しない場合は visible_to_all=true。"
+            )
+        return self
+
 
 class MemoryUpdate(BaseModel):
     """記憶の訂正。指定した項目だけを更新し、更新前を履歴に残す。"""
 
+    # 参照範囲の振り分け。限定しない状態へ戻すには visible_to_all を使う。
+    visible_to_speaker_id: int | None = None
+    visible_to_all: bool | None = None
     content: str | None = Field(default=None, min_length=1, max_length=2000)
     kind: MemoryKind | None = None
     certainty: Certainty | None = None

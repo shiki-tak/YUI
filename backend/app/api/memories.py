@@ -23,6 +23,7 @@ from app.models import (
     MemoryRevision,
     MemoryStatus,
     Speaker,
+    Visibility,
 )
 from app.schemas import (
     MemoryCreate,
@@ -46,14 +47,26 @@ async def list_speakers(session: AsyncSession = Depends(get_session)) -> list[Sp
 async def list_memories(
     include_inactive: bool = False,
     subject_speaker_id: int | None = None,
+    unscoped: bool = False,
     limit: int = Query(default=200, le=1000),
     session: AsyncSession = Depends(get_session),
 ) -> list[Memory]:
+    """記憶の一覧。
+
+    unscoped=true で、参照範囲を限定していない非公開の記憶だけを返す。
+    複数の相手が入る前に、どれを誰との会話に限るかを振り分けるために使う
+    （ISSUE-010）。公開可能な記憶は、限定しないことが前提なので含めない。
+    """
     stmt = select(Memory).order_by(Memory.id.desc()).limit(limit)
     if not include_inactive:
         stmt = stmt.where(Memory.status == MemoryStatus.ACTIVE.value)
     if subject_speaker_id is not None:
         stmt = stmt.where(Memory.subject_speaker_id == subject_speaker_id)
+    if unscoped:
+        stmt = stmt.where(
+            Memory.visible_to_speaker_id.is_(None),
+            Memory.visibility == Visibility.PRIVATE.value,
+        )
     return list((await session.execute(stmt)).scalars())
 
 
@@ -110,6 +123,7 @@ async def add_memory(
         kind=payload.kind.value,
         content=payload.content,
         subject_speaker_id=payload.subject_speaker_id,
+        # visible_to_all のときは限定しない（NULL）。既定ではなく、選んだ結果。
         visible_to_speaker_id=payload.visible_to_speaker_id,
         certainty=payload.certainty.value,
         visibility=payload.visibility.value,
@@ -134,6 +148,17 @@ async def correct_memory(
     changes = payload.model_dump(exclude_unset=True, exclude={"reason"})
     if not changes:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "変更する項目がありません。")
+
+    # 参照範囲は「限定しない」へ戻す指定があるため、他の項目と分けて扱う。
+    scope_to_all = changes.pop("visible_to_all", None)
+    if scope_to_all and changes.get("visible_to_speaker_id") is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "visible_to_speaker_id と visible_to_all は同時に指定できません。",
+        )
+    if scope_to_all:
+        memory.visible_to_speaker_id = None
+        changes.pop("visible_to_speaker_id", None)
 
     for field, value in changes.items():
         # 空にできるのは日時だけ。他の項目を None にする指定は無視する。

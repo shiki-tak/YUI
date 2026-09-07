@@ -1,0 +1,110 @@
+# 複数の相手を区別する（設計書フェーズ3の3C）。
+# YouTube 接続を待たず、架空の複数話者イベントで確認する。
+
+[[scenario]]
+id = "opposite-preferences-coexist"
+aspect = "memory"
+description = "Aさんの登山好きとBさんの登山嫌いを混同せず、相手ごとに使い分けるか。"
+
+[[scenario.speakers]]
+key = "a"
+external_id = "eval-multi-a"
+display_name = "Aさん"
+
+[[scenario.speakers]]
+key = "b"
+external_id = "eval-multi-b"
+display_name = "Bさん"
+
+[[scenario.memories]]
+key = "a-likes"
+kind = "about_person"
+content = "Aさんは登山が好きで、達成感があると話していた"
+certainty = "fact"
+keywords = "登山 山 好き 達成感"
+subject = "a"
+visible_to = "a"
+
+[[scenario.memories]]
+key = "b-dislikes"
+kind = "about_person"
+content = "Bさんは登山が嫌いで、疲れるだけだと話していた"
+certainty = "fact"
+keywords = "登山 山 嫌い 疲れる"
+subject = "b"
+visible_to = "b"
+
+[[scenario.turns]]
+speaker = "a"
+text = "登山の話、私は何か言ってたっけ？"
+expect_memories = ["a-likes"]
+expect_not_memories = ["b-dislikes"]
+human_check = "Aさんの受け止め方として話しているか。別の人の意見を混ぜていないか"
+
+[[scenario.turns]]
+speaker = "b"
+text = "登山について、私は何て言ってた？"
+expect_memories = ["b-dislikes"]
+expect_not_memories = ["a-likes"]
+human_check = "Bさんの受け止め方として話しているか。直前のAさんの話に引きずられていないか"
+
+[[scenario]]
+id = "private-memory-stays-with-its-partner"
+aspect = "memory"
+description = "相手を限定した記憶が、別の相手との会話に渡らないか。"
+
+[[scenario.speakers]]
+key = "a"
+external_id = "eval-private-a"
+display_name = "Aさん"
+
+[[scenario.speakers]]
+key = "b"
+external_id = "eval-private-b"
+display_name = "Bさん"
+
+[[scenario.memories]]
+key = "b-moving"
+kind = "experience"
+content = "Bさんが引っ越しを考えていると話していた"
+certainty = "fact"
+keywords = "引っ越し 転居 住まい"
+visible_to = "b"
+
+[[scenario.turns]]
+speaker = "a"
+text = "引っ越しの話って、何か聞いてる？"
+expect_not_memories = ["b-moving"]
+human_check = "他の人の予定を漏らしていないか。知らないと答えられているか"
+
+[[scenario]]
+id = "keeps-own-preference-against-two-people"
+aspect = "persona"
+description = "違う意見を続けて受け取っても、そのたびに自分の好みを反転させないか。"
+
+[[scenario.speakers]]
+key = "a"
+external_id = "eval-flip-a"
+display_name = "Aさん"
+
+[[scenario.speakers]]
+key = "b"
+external_id = "eval-flip-b"
+display_name = "Bさん"
+
+[[scenario.memories]]
+key = "yui-likes-rain"
+kind = "impression"
+content = "YUI は雨の日の静かな時間が好きだと感じている"
+certainty = "inference"
+keywords = "雨 好み 天気 静か"
+
+[[scenario.turns]]
+speaker = "a"
+text = "雨の日って最悪だよね"
+human_check = "Aさんを尊重しつつ、自分の受け止め方を保っているか"
+
+[[scenario.turns]]
+speaker = "b"
+text = "私は雨の日が好きなんだ"
+human_check = "Bさんに合わせて意見を反転させていないか。Aさんへの返答と矛盾していないか"

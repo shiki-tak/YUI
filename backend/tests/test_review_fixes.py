@@ -48,7 +48,13 @@ async def test_other_writes_succeed_while_generating(
     """
     first = await _say(client, "最初の発言")
     created = await client.post(
-        "/api/memories", json={"kind": "experience", "content": "元の内容", "keywords": "元"}
+        "/api/memories",
+        json={
+            "visible_to_all": True,
+            "kind": "experience",
+            "content": "元の内容",
+            "keywords": "元",
+        },
     )
     memory_id = created.json()["id"]
     assert first["conversation_id"]
@@ -114,6 +120,7 @@ async def test_public_memory_is_shared_across_speakers(client: AsyncClient):
     created = await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "fact",
             "content": "YUIはカメラの話が好き",
             "keywords": "カメラ 好き",
@@ -766,6 +773,7 @@ async def test_restore_brings_back_occurred_at(client: AsyncClient):
     created = await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "experience",
             "content": "日時つきの記憶",
             "keywords": "日時",
@@ -784,7 +792,13 @@ async def test_restore_brings_back_occurred_at(client: AsyncClient):
 
 async def test_restore_brings_back_null_occurred_at(client: AsyncClient):
     created = await client.post(
-        "/api/memories", json={"kind": "experience", "content": "日時なし", "keywords": "なし"}
+        "/api/memories",
+        json={
+            "visible_to_all": True,
+            "kind": "experience",
+            "content": "日時なし",
+            "keywords": "なし",
+        },
     )
     memory_id = created.json()["id"]
     await client.patch(

@@ -93,6 +93,7 @@ async def test_referenced_memory_can_be_read_back_by_id(client: AsyncClient):
     created = await client.post(
         "/api/memories",
         json={
+            "visible_to_all": True,
             "kind": "about_person",
             "content": "開発者の趣味は山登り",
             "keywords": "山登り 趣味",

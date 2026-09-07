@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.agent import prompt as prompt_builder
 from app.agent.memory_store import RetrievedMemory, search_memories
@@ -53,6 +54,9 @@ class ConversationAgent:
     ) -> list[Message]:
         stmt = (
             select(Message)
+            # 誰の発言かをプロンプトに残すため、話者を一緒に読む。遅延読み込みは
+            # 非同期セッションでは使えない。
+            .options(selectinload(Message.speaker))
             .where(Message.conversation_id == conversation_id, Message.id != exclude_id)
             .order_by(Message.id.desc())
             .limit(self._settings.recent_message_limit)
