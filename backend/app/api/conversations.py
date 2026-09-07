@@ -224,13 +224,26 @@ async def decide_candidate(
         candidate.status = CandidateStatus.REJECTED.value
         return candidate
 
+    if payload.subject_to_none and payload.subject_speaker_id is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "subject_speaker_id と subject_to_none は同時に指定できません。",
+        )
+    if payload.subject_to_none:
+        subject_speaker_id = None
+    elif payload.subject_speaker_id is not None:
+        subject_speaker_id = payload.subject_speaker_id
+    else:
+        subject_speaker_id = candidate.subject_speaker_id
+
     memory = await create_memory(
         session,
         kind=(payload.kind.value if payload.kind else candidate.kind),
         content=(payload.content or candidate.content),
-        subject_speaker_id=candidate.subject_speaker_id,
+        subject_speaker_id=subject_speaker_id,
         visible_to_speaker_id=candidate.visible_to_speaker_id,
         certainty=(payload.certainty.value if payload.certainty else candidate.certainty),
+        provenance=(payload.provenance.value if payload.provenance else candidate.provenance),
         visibility=(payload.visibility.value if payload.visibility else candidate.visibility),
         keywords=(payload.keywords if payload.keywords is not None else candidate.keywords),
         source_message_id=candidate.source_message_id,

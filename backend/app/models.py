@@ -89,6 +89,24 @@ class Certainty(StrEnum):
     INFERENCE = "inference"
 
 
+class Provenance(StrEnum):
+    """その内容をどうやって知ったか（設計書フェーズ3の3C）。
+
+    「AさんがBさんの好みを話した」を、Bさん本人の発言と区別する。事実か
+    推測かを表す certainty とは別の軸で、こちらは情報の入手経路を表す。
+
+    観察（画像）や調査（検索）はフェーズ5で扱う。ここでは会話から知る2つと、
+    判断できない場合だけを持つ。分類できないものを、どちらかへ寄せない。
+    """
+
+    # 本人が、自分のこととして話した。
+    FIRSTHAND = "firsthand"
+    # 別の人について話した（伝聞）。話した人は source_message_id の発言者。
+    HEARSAY = "hearsay"
+    # 判断できない。移行前の記憶もこれになる。
+    UNKNOWN = "unknown"
+
+
 class Visibility(StrEnum):
     PRIVATE = "private"  # ローカル会話限定
     PUBLIC = "public"  # 配信で参照してよい
@@ -189,6 +207,10 @@ class Memory(Base):
     # NULL は相手を限定しない記憶。「誰について」とは別の軸として持つ。
     visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
     certainty: Mapped[str] = mapped_column(String(16), default=Certainty.FACT, nullable=False)
+    # どうやって知ったか。伝聞を本人の発言として扱わないために持つ。
+    provenance: Mapped[str] = mapped_column(
+        String(16), default=Provenance.UNKNOWN, server_default=Provenance.UNKNOWN, nullable=False
+    )
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default=MemoryStatus.ACTIVE, nullable=False)
     # 記憶検索のキーワード。いまは語の一致で検索する。意味検索は、検索漏れが
@@ -240,6 +262,9 @@ class MemoryCandidate(Base):
     subject_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
     visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
     certainty: Mapped[str] = mapped_column(String(16), default=Certainty.INFERENCE, nullable=False)
+    provenance: Mapped[str] = mapped_column(
+        String(16), default=Provenance.UNKNOWN, server_default=Provenance.UNKNOWN, nullable=False
+    )
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)
     source_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id"))

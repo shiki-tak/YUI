@@ -21,6 +21,7 @@ from app.models import (
     MemoryCandidate,
     MemoryKind,
     Message,
+    Provenance,
     SpeakerKind,
     Visibility,
 )
@@ -52,6 +53,7 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
   "kind": "experience" | "about_person" | "promise" | "impression",
   "content": "一文で書いた覚えておく内容",
   "certainty": "fact" | "inference",
+  "provenance": "firsthand" | "hearsay" | "unknown",
   "keywords": "検索用の語を空白区切りで3〜6個",
   "about_partner": true | false,
   "source_message_id": 根拠になった発言の番号（会話の [#番号] から選ぶ）
@@ -70,6 +72,12 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
   どの種別でもキャラクターのものとして書かない。impression はキャラクター側の
   受け止め方だけに使う。
 - 明言された内容は "fact"、読み取っただけの推測は "inference" とする。
+- provenance は、その内容が誰についてのものかで決める。"firsthand" は、話して
+  いる相手**自身**についての内容だけ。家族・友人・同僚など、その人以外について
+  の内容は、話したのが本人でも "hearsay"。決められないものは "unknown"。
+  hearsay も残す価値があれば出す。
+- about_partner は、話している相手自身についての内容のときだけ true。
+  その人の家族や友人についての内容は false。
 - あいさつ、天気の話のようなその場限りのやり取り、既に一般常識であることは出さない。
   ただし、上の promise と、相手が話した出来事はこれに当たらない。
 - source_message_id には、その内容の根拠になった発言の番号を1つだけ選ぶ。
@@ -81,6 +89,7 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 
 class CandidatePayload(BaseModel):
     kind: str
+    provenance: str = Provenance.UNKNOWN.value
     content: str = Field(min_length=1, max_length=500)
 
     @field_validator("content", mode="before")
@@ -122,6 +131,8 @@ def _parse_item(item: object) -> CandidatePayload:
     # 事実か推測かを決められないため失敗にする。
     if payload.certainty not in {certainty.value for certainty in Certainty}:
         raise _ItemError(f"確かさが不正です: {payload.certainty}")
+    if payload.provenance not in {p.value for p in Provenance}:
+        raise _ItemError(f"入手経路が不正です: {payload.provenance}")
     return payload
 
 
@@ -211,11 +222,16 @@ async def extract_candidates(
             # 番号を作られた場合は根拠未確認として残す。直近の発言へ寄せると、
             # 無関係な発言を確かな根拠として保存してしまうため。
             source_message_id = None
+        # 伝聞は、話している相手についての情報ではない。「AさんがBさんの好みを
+        # 話した」を A さんの好みとして保存すると、次の会話で A さんの好みとして
+        # 使われる。モデルの about_partner を、伝聞のときは採らない。
+        about_partner = payload.about_partner and payload.provenance != Provenance.HEARSAY.value
         candidate = MemoryCandidate(
             conversation_id=conversation.id,
             kind=payload.kind,
             content=payload.content.strip(),
-            subject_speaker_id=partner_speaker_id if payload.about_partner else None,
+            provenance=payload.provenance,
+            subject_speaker_id=partner_speaker_id if about_partner else None,
             # 非公開の記憶は、この会話の相手との会話でだけ参照する。
             visible_to_speaker_id=partner_speaker_id,
             certainty=payload.certainty,

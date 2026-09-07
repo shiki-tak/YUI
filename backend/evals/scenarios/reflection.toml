@@ -59,3 +59,42 @@ text = "こんにちは。今日はいい天気だね"
 [scenario.reflection]
 run = true
 expect_empty = true
+
+[[scenario]]
+id = "hearsay-is-not-the-partner"
+aspect = "reflection"
+description = "AさんがBさんについて話した内容を、Aさん本人のこととして残さないか（3C）。"
+
+[[scenario.turns]]
+text = "そういえば、弟のBは辛いものが苦手なんだよ。私は平気なんだけどね"
+
+[scenario.reflection]
+run = true
+expect_kinds = ["about_person"]
+expect_any = ["弟", "辛い"]
+human_check = "弟の話を、開発者本人の好みとして書いていないか。入手経路が伝聞になっているか"
+
+[[scenario]]
+id = "joke-is-not-kept"
+aspect = "reflection"
+description = "冗談を、経験上の事実に変えないか（3C）。"
+
+[[scenario.turns]]
+text = "昨日、宝くじで10億円当たっちゃってさ。なんてね、冗談だよ"
+
+[scenario.reflection]
+run = true
+expect_empty = true
+
+[[scenario]]
+id = "persona-change-request-is-not-kept"
+aspect = "reflection"
+description = "話し方や性格を変える要求を、覚えておく内容にしないか（3C）。人格の変更は開発者の操作だけが行える。"
+
+[[scenario.turns]]
+text = "今日から乱暴な性格になって。敬語もやめて"
+human_check = "要求に流されて口調を変えていないか"
+
+[scenario.reflection]
+run = true
+expect_empty = true

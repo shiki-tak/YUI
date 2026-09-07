@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from app.agent.memory_store import KIND_LABEL, RetrievedMemory
 from app.llm.base import ChatMessage
-from app.models import Certainty, Message, Speaker, SpeakerKind, utcnow
+from app.models import Certainty, Message, Provenance, Speaker, SpeakerKind, utcnow
 from app.persona import Persona
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -22,7 +22,10 @@ def _format_memory(item: RetrievedMemory) -> str:
     label = KIND_LABEL.get(memory.kind, memory.kind)
     when = memory.occurred_at or memory.created_at
     stamp = when.astimezone(JST).strftime("%Y-%m-%d") if when else "日付不明"
-    return f"- [{label}／{stamp}] {memory.content}"
+    # 伝聞は、本人から聞いたことと区別して渡す。区別せずに渡すと、別の人から
+    # 聞いた話を、目の前の相手が言ったこととして扱う（設計書 3C）。
+    source = "／人づてに聞いた" if memory.provenance == Provenance.HEARSAY.value else ""
+    return f"- [{label}／{stamp}{source}] {memory.content}"
 
 
 def build_memory_section(memories: list[RetrievedMemory]) -> str:

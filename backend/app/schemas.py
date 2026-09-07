@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-from app.models import Certainty, MemoryKind, Visibility
+from app.models import Certainty, MemoryKind, Provenance, Visibility
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -51,6 +51,8 @@ class MemoryOut(ORMModel):
     id: int
     kind: str
     content: str
+    # どうやって知ったか。伝聞を本人の発言と区別する。
+    provenance: str
     subject_speaker_id: int | None
     visible_to_speaker_id: int | None
     certainty: str
@@ -181,6 +183,7 @@ class MemoryCreate(BaseModel):
     kind: MemoryKind
     content: str = Field(min_length=1, max_length=2000)
     subject_speaker_id: int | None = None
+    provenance: Provenance = Provenance.UNKNOWN
     # この相手との会話に限定する。
     visible_to_speaker_id: int | None = None
     # 相手を限定しない。visible_to_speaker_id と同時には指定できない。
@@ -238,6 +241,7 @@ class MemoryCandidateOut(ORMModel):
     conversation_id: int
     kind: str
     content: str
+    provenance: str
     subject_speaker_id: int | None
     visible_to_speaker_id: int | None
     certainty: str
@@ -250,11 +254,20 @@ class MemoryCandidateOut(ORMModel):
 
 
 class CandidateDecision(BaseModel):
-    """候補の採用・却下。採用時は内容を直してから保存できる。"""
+    """候補の採用・却下。採用時は内容を直してから保存できる。
+
+    誰についての記憶か（subject_speaker_id）と、どうやって知ったか
+    （provenance）も直せる。モデルの分類は確実ではないため、採用の時点で
+    人が直せる経路を残す（設計書フェーズ3の3C）。
+    """
 
     decision: Literal["accept", "reject"]
     content: str | None = Field(default=None, min_length=1, max_length=2000)
     kind: MemoryKind | None = None
+    # 誰についての記憶か。相手に紐づけない場合は subject_to_none=true。
+    subject_speaker_id: int | None = None
+    subject_to_none: bool = False
+    provenance: Provenance | None = None
     certainty: Certainty | None = None
     visibility: Visibility | None = None
     keywords: str | None = None

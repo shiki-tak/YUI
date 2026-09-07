@@ -126,6 +126,7 @@ async def add_memory(
         # visible_to_all のときは限定しない（NULL）。既定ではなく、選んだ結果。
         visible_to_speaker_id=payload.visible_to_speaker_id,
         certainty=payload.certainty.value,
+        provenance=payload.provenance.value,
         visibility=payload.visibility.value,
         keywords=payload.keywords,
         occurred_at=payload.occurred_at,
