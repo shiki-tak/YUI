@@ -28,14 +28,26 @@ from app.models import (
 )
 
 _ASCII_WORD = re.compile(r"[a-z0-9][a-z0-9_\-]+")
-_CJK_RUN = re.compile(r"[ぁ-んァ-ヶー一-龠々]+")
+# ひらがな・カタカナ・漢字を、それぞれ別の連なりとして取り出す。まとめて
+# 1つの連なりにすると、2文字ずつの切り出しが語の切れ目をまたぐ。
+# 「この前の山の話」が「の山」「山の」になり、記憶側の「山」と一致しない
+# （ISSUE-019）。文字種の変わり目は、日本語では語の切れ目に近い。
+_TOKEN_RUN = re.compile(r"[ぁ-ん]+|[ァ-ヶー]+|[一-龠々]+")
 _HIRAGANA_ONLY = re.compile(r"^[ぁ-ん]+$")
-# 弱い語（ひらがなだけの2文字）1つだけの一致では拾わない。
+# 弱い一致1つだけでは拾わない。
 _MIN_MATCH_WEIGHT = 0.5
+# 長い語の中から切り出した1文字の強さ。「山田」の「山」で「高尾山」の記憶を
+# 引き寄せないよう、語そのものより弱く扱う。
+_PARTIAL_WEIGHT = 0.3
 # 助詞・助動詞など、単独では検索の手がかりにならない語。
+# 1文字のものは、どの会話にも出てきて記憶を絞れないもの（「話」「人」など）。
+# ここは評価用会話で見つかった取りこぼし・拾いすぎを見ながら足す。
+# 語の重要度を頻度から決める方式は、FTS5 か意味検索を入れる段階で扱う
+# （ISSUE-008）。
 _STOP_TOKENS = {
     "です", "ます", "した", "して", "ない",
     "ある", "いる", "こと", "もの", "これ", "それ",
+    "話", "人", "事", "時", "今", "何", "方", "中",
 }
 
 # 記憶の種別。検索語にも使えるよう、日本語の呼び名を検索対象に含める。
@@ -48,32 +60,43 @@ KIND_LABEL = {
 }
 
 
-def tokenize(text: str) -> set[str]:
-    """検索用の語を取り出す。
+def tokenize(text: str) -> dict[str, float]:
+    """検索用の語と、その手がかりとしての強さを返す。
 
-    形態素解析は入れず、英数字語と日本語の2文字ぶんの並びを手がかりにする。
+    形態素解析は入れず、文字種の変わり目で区切って、2文字ぶんの並びを
+    手がかりにする。同じ語を別の経路で拾った場合は、強いほうを採る。
+
+    強さを語ごとに持つのは、同じ「山」でも、語として単独で出てきたのか、
+    「山田」から切り出したのかで確かさが違うため（ISSUE-019）。
     """
     normalized = unicodedata.normalize("NFKC", text).lower()
-    tokens: set[str] = set(_ASCII_WORD.findall(normalized))
-    for run in _CJK_RUN.findall(normalized):
+    tokens: dict[str, float] = {}
+
+    def add(token: str, weight: float) -> None:
+        if token in _STOP_TOKENS:
+            return
+        if tokens.get(token, 0.0) < weight:
+            tokens[token] = weight
+
+    for word in _ASCII_WORD.findall(normalized):
+        add(word, 1.0)
+
+    for run in _TOKEN_RUN.findall(normalized):
+        # ひらがなだけの並びは「をし」のように助詞の切れ端になりやすく、
+        # 偶然一致しやすい。漢字・カタカナ・英数字を含む語を優先する。
+        weight = 0.25 if _HIRAGANA_ONLY.match(run) else 1.0
         if len(run) == 1:
-            tokens.add(run)
+            add(run, weight)
             continue
         for i in range(len(run) - 1):
-            tokens.add(run[i : i + 2])
-    return tokens - _STOP_TOKENS
+            add(run[i : i + 2], weight)
+        if weight == 1.0:
+            for char in run:
+                add(char, _PARTIAL_WEIGHT)
+    return tokens
 
 
-def token_weight(token: str) -> float:
-    """語の手がかりとしての強さ。
-
-    ひらがなだけの2文字は「をし」のように助詞の切れ端になりやすく、
-    偶然一致しやすい。漢字・カタカナ・英数字を含む語を優先する。
-    """
-    return 0.25 if _HIRAGANA_ONLY.match(token) else 1.0
-
-
-def memory_tokens(memory: Memory) -> set[str]:
+def memory_tokens(memory: Memory) -> dict[str, float]:
     """記憶の検索対象。本文とキーワードに加え、種別の呼び名も含める。"""
     label = KIND_LABEL.get(memory.kind, "")
     return tokenize(f"{memory.content} {memory.keywords} {label}")
@@ -164,17 +187,22 @@ async def search_memories(
         tokens = memory_tokens(memory)
         if not tokens:
             continue
-        overlap = query_tokens & tokens
-        matched_weight = sum(token_weight(t) for t in overlap)
+        # 片方が語の一部でしかないなら、その一致は弱い。弱いほうに合わせる。
+        matched = {
+            token: min(query_tokens[token], weight)
+            for token, weight in tokens.items()
+            if token in query_tokens
+        }
+        matched_weight = sum(matched.values())
         if matched_weight < _MIN_MATCH_WEIGHT:
             continue
         # 重なりの強さを、記憶の長さで割って正規化する。
-        total_weight = sum(token_weight(t) for t in tokens)
+        total_weight = sum(tokens.values())
         keyword_score = matched_weight / (total_weight**0.5)
         age_days = max((now - _aware(memory.created_at)).total_seconds() / 86400.0, 0.0)
         recency_score = 1.0 / (1.0 + age_days / 30.0)
         score = keyword_score + 0.2 * recency_score
-        shown = sorted(overlap, key=lambda t: (-token_weight(t), t))[:5]
+        shown = sorted(matched, key=lambda t: (-matched[t], t))[:5]
         scored[memory.id] = RetrievedMemory(
             memory=memory,
             score=round(score, 4),

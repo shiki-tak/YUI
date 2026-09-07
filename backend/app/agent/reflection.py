@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,10 +60,18 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 規則:
 - kind の意味は experience=出来事、about_person=相手について知ったこと、promise=約束、
   impression=キャラクター側の受け止め方。
+- promise は「次に話す」「次にする」と決めた内容。「次は◯◯の話をしよう」
+  「今度◯◯しよう」のような話題の予告も含む。会話に出てきたら、他に何を出すかに
+  関わらず必ず1件残す。
+- 相手が話した出来事や事情は、一度しか出てこなくても残す。後の会話で「その話」
+  として触れられる内容かどうかで判断する。
 - 会話の中で相手が実際に言ったことだけを根拠にする。書かれていないことを補わない。
+- キャラクター自身の経験や過去を作らない。会話に出てきていない体験を、
+  どの種別でもキャラクターのものとして書かない。impression はキャラクター側の
+  受け止め方だけに使う。
 - 明言された内容は "fact"、読み取っただけの推測は "inference" とする。
-- 次に話すと決めたことは必ず promise として残す。
-- あいさつ、その場限りのやり取り、既に一般常識であることは出さない。
+- あいさつ、天気の話のようなその場限りのやり取り、既に一般常識であることは出さない。
+  ただし、上の promise と、相手が話した出来事はこれに当たらない。
 - source_message_id には、その内容の根拠になった発言の番号を1つだけ選ぶ。
   会話に出てくる [#番号] のいずれかで、推測して番号を作らない。
 - 該当が無ければ [] とだけ出力する。
@@ -74,6 +82,17 @@ _INSTRUCTION = """あなたは会話ログから、後の会話で役に立つ�
 class CandidatePayload(BaseModel):
     kind: str
     content: str = Field(min_length=1, max_length=500)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _normalize_content(cls, value: object) -> object:
+        """最小長を見る前に空白を落とす（ISSUE-001）。
+
+        検証を通してから strip() すると、空白・改行・タブだけの本文が
+        「本文が空の候補」として保存され、抽出に成功したことになる。
+        """
+        return value.strip() if isinstance(value, str) else value
+
     certainty: str = Certainty.INFERENCE.value
     keywords: str = ""
     about_partner: bool = False

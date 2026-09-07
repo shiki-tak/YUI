@@ -610,6 +610,9 @@ async def test_unparsable_reflection_is_reported_and_retryable(
         ('[{"kind":"unknown","content":"何か"}]', "種別が不正"),
         ('[{"kind":"promise","content":"何か","certainty":"maybe"}]', "確かさが不正"),
         ('["文字列"]', "オブジェクトではありません"),
+        # ISSUE-001：空白・改行・タブだけの本文。検証を通してから strip() すると
+        # 本文が空の候補として保存され、抽出に成功したことになっていた。
+        ('[{"kind":"promise","content":"   \\n\\t"}]', "at least 1 character"),
     ],
 )
 async def test_invalid_candidate_element_is_reported(
