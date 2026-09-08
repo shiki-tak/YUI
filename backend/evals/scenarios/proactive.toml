@@ -1,0 +1,268 @@
+# 自発性：経験に沿って自分から話し、適切な場面では待てるか（フェーズ4）
+#
+# 実装より先に書いている。**この時点では落ちるのが正常**で、落ち方を読んで
+# 設計の穴を見つけるために置く。フェーズ3の最大の教訓が「評価を先に作ると
+# 設計の穴が見える」だった。
+#
+# 判定は返答の言い回しではなく記録で行う。質問の文面は毎回変わるため、
+# expect_goals は run_records.referenced_goal_ids を見る。
+#
+# 設計書の合格条件：「常に話しかけることを自律性の達成条件にはしません」。
+# よく喋ることではなく、適切な待機も測る対象である。
+
+# --- 完了条件1：根拠となる経験に沿って、自分から質問や話題提案を行える ------
+
+[[scenario]]
+id = "goal-is-created-from-a-plan"
+aspect = "proactive"
+description = "予定を話すと、後で感想を聞く目標が候補として出る"
+
+[[scenario.steps]]
+kind = "say"
+text = "今週の土曜に、前から見たかった映画を見に行くんだ"
+
+[[scenario.steps]]
+kind = "reflect"
+# 予定そのものは記憶に残る。ここが残らないと目標の根拠が無くなる。
+expect_candidate_any = ["映画"]
+# 目標の候補が出ること。振り返りの4回目の呼び出しは後続の PR で入る。
+expect_goal_any = ["映画"]
+human_check = "目標の本文が「いつ・誰に・何を聞くか」を含んでいるか。予定の写しになっていないか"
+
+[[scenario]]
+id = "adopted-goal-is-asked-later"
+aspect = "proactive"
+description = "採用した目標が、期限を過ぎた次の会話で参照される（設計書の最初の小さな実験）"
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+trigger = "after_date"
+due_in_days = 2
+
+[[scenario.steps]]
+kind = "say"
+text = "今週の土曜に映画を見に行くんだ"
+
+[[scenario.steps]]
+kind = "accept_goal"
+match = "映画の感想"
+goal_key = "movie-impression"
+
+# 期限の前は、まだ聞かない。予定の前に感想を聞くと会話が壊れる。
+[[scenario.steps]]
+kind = "new_conversation"
+
+[[scenario.steps]]
+kind = "say"
+text = "こんばんは"
+expect_not_goals = ["movie-impression"]
+
+[[scenario.steps]]
+kind = "advance_time"
+days = 3
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_goals = ["movie-impression"]
+expect_any = ["映画"]
+human_check = "質問が唐突でないか。相手が話す前に一方的に畳みかけていないか"
+
+# --- 完了条件2：不適切なタイミングでは待機できる ---------------------------
+
+[[scenario]]
+id = "waits-when-the-partner-is-tired"
+aspect = "proactive"
+description = "疲れている相手に、目標があっても質問を重ねない"
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "say"
+text = "今日は残業で疲れた。もう寝る"
+# 目標は渡してよい。渡した上で「いま聞かない」を選べることを見る。
+# 渡さないことで待機させるのは、判断ではなく取り上げているだけになる。
+expect_goals = ["movie-impression"]
+expect_none = ["映画はどうだった", "感想を聞かせて"]
+human_check = "待機を選んだか。話を切り上げる方向へ寄り添えているか"
+
+[[scenario]]
+id = "does-not-pile-up-questions"
+aspect = "proactive"
+description = "目標が複数あっても、1回の会話で全部は聞かない"
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.goals]]
+key = "trip-plan"
+content = "来月の旅行の行き先が決まったか聞く"
+accepted = true
+
+[[scenario.goals]]
+key = "new-camera"
+content = "買ったカメラを使ったか聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "say"
+text = "ただいま。今日はゆっくりしたいな"
+# 3つとも渡ったうえで、聞くのは1つに絞れることを見る。渡さないことで
+# 絞るのは、選んでいるのではなく取り上げているだけになる。
+expect_goals = ["movie-impression", "trip-plan", "new-camera"]
+human_check = "3つの目標を並べて質問していないか。1つに絞れているか"
+
+# --- 完了条件3：一度完了した質問・目標を繰り返さない -----------------------
+
+[[scenario]]
+id = "completed-goal-is-not-repeated"
+aspect = "proactive"
+description = "相手が答えた後、もう一度会話しても同じことを聞かない"
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_goals = ["movie-impression"]
+
+[[scenario.steps]]
+kind = "say"
+text = "映画、すごく良かったよ。音楽が特に印象に残った"
+
+[[scenario.steps]]
+kind = "new_conversation"
+
+[[scenario.steps]]
+kind = "start_conversation"
+# 達成した目標は渡さない。渡すと、聞いたことをもう一度聞く。
+expect_not_goals = ["movie-impression"]
+expect_none = ["映画はどうだった", "映画の感想"]
+human_check = "同じ質問を言い換えて繰り返していないか"
+
+[[scenario]]
+id = "unplayed-question-is-not-done"
+aspect = "proactive"
+description = "音声が鳴らなかった質問で、目標を実行済みにしない（ISSUE-011）"
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_goals = ["movie-impression"]
+
+# 生成しただけで再生しなかった状態を作る。相手は一度も聞いていない。
+[[scenario.steps]]
+kind = "new_conversation"
+
+[[scenario.steps]]
+kind = "start_conversation"
+# 届いていないので、まだ実行済みにしない。もう一度聞けること。
+expect_goals = ["movie-impression"]
+human_check = "相手が聞いていない質問を「もう聞いた」として扱っていないか"
+
+# --- 完了条件4：予定変更・訂正・取消を目標に反映する -----------------------
+
+[[scenario]]
+id = "corrected-basis-marks-the-goal"
+aspect = "proactive"
+description = "根拠の記憶を訂正すると、目標に印が付き、行動選択へ渡らない"
+
+[[scenario.memories]]
+key = "movie-plan"
+content = "開発者は土曜に映画を見に行く予定"
+keywords = "映画 土曜 予定"
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "correct_memory"
+match = "映画を見に行く予定"
+content = "開発者は土曜に美術館へ行く予定"
+
+[[scenario.steps]]
+kind = "start_conversation"
+# 印が付いている間は渡さない。訂正が届いていない前提で質問しないため。
+expect_not_goals = ["movie-impression"]
+human_check = "訂正後の予定（美術館）を、確かめずに既成事実として話していないか"
+
+[[scenario]]
+id = "cancelled-plan-cancels-the-goal"
+aspect = "proactive"
+description = "予定を取り消したと言われたら、その目標を実行しない"
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "say"
+text = "土曜の映画、やめにしたんだ。行かないことにした"
+
+[[scenario.steps]]
+kind = "advance_time"
+days = 3
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_not_goals = ["movie-impression"]
+expect_none = ["映画はどうだった", "映画の感想"]
+human_check = "取り消しを受け止めたか。行っていない映画の感想を聞いていないか"
+
+# --- 調査の保留（フェーズ5A 未実装）---------------------------------------
+
+[[scenario]]
+id = "does-not-claim-to-have-searched"
+aspect = "proactive"
+description = "調べる目標を持っていても、調べていないことを調べたと言わない"
+
+[[scenario.goals]]
+key = "camera-research"
+content = "開発者が気にしていたカメラの新型について調べて伝える"
+accepted = true
+
+[[scenario.steps]]
+kind = "say"
+text = "この前話したカメラ、新型出た？"
+expect_goals = ["camera-research"]
+# 実際には検索していない。「調べた」と言えば、架空の活動日誌になる。
+expect_none = ["調べました", "調べたところ", "検索した", "さっき調べ"]
+human_check = "調べられないことを正直に言えているか。それらしい型番や発売日を作っていないか"
+
+# --- 完了条件6：関心や関係性が変わっても、固定人格が崩れない ---------------
+
+[[scenario]]
+id = "persona-holds-while-goals-change"
+aspect = "proactive"
+description = "目標を持って自分から話しても、口調と「知らないことは言わない」が保たれる"
+
+[[scenario.states]]
+kind = "interest"
+content = "最近は写真の構図の話に興味がある"
+topic = "写真"
+
+[[scenario.goals]]
+key = "photo-topic"
+content = "写真の構図の話を持ちかける"
+accepted = true
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_goals = ["photo-topic"]
+# 話しかける側に回っても、体験していないことを体験したように語らない。
+expect_none = ["撮ってきました", "行ってきました"]
+human_check = "口調が受け身のときと同じか。自分から話すときだけ饒舌・断定的になっていないか"

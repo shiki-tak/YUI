@@ -535,3 +535,216 @@ async def test_correcting_a_memory_withdraws_the_state_it_came_from(
     # 訂正前は渡り、訂正後は渡らない。
     assert attempt.turns[1].referenced_states == ["星を見てみたい"]
     assert attempt.turns[2].referenced_states == []
+
+
+# --- 自発性の手順（フェーズ4 PR3）------------------------------------------
+#
+# 測る側を、測る対象より先に用意する。目標を渡す側（行動選択）は後続の PR で
+# 入るため、この時点では proactive のシナリオは落ちる。落ちること自体は
+# 想定どおりで、ここで確かめるのは**判定の道具が正しく動くか**である。
+
+
+async def test_goals_are_seeded_as_candidates_and_accepted_by_a_step(
+    fake_llm: FakeLLM,
+) -> None:
+    """事前に置いた目標は候補で、accept_goal で採用される。
+
+    最初から採用済みで置くと、「候補 → 採用 → 参照」の経路を通らない。
+    記憶を事前に入れる評価が抽出と採用を通っていなかったのと同じ穴になる。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "goal-accept",
+            "aspect": "proactive",
+            "goals": [
+                {
+                    "key": "movie",
+                    "content": "土曜に見た映画の感想を聞く",
+                    "trigger": "after_date",
+                    "due_in_days": 2,
+                }
+            ],
+            "steps": [
+                {"kind": "say", "text": "土曜に映画を見に行くんだ"},
+                {"kind": "accept_goal", "match": "映画の感想", "goal_key": "movie"},
+            ],
+        }
+    )
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    accepted = [c for c in attempt.action_checks if c.name == "accept_goal の実行"]
+    assert [c.ok for c in accepted] == [True]
+    assert "土曜に見た映画の感想を聞く" in accepted[0].detail
+
+
+async def test_accepting_a_missing_goal_fails_the_attempt(fake_llm: FakeLLM) -> None:
+    """採用できていない試行を、「採用後の会話」の成功に数えない。
+
+    対象が無いまま先へ進むと、採用を通っていない試行が通過として数えられる
+    （記憶の訂正で同じ穴を第6回レビューで指摘された）。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "goal-accept-missing",
+            "aspect": "proactive",
+            "goals": [{"key": "movie", "content": "土曜に見た映画の感想を聞く"}],
+            "steps": [
+                {"kind": "accept_goal", "match": "旅行の予定"},
+                {"kind": "say", "text": "こんばんは"},
+            ],
+        }
+    )
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert not attempt.ok
+    assert any(not c.ok for c in attempt.action_checks)
+
+
+async def test_advance_time_moves_the_clock_given_to_the_model(fake_llm: FakeLLM) -> None:
+    """時間を進めると、会話に渡す現在時刻が動く。
+
+    実際に待つ代わりに、渡す時刻を進める。ここが動かないと、期限付きの目標が
+    実行できるようになる時点をまたげない。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "advance",
+            "aspect": "proactive",
+            "steps": [
+                {"kind": "say", "text": "こんばんは"},
+                {"kind": "advance_time", "days": 3},
+                {"kind": "say", "text": "おはよう"},
+            ],
+        }
+    )
+    await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    # 1回目と3回目（advance_time の後）のシステムプロンプトを比べる。
+    prompts = [call[0].content for call in fake_llm.calls]
+    before = _current_time_line(prompts[0])
+    after = _current_time_line(prompts[-1])
+    assert (after - before).days == 3
+
+
+def _current_time_line(prompt: str) -> datetime:
+    for line in prompt.splitlines():
+        if line.startswith("- 現在時刻："):
+            stamp = line.split("：", 1)[1].split("（", 1)[0]
+            return datetime.strptime(stamp, "%Y-%m-%d %H:%M")
+    raise AssertionError("プロンプトに現在時刻がありません。")
+
+
+async def test_starting_a_conversation_is_not_silently_skipped(fake_llm: FakeLLM) -> None:
+    """自発的な発話が未実装のうちは、落ちる。
+
+    黙って飛ばすと、自発性を測るシナリオが、何も起きていないのに通る。
+    測る道具の穴は、実装の穴より見つけにくい（第7回レビューの3件がこれ）。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "start",
+            "aspect": "proactive",
+            "goals": [{"key": "movie", "content": "土曜に見た映画の感想を聞く", "accepted": True}],
+            "steps": [{"kind": "start_conversation", "expect_goals": ["movie"]}],
+        }
+    )
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert not attempt.ok
+    assert results[0].passed == 0
+    # 人手専用として集計から落とされないこと。
+    assert not results[0].human_only
+
+
+def test_goal_expectations_are_judged_from_the_record() -> None:
+    """渡った目標の判定は、返答の言い回しではなく記録で行う。
+
+    質問の文面は毎回変わる。「映画」という語が返答にあることと、目標が
+    プロンプトへ渡ったことは別で、後者でなければ完了条件を測れない。
+    """
+    from app.evaluation.runner import _check_turn
+    from app.evaluation.scenario import StepSpec
+
+    spec = StepSpec(
+        kind="say", text="こんばんは", expect_goals=["movie"], expect_not_goals=["trip"]
+    )
+    passed = _check_turn(spec, "映画どうだった？", [], [], ["movie"], [])
+    assert all(check.ok for check in passed)
+
+    # 返答に語が含まれていても、記録に無ければ通さない。
+    missing = _check_turn(spec, "映画どうだった？", [], [], [], [])
+    assert [c.ok for c in missing] == [False, True]
+
+    leaked = _check_turn(spec, "こんばんは", [], [], ["movie", "trip"], [])
+    assert [c.ok for c in leaked] == [True, False]
+
+
+def test_scenario_rejects_a_goal_that_cannot_be_run(tmp_path: Path) -> None:
+    """実行できない目標の書き方を、実モデルを呼ぶ前に止める。"""
+    with pytest.raises(ValueError):
+        Scenario.model_validate(
+            {
+                "id": "bad-goal",
+                "aspect": "proactive",
+                "goals": [{"key": "g", "content": "感想を聞く", "trigger": "after_date"}],
+                "steps": [{"kind": "say", "text": "やあ"}],
+            }
+        )
+
+    with pytest.raises(ValueError):
+        Scenario.model_validate(
+            {
+                "id": "bad-expect",
+                "aspect": "proactive",
+                "steps": [{"kind": "say", "text": "やあ", "expect_goals": ["missing"]}],
+            }
+        )
+
+    with pytest.raises(ValueError):
+        Scenario.model_validate(
+            {
+                "id": "bad-advance",
+                "aspect": "proactive",
+                "steps": [{"kind": "advance_time"}],
+            }
+        )
+
+
+async def test_advance_time_also_moves_the_day_used_by_the_reflection(
+    fake_llm: FakeLLM,
+) -> None:
+    """進めた時間は、振り返りが「今日」として使う日付にも届く。
+
+    ここだけ実時計のままだと、会話に渡した現在時刻と、候補の日付を解釈する
+    基準が食い違う。「昨日」が2つの意味を持つことになる。
+    """
+    from datetime import timedelta
+
+    from app.config import LOCAL_TZ
+
+    scenario = Scenario.model_validate(
+        {
+            "id": "advance-reflect",
+            "aspect": "proactive",
+            "steps": [
+                {"kind": "say", "text": "昨日、映画を見に行ったよ"},
+                {"kind": "advance_time", "days": 5},
+                {"kind": "reflect"},
+            ],
+        }
+    )
+    fake_llm.push_pickup('[{"content": "昨日 映画を見た", "source_message_id": null}]')
+    await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+
+    expected = (datetime.now(UTC) + timedelta(days=5)).astimezone(LOCAL_TZ).date()
+    prompts = "\n".join(message.content for call in fake_llm.calls for message in call)
+    assert f"振り返りを行っている日: {expected.isoformat()}" in prompts

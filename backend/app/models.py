@@ -518,6 +518,13 @@ class RunRecord(Base):
     # 返答に渡した可変状態（関心・関係性）。完了条件「参照した記憶・人格版・
     # 可変状態を追跡できる」のために、記憶と分けて残す。
     referenced_state_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    # 返答に渡した目標。完了条件「行動と状態変化の根拠を追え、悪化時に戻せる」
+    # のために、記憶・状態と分けて残す（フェーズ4）。評価はこの記録を見て
+    # 判定する。返答の言い回しからは、目標が渡ったのかを決められない。
+    referenced_goal_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    # 選んだ行動（回答・確認質問・話題提案・調査・待機）。待機を選んだことも
+    # 記録する。合格は「よく喋ること」ではなく、適切な待機も測る対象のため。
+    selected_action: Mapped[str | None] = mapped_column(String(24))
     system_prompt: Mapped[str | None] = mapped_column(Text)
     # 記憶検索にかかった時間。生成の時間と分けて、どこが遅いかを見る。
     retrieval_ms: Mapped[int | None] = mapped_column(Integer)

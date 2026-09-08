@@ -363,6 +363,7 @@ async def extract_candidates(
     llm: LLMClient,
     conversation: Conversation,
     character_name: str,
+    now: datetime | None = None,
 ) -> list[MemoryCandidate]:
     """会話から記憶の候補を作る。**セッションへは入れない。**
 
@@ -395,8 +396,10 @@ async def extract_candidates(
     sole_participant = next(iter(participants)) if len(participants) == 1 else None
 
     transcript = format_transcript(messages, character_name)
-    # 「先週」「昨日」を日付へ直すには、今日が何日かが要る。
-    today = utcnow().astimezone(LOCAL_TZ).date()
+    # 「先週」「昨日」を日付へ直すには、今日が何日かが要る。差し替えられる
+    # ようにしてあるのは、評価で時間を進めたときに、進めた側の日付で解釈させる
+    # ため。ここだけ実時計のままだと、会話に渡した現在時刻と食い違う。
+    today = (now or utcnow()).astimezone(LOCAL_TZ).date()
 
     # 1段階目：拾う。残すかどうかを判断させない。1回の呼び出しで「拾う」と
     # 「選ぶ」を同時にさせると、種類によっては一度も挙がらなかった（ISSUE-021）。

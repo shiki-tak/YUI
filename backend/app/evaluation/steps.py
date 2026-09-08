@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,8 @@ from app.agent.character_state import active_states, create_state
 from app.agent.character_state import record_revision as state_revision
 from app.agent.character_state import snapshot as state_snapshot
 from app.agent.derived import mark_derived_for_review
+from app.agent.goal import record_revision as goal_revision
+from app.agent.goal import snapshot as goal_snapshot
 from app.agent.memory_store import create_memory, record_revision, snapshot
 from app.agent.reflection import extract_candidates, format_transcript
 from app.agent.state_reflection import propose_state_candidates
@@ -30,6 +33,8 @@ from app.models import (
     CandidateStatus,
     CharacterState,
     Conversation,
+    Goal,
+    GoalStatus,
     Memory,
     MemoryCandidate,
     MemoryStatus,
@@ -48,6 +53,9 @@ class ReflectOutcome:
     accepted: list[Memory] = field(default_factory=list)
     states: list[CharacterState] = field(default_factory=list)
     accepted_states: list[CharacterState] = field(default_factory=list)
+    # 振り返りが出した目標の候補。抽出は後続の PR で入るため、いまは常に空。
+    goals: list[Goal] = field(default_factory=list)
+    accepted_goals: list[Goal] = field(default_factory=list)
     error: str | None = None
 
 
@@ -58,6 +66,7 @@ async def run_reflection(
     conversation: Conversation,
     character_name: str,
     step: StepSpec,
+    now: datetime | None = None,
 ) -> ReflectOutcome:
     """会話を振り返り、必要なら候補を採用する。
 
@@ -73,7 +82,12 @@ async def run_reflection(
     )
 
     candidates = await extract_candidates(
-        session, llm=llm, conversation=conversation, character_name=character_name
+        session,
+        llm=llm,
+        conversation=conversation,
+        character_name=character_name,
+        # 時間を進めた評価では、進めた側の日付で「昨日」「先週」を解釈させる。
+        now=now,
     )
     state_payloads = await propose_state_candidates(
         llm=llm,
@@ -220,3 +234,24 @@ async def delete_memory(session: AsyncSession, *, match: str) -> Memory | None:
     )
     await session.commit()
     return memory
+
+
+async def accept_goal(session: AsyncSession, *, match: str) -> list[Goal]:
+    """開発者が目標を採用する。API と同じく、状態を変えて履歴を残す。
+
+    候補のまま置いた目標を、行動選択へ渡る状態にする。採用の経路を通さずに
+    最初から採用済みで置くと、「候補 → 採用 → 参照」の経路を測れない。
+    フェーズ3で、記憶を事前に入れる評価が抽出と採用を通っていなかったのと
+    同じ穴になる。
+    """
+    stmt = select(Goal).where(
+        Goal.status == GoalStatus.PENDING.value, Goal.content.contains(match)
+    )
+    goals = list((await session.execute(stmt)).scalars())
+    for goal in goals:
+        before = goal_snapshot(goal)
+        goal.status = GoalStatus.ACTIVE.value
+        await session.flush()
+        goal_revision(session, goal, action="accepted", before=before, reason="評価用会話で採用")
+    await session.commit()
+    return goals

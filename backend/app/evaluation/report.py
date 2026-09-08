@@ -113,6 +113,10 @@ def build_markdown(
                     lines.append(
                         f"  - 渡した状態：{_escape('、'.join(turn.referenced_states))}"
                     )
+                if turn.referenced_goals:
+                    lines.append(
+                        f"  - 渡した目標：{_escape('、'.join(turn.referenced_goals))}"
+                    )
                 for check in turn.checks:
                     lines.append(
                         f"  - {'○' if check.ok else '×'} {check.name}：{_escape(check.detail)}"

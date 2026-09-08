@@ -12,27 +12,38 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
+from app.agent.goal import create_goal
 from app.agent.memory_store import create_memory, get_or_create_speaker
 from app.agent.reflection import ReflectionParseError
 from app.agent.state_reflection import StateReflectionError
 from app.config import Settings, to_local
 from app.evaluation.scenario import Scenario, StepSpec
-from app.evaluation.steps import ReflectOutcome, correct_memory, delete_memory, run_reflection
+from app.evaluation.steps import (
+    ReflectOutcome,
+    accept_goal,
+    correct_memory,
+    delete_memory,
+    run_reflection,
+)
 from app.llm.base import LLMClient, LLMError
 from app.models import (
     Base,
     CharacterState,
     Conversation,
     ConversationMode,
+    Goal,
+    GoalStatus,
     Memory,
     Speaker,
     StateStatus,
+    utcnow,
 )
 from app.persona import Persona
 
@@ -56,6 +67,9 @@ class TurnResult:
     # 渡された可変状態の本文。訂正が状態へ届いたかを、返答の言い回しでは
     # なくプロンプトの中身で見る。
     referenced_states: list[str] = field(default_factory=list)
+    # 渡された目標。シナリオの鍵で読む。質問の文面は毎回変わるため、
+    # 返答の言い回しではなく、記録に残った参照で判定する。
+    referenced_goals: list[str] = field(default_factory=list)
     human_check: str | None = None
     error: str | None = None
 
@@ -146,6 +160,7 @@ def _check_turn(
     reply: str,
     referenced: list[str],
     referenced_states: list[str],
+    referenced_goals: list[str],
     previous_replies: list[str],
 ) -> list[Check]:
     checks: list[Check] = []
@@ -196,6 +211,28 @@ def _check_turn(
             )
         )
 
+    if spec.expect_goals:
+        missing = [key for key in spec.expect_goals if key not in referenced_goals]
+        checks.append(
+            Check(
+                name="渡した目標",
+                ok=not missing,
+                detail=(
+                    "期待どおり" if not missing else f"渡らなかった目標: {'、'.join(missing)}"
+                ),
+            )
+        )
+
+    if spec.expect_not_goals:
+        leaked = [key for key in spec.expect_not_goals if key in referenced_goals]
+        checks.append(
+            Check(
+                name="渡していない目標",
+                ok=not leaked,
+                detail=("期待どおり" if not leaked else f"渡ってしまった: {'、'.join(leaked)}"),
+            )
+        )
+
     if spec.expect_any:
         ok, hit = _contains_any(reply, spec.expect_any)
         checks.append(
@@ -236,8 +273,10 @@ def _check_turn(
     return checks
 
 
-async def _seed(session, scenario: Scenario) -> tuple[dict[str, Speaker], dict[int, str]]:
-    """相手と記憶を用意する。記憶IDと鍵の対応も返す。"""
+async def _seed(
+    session, scenario: Scenario, *, started: datetime
+) -> tuple[dict[str, Speaker], dict[int, str], dict[int, str]]:
+    """相手・記憶・目標を用意する。記憶と目標のIDと鍵の対応も返す。"""
     speakers: dict[str, Speaker] = {}
     for spec in scenario.speakers:
         speakers[spec.key] = await get_or_create_speaker(
@@ -273,7 +312,27 @@ async def _seed(session, scenario: Scenario) -> tuple[dict[str, Speaker], dict[i
             reason="評価用会話の準備",
         )
         memory_keys[memory.id] = spec.key
-    return speakers, memory_keys
+
+    goal_keys: dict[int, str] = {}
+    for spec in scenario.goals:
+        goal: Goal = await create_goal(
+            session,
+            content=spec.content,
+            subject_speaker_id=speakers[spec.subject].id if spec.subject else None,
+            trigger=spec.trigger,
+            # 期限は会話を始めた時点から数える。シナリオを何日に流しても
+            # 同じ結果になるようにするため。
+            due_at=(
+                started + timedelta(days=spec.due_in_days)
+                if spec.due_in_days is not None
+                else None
+            ),
+            # 既定は候補。採用の手順（accept_goal）を通す。
+            status=GoalStatus.ACTIVE.value if spec.accepted else GoalStatus.PENDING.value,
+            reason="評価用会話の準備",
+        )
+        goal_keys[goal.id] = spec.key
+    return speakers, memory_keys, goal_keys
 
 
 async def run_attempt(
@@ -286,6 +345,10 @@ async def run_attempt(
     読み直されることを確かめられるようにする。
     """
     attempt = Attempt()
+    # 会話に渡す現在時刻の基準。advance_time で進める分をここへ足す。実時計を
+    # 直接使うと、期限の到来をまたぐシナリオが「流した日」で結果を変える。
+    started = utcnow()
+    clock = timedelta()
     with tempfile.TemporaryDirectory(prefix="yui-eval-") as directory:
         url = f"sqlite+aiosqlite:///{directory}/eval.db"
         engine = create_async_engine(url)
@@ -296,7 +359,7 @@ async def run_attempt(
             agent = ConversationAgent(llm=llm, persona=persona, settings=settings)
 
             session = factory()
-            speakers, memory_keys = await _seed(session, scenario)
+            speakers, memory_keys, goal_keys = await _seed(session, scenario, started=started)
             conversation = await _new_conversation(session)
             replies: list[str] = []
 
@@ -321,6 +384,10 @@ async def run_attempt(
                         memory_keys = {
                             **memory_keys,
                             **(await _reload_memory_keys(session, scenario)),
+                        }
+                        goal_keys = {
+                            **goal_keys,
+                            **(await _reload_goal_keys(session, scenario)),
                         }
                         conversation = await _new_conversation(session)
                         replies = []
@@ -357,6 +424,49 @@ async def run_attempt(
                         )
                         continue
 
+                    if step.kind == "accept_goal":
+                        assert step.match is not None
+                        accepted = await accept_goal(session, match=step.match)
+                        for goal in accepted:
+                            goal_keys.setdefault(
+                                goal.id, step.goal_key or f"採用:{goal.content[:12]}"
+                            )
+                        detail = (
+                            "、".join(f"#{g.id}「{g.content}」" for g in accepted)
+                            if accepted
+                            else f"「{step.match}」に当たる目標が無かった"
+                        )
+                        attempt.actions.append(f"accept_goal: {step.match} → {detail}")
+                        # 採用できたことを合否に含める。採用されていない試行を
+                        # 「採用後の会話」の成功に数えない（correct_memory と同じ）。
+                        attempt.action_checks.append(
+                            Check(name="accept_goal の実行", ok=bool(accepted), detail=detail)
+                        )
+                        continue
+
+                    if step.kind == "advance_time":
+                        assert step.days is not None
+                        clock += timedelta(days=step.days)
+                        attempt.actions.append(
+                            f"advance_time: {step.days} 日進めた"
+                            f"（{to_local(started + clock).strftime('%Y-%m-%d %H:%M')}）"
+                        )
+                        continue
+
+                    if step.kind == "start_conversation":
+                        # YUI の側から会話を始める。行動選択（回答・確認質問・
+                        # 話題提案・調査・待機）は PR7 で入る。それまでは
+                        # 「始められなかった」として落とす。黙って飛ばすと、
+                        # 自発性を測るシナリオが、何も起きていないのに通る。
+                        conversation = await _new_conversation(session)
+                        replies = []
+                        detail = "自発的な発話は未実装（行動選択は後続の PR で入る）"
+                        attempt.actions.append(f"start_conversation → {detail}")
+                        attempt.action_checks.append(
+                            Check(name="自発的に会話を始める", ok=False, detail=detail)
+                        )
+                        continue
+
                     if step.kind == "reflect":
                         try:
                             outcome = await run_reflection(
@@ -365,6 +475,7 @@ async def run_attempt(
                                 conversation=conversation,
                                 character_name=persona.name,
                                 step=step,
+                                now=started + clock,
                             )
                         except (
                             LLMError,
@@ -393,6 +504,7 @@ async def run_attempt(
                             conversation=conversation,
                             speaker=speakers[step.speaker],
                             text=step.text,
+                            now=started + clock,
                         )
                         await session.commit()
                     except LLMError as exc:
@@ -418,15 +530,25 @@ async def run_attempt(
                     referenced_states = await _state_contents(
                         session, result.run.referenced_state_ids
                     )
+                    referenced_goals = [
+                        goal_keys.get(goal_id, f"#{goal_id}")
+                        for goal_id in (result.run.referenced_goal_ids or [])
+                    ]
                     attempt.turns.append(
                         TurnResult(
                             text=step.text,
                             reply=reply,
                             checks=_check_turn(
-                                step, reply, referenced, referenced_states, replies
+                                step,
+                                reply,
+                                referenced,
+                                referenced_states,
+                                referenced_goals,
+                                replies,
                             ),
                             referenced=referenced,
                             referenced_states=referenced_states,
+                            referenced_goals=referenced_goals,
                             human_check=step.human_check,
                         )
                     )
@@ -479,6 +601,17 @@ async def _reload_memory_keys(session: AsyncSession, scenario: Scenario) -> dict
     return keys
 
 
+async def _reload_goal_keys(session: AsyncSession, scenario: Scenario) -> dict[int, str]:
+    """再起動後に、目標IDとシナリオの鍵の対応を作り直す。"""
+    keys: dict[int, str] = {}
+    for spec in scenario.goals:
+        stmt = select(Goal).where(Goal.content == spec.content)
+        goal = (await session.execute(stmt)).scalars().first()
+        if goal is not None:
+            keys[goal.id] = spec.key
+    return keys
+
+
 def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResult:
     """振り返りの結果を判定する。"""
     if outcome.error:
@@ -502,6 +635,24 @@ def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResu
     for state in outcome.states:
         mark = "採用" if state in outcome.accepted_states else "候補"
         result.candidates.append(f"[状態／{state.kind}／{mark}] {state.content}")
+    for goal in outcome.goals:
+        mark = "採用" if goal in outcome.accepted_goals else "候補"
+        result.candidates.append(f"[目標／{goal.trigger}／{mark}] {goal.content}")
+
+    if step.expect_goal_any:
+        joined = "\n".join(goal.content for goal in outcome.goals)
+        ok, hit = _contains_any(joined, step.expect_goal_any)
+        result.checks.append(
+            Check(
+                name="目標の候補",
+                ok=ok,
+                detail=(
+                    f"一致: {'、'.join(hit)}"
+                    if ok
+                    else f"どれも含まれない: {'、'.join(step.expect_goal_any)}"
+                ),
+            )
+        )
 
     if step.expect_state_any:
         joined = "\n".join(state.content for state in outcome.states)
