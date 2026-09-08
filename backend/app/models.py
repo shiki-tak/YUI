@@ -125,10 +125,10 @@ class StateKind(StrEnum):
     固定人格（口調・価値観・自己設定）は personas/<版>.toml にあり、ここでは
     扱わない。ここに置くのは、経験によって変わっていくものだけ。
 
-    目標（次に感想を聞く、一緒に調べる）はフェーズ4の担当なので、まだ持たない。
-    ただし「候補 → 開発者が採用 → 根拠を残す」という流れは同じ形にしてあり、
-    フェーズ4では kind を1つ増やし、実行条件・期限・完了条件の列を足せば足りる
-    ようにしている。
+    目標（次に感想を聞く、一緒に調べる）はここに kind を足さず、goals として
+    別の表に持つ（フェーズ4）。目標だけが実行条件・期限・最後に実行した時刻を
+    必要とし、実行と達成を分けて記録するため。「候補 → 開発者が採用 → 根拠を
+    残す」という流れは同じ形にしてある。
     """
 
     # YUI 自身の関心・好み。相手の好みとは別に持つ。
@@ -157,6 +157,42 @@ class CandidateStatus(StrEnum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
 
+
+class GoalTrigger(StrEnum):
+    """目標を実行してよい条件（設計書 5「目標」の実行条件）。
+
+    フェーズ4では2種類だけ持つ。条件式にはしない。器を小さく作って評価で
+    足りないものを見つけるほうが速い、というフェーズ3の教訓による。
+    """
+
+    # 次に会話が始まれば実行してよい。
+    NEXT_CONVERSATION = "next_conversation"
+    # due_at を過ぎてから実行してよい。「予定日後に感想を聞く」がこれ。
+    AFTER_DATE = "after_date"
+
+
+class GoalStatus(StrEnum):
+    """目標の扱い。候補から完了までを同じ表で追う。
+
+    終わり方を1つにまとめない。却下・取消・前提の消滅・期限切れは、後から
+    見たときに意味が違う。特に done（達成した）と、それ以外の終わり方を
+    混ぜると、完了条件3「一度完了した質問・目標を繰り返さない」を測れない。
+    """
+
+    # 振り返りが出した候補。開発者が確認するまで行動選択に渡さない。
+    PENDING = "pending"
+    # 採用済み。実行条件を満たせば行動選択に渡る。
+    ACTIVE = "active"
+    # 採用しなかった。
+    REJECTED = "rejected"
+    # 目的を達成した。二度と実行しない。
+    DONE = "done"
+    # 開発者が取り消した。
+    WITHDRAWN = "withdrawn"
+    # 前提が消えた。予定そのものが無くなった場合。
+    CANCELLED = "cancelled"
+    # 実行しないまま、実行してよい時期を過ぎた。
+    EXPIRED = "expired"
 
 # --- テーブル ---------------------------------------------------------------
 
@@ -370,6 +406,87 @@ class CharacterStateRevision(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     state_id: Mapped[int] = mapped_column(
         ForeignKey("character_states.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Goal(Base):
+    """目標：次に何を話したいか（設計書 5「目標」・6、フェーズ4）。
+
+    記憶（あったこと）とも、関心・関係性（いまどう思っているか）とも分ける。
+    目標だけが実行条件と期限を持ち、**実行したことと達成したことを別に記録する**。
+    質問を投げても相手が答えなければ、実行済みで未達成である。
+
+    候補 → 採用 → 根拠を残す流れと、根拠が変わったときの再評価は
+    character_states と同じ形にしてある（ISSUE-016 の波及に乗せるため）。
+    """
+
+    __tablename__ = "goals"
+    __table_args__ = (Index("ix_goals_status_trigger", "status", "trigger"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # 目的の本文。「週末に見た映画の感想を聞く」
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 誰に対する目標か。相手が決まらない目標は NULL。
+    subject_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+
+    trigger: Mapped[str] = mapped_column(
+        String(24), default=GoalTrigger.NEXT_CONVERSATION, nullable=False
+    )
+    # after_date の基準日時。この日時を過ぎてから実行してよい。UTC で保存する
+    # （SQLite は timezone を落とすため、揃えないと読み戻しでずれる）。
+    # 期限切れ（expired）の判定に何を使うかは、完了・取消の扱いと一緒に決める。
+    # ここで猶予の列を先に作らない。
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # 根拠になった記憶。訂正・削除されたら再評価が要る（ISSUE-016）。
+    basis_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    # 上の根拠が「暫定」かどうか。会話から自動で並べた根拠は、後から採用された
+    # 記憶が抜けているため、完全に特定した根拠として扱わない。
+    basis_is_provisional: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    # 根拠が変わった。開発者が確認するまで印を残す。自動では消さない。
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    review_reason: Mapped[str | None] = mapped_column(Text)
+
+    status: Mapped[str] = mapped_column(String(16), default=GoalStatus.PENDING, nullable=False)
+    # 参照範囲。記憶・状態と同じ考え方で、非公開のものを配信で使わない。
+    visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
+    visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+
+    source_conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id"))
+
+    # 最後に実行した時刻。質問を投げた時刻であって、答えを得た時刻ではない。
+    last_executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 目的を達成した時刻。実行とは分ける（設計書 6）。
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    subject: Mapped[Speaker | None] = relationship(foreign_keys=[subject_speaker_id])
+
+
+class GoalRevision(Base):
+    """目標の変更履歴。採用・実行・完了・取消を、根拠付きで戻せるようにする。
+
+    完了条件5「行動と状態変化の根拠を追え、悪化時に戻せる」の後半にあたる。
+    """
+
+    __tablename__ = "goal_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    goal_id: Mapped[int] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False, index=True
     )
     action: Mapped[str] = mapped_column(String(24), nullable=False)
     before: Mapped[dict[str, Any] | None] = mapped_column(JSON)

@@ -96,3 +96,62 @@ def test_migration_backfills_visibility_scope(tmp_path, monkeypatch):
     assert reflections[2] == 0
 
     get_settings.cache_clear()
+
+
+def _schema(db_path: Path) -> dict[str, tuple[dict, list[str]]]:
+    """テーブルごとの列と索引を読み出す。比較できる形にそろえる。"""
+    with sqlite3.connect(db_path) as con:
+        tables = [
+            name
+            for (name,) in con.execute(
+                "select name from sqlite_master where type='table' "
+                "and name not like 'sqlite_%' and name != 'alembic_version'"
+            )
+        ]
+        schema = {}
+        for table in tables:
+            columns = {
+                row[1]: (row[2], row[3]) for row in con.execute(f"pragma table_info('{table}')")
+            }
+            indexes = sorted(
+                row[1]
+                for row in con.execute(f"pragma index_list('{table}')")
+                if not row[1].startswith("sqlite_")
+            )
+            schema[table] = (columns, indexes)
+    return schema
+
+
+def test_migrations_match_the_models(tmp_path, monkeypatch):
+    """マイグレーションを通した schema と、モデル定義が一致する。
+
+    マイグレーションは手で書いている。列を1つ足し忘れても、テストは
+    create_all で作った schema を使うため気づけない。実際に動かす DB は
+    マイグレーションで作られるので、その2つがずれていないことを見る。
+    """
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.models import Base
+
+    migrated = tmp_path / "migrated.db"
+    monkeypatch.setenv("YUI_DATABASE_URL", f"sqlite+aiosqlite:///{migrated}")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    command.upgrade(_alembic_config(migrated), "head")
+
+    declared = tmp_path / "declared.db"
+
+    async def create_from_models() -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{declared}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await engine.dispose()
+
+    asyncio.run(create_from_models())
+
+    assert _schema(migrated) == _schema(declared)
+
+    get_settings.cache_clear()
