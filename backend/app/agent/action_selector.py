@@ -29,10 +29,20 @@ _OPEN_ACTIONS = {Action.ASK.value, Action.SUGGEST.value, Action.RESEARCH.value, 
 
 _REPLY_INSTRUCTION = """あなたは、会話を続けるキャラクターの「次の一手」を選ぶ担当です。
 相手の発言に答えるのは前提として、**持っている目標に、いま触れてよいか**を判断します。
+あわせて、相手の発言が目標を終わらせたかどうかも見ます。
 
 出力は JSON オブジェクト1つ。形式:
 {"action": "answer" | "ask" | "research" | "wait", "goal": 目標の番号 or null,
- "reason": "そう判断した理由"}
+ "reason": "そう判断した理由",
+ "answered": [相手がいま答えた目標の番号], "cancelled": [前提が無くなった目標の番号]}
+
+answered と cancelled:
+- answered：**（すでに聞いた）と付いている目標**について、相手がいま答えを
+  返したもの。まだ聞いていない目標は入れない。「話したくない」「今度でいい」は
+  答えではないので入れない。
+- cancelled：予定そのものが無くなったと相手が言ったもの。「土曜の映画はやめた」
+  なら、その感想を聞く目標は前提が消えている。予定が延びただけなら入れない。
+- どちらも無ければ空の配列にする。
 
 選び方:
 - ask：いま聞いてよい。相手がその話題に触れている、余裕がありそう、自然に
@@ -44,6 +54,8 @@ _REPLY_INSTRUCTION = """あなたは、会話を続けるキャラクターの�
 
 守ること:
 - 聞くのは1回に1つだけ。複数の目標をまとめて聞かない。
+- **（いまは聞き直さない）と付いている目標は選ばない。** 続けて同じことを
+  聞かないためで、時間が経てばまた聞ける。
 - 相手の様子を優先する。目標があることは、いま聞いてよい理由にならない。
 - JSON だけを出力し、説明文やコードブロックは付けない。
 """
@@ -82,6 +94,10 @@ class ActionChoice:
     action: str
     goal_ids: list[int] = field(default_factory=list)
     reason: str | None = None
+    # 相手がいま答えた目標。達成（done）にする対象（完了条件3）。
+    answered_goal_ids: list[int] = field(default_factory=list)
+    # 前提が無くなった目標。取消（cancelled）にする対象（完了条件4）。
+    cancelled_goal_ids: list[int] = field(default_factory=list)
     # 出力を読み取れずに待機へ倒したか。正常な待機の判断と区別する。
     is_fallback: bool = False
     provider: str | None = None
@@ -99,10 +115,33 @@ class ActionChoice:
         return self.action in {Action.ASK.value, Action.SUGGEST.value}
 
 
-def format_goals(goals: list[Goal]) -> str:
+def format_goals(
+    goals: list[Goal],
+    *,
+    asked_ids: set[int] | None = None,
+    askable_ids: set[int] | None = None,
+) -> str:
+    """目標の一覧。2種類の印を、**別の根拠から**付ける。
+
+    - 「すでに聞いた」：この相手に質問した記録がある。答えたかの判定に使う。
+      再生の通知が無くても、話した記録があれば聞いている（ISSUE-013）。
+    - 「いまは聞き直さない」：続けて同じことを聞かないための間隔の内側にある。
+      時間が経てば外れる。
+
+    2つを1つの印にまとめると、通知が無い質問が「聞いていない」ことになり、
+    相手が答えても答えたと判定されない。逆に、一度聞いた印が消えないと、
+    間隔を過ぎても聞き直せなくなる（第1回レビューの指摘4）。
+    """
+    asked_ids = asked_ids or set()
+    askable_ids = askable_ids if askable_ids is not None else {goal.id for goal in goals}
     lines = []
     for index, goal in enumerate(goals, start=1):
-        lines.append(f"{index}. {goal.content}")
+        marks = ""
+        if goal.id in asked_ids:
+            marks += "（すでに聞いた）"
+        if goal.id not in askable_ids:
+            marks += "（いまは聞き直さない）"
+        lines.append(f"{index}. {goal.content}{marks}")
     return "\n".join(lines)
 
 
@@ -164,7 +203,30 @@ def _parse(text: str, *, allowed: set[str], goals: list[Goal]) -> ActionChoice:
             is_fallback=True,
         )
 
-    return ActionChoice(action=action, goal_ids=goal_ids, reason=reason)
+    return ActionChoice(
+        action=action,
+        goal_ids=goal_ids,
+        reason=reason,
+        answered_goal_ids=_goal_numbers(raw.get("answered"), goals),
+        cancelled_goal_ids=_goal_numbers(raw.get("cancelled"), goals),
+    )
+
+
+def _goal_numbers(value: object, goals: list[Goal]) -> list[int]:
+    """番号の並びを目標のIDへ直す。読み取れないものは黙って捨てる。
+
+    ここは会話を止めない場所で、答えた・取り消したの判定は**外れても次の機会に
+    やり直せる**。読み取れない値で会話を落とすほうが害が大きい。
+    """
+    if not isinstance(value, list):
+        return []
+    ids: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            continue
+        if 1 <= item <= len(goals):
+            ids.append(goals[item - 1].id)
+    return ids
 
 
 async def select_action(
@@ -174,6 +236,8 @@ async def select_action(
     history: list[Message],
     character_name: str,
     user_text: str | None,
+    asked_ids: set[int] | None = None,
+    askable_ids: set[int] | None = None,
 ) -> ActionChoice:
     """次の行動を選ぶ。
 
@@ -206,7 +270,11 @@ async def select_action(
             ChatMessage(role="system", content=instruction),
             ChatMessage(
                 role="user",
-                content=f"持っている目標:\n{format_goals(goals)}\n\n{situation}",
+                content=(
+                    "持っている目標:\n"
+                    f"{format_goals(goals, asked_ids=asked_ids, askable_ids=askable_ids)}"
+                    f"\n\n{situation}"
+                ),
             ),
         ],
         # 判断は毎回同じであってほしい。抽出と同じく温度を下げる。

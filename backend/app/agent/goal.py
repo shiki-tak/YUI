@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -171,6 +171,8 @@ async def active_goals(
     speaker_id: int | None,
     mode: str = ConversationMode.LOCAL,
     now: datetime | None = None,
+    reask_interval_hours: float | None = None,
+    ignore_trigger: bool = False,
 ) -> list[Goal]:
     """いま実行してよい目標。
 
@@ -183,6 +185,16 @@ async def active_goals(
 
     再評価の印が付いたものは渡さない。根拠が変わったまま実行すると、訂正が
     反映されていない前提で質問することになる（ISSUE-016）。
+
+    `ignore_trigger` を立てると、実行条件（次の会話・指定日以降）で絞らない。
+    **予定の取消は、実行してよくなる日より前にも起こる**ため、状態を更新する
+    ための判定には、まだ実行できない目標も渡す必要がある（第1回レビューの
+    指摘2）。質問してよいかどうかは、絞った側で決める。
+
+    一度聞いた目標は、`reask_interval_hours` の間は渡さない。**恒久的な禁止では
+    ない。** 届いたが答えてもらえなかった質問を二度と聞けなくしないため
+    （PR8 から渡した条件2・3）。同じことを続けて聞かないための間隔であり、
+    繰り返し防止そのものは達成（done）で行う。
     """
     # 比較に使う時刻も UTC へそろえる。保存側だけそろえても、渡された時刻が
     # 地域時刻のままだと、同じ瞬間でも実行してよいかの判定が変わる。
@@ -208,12 +220,22 @@ async def active_goals(
 
     # 実行条件。判定は SQL で行う。SQLite は timezone を落として返すため、
     # 読み戻した値を Python 側で比べると、実行環境の時刻として解釈される。
-    stmt = stmt.where(
-        or_(
-            Goal.trigger == GoalTrigger.NEXT_CONVERSATION.value,
-            and_(Goal.trigger == GoalTrigger.AFTER_DATE.value, Goal.due_at <= now),
+    if not ignore_trigger:
+        stmt = stmt.where(
+            or_(
+                Goal.trigger == GoalTrigger.NEXT_CONVERSATION.value,
+                and_(Goal.trigger == GoalTrigger.AFTER_DATE.value, Goal.due_at <= now),
+            )
         )
-    )
+
+    if reask_interval_hours:
+        # 続けて同じことを聞かない。時間が経てばまた渡る。
+        stmt = stmt.where(
+            or_(
+                Goal.last_executed_at.is_(None),
+                Goal.last_executed_at <= now - timedelta(hours=reask_interval_hours),
+            )
+        )
     return list((await session.execute(stmt.order_by(Goal.id))).scalars())
 
 
@@ -314,3 +336,110 @@ async def mark_executed(
         )
         executed.append(goal)
     return executed
+
+
+async def mark_done(
+    session: AsyncSession,
+    *,
+    goal_ids: list[int],
+    reason: str,
+    at: datetime | None = None,
+) -> list[Goal]:
+    """相手の返答を受けて、目的を達成したことにする（完了条件3）。
+
+    **実行と達成は別である。** 質問が届いたこと（last_executed_at）と、相手が
+    答えたこと（completed_at）を混ぜない。混ぜると、聞いただけで終わった目標が
+    完了になり、二度と聞けなくなる。
+
+    達成にできるのは、**実際に話に出した目標だけ**。聞いていない目標を「答えた」
+    と判定されても達成にしない。根拠のない完了は、繰り返し防止の裏返しで
+    「聞いていないのに二度と聞かない」ことになる。呼び出し側が、その会話で
+    実際に持ち出した目標に絞って渡す。
+
+    **再生の通知が無くても達成にする。** 相手が答えたのなら、その質問は届いて
+    いる。**返答そのものが到達の証拠**である。通知は欠けることがあり
+    （ISSUE-013）、必須にすると、答えをもらったのに達成にならず、次の会話で
+    同じことを聞くことになる。実行済みでなければ、ここで実行済みにもする。
+    """
+    if not goal_ids:
+        return []
+    at = at or utcnow()
+    stmt = select(Goal).where(
+        Goal.id.in_(goal_ids),
+        Goal.status == GoalStatus.ACTIVE.value,
+    )
+    done: list[Goal] = []
+    for goal in (await session.execute(stmt)).scalars():
+        before = snapshot(goal)
+        goal.status = GoalStatus.DONE.value
+        goal.completed_at = at
+        if goal.last_executed_at is None:
+            # 返答が届いた証拠。通知が来ていなくても、聞けたことは確かである。
+            goal.last_executed_at = at
+        await session.flush()
+        record_revision(session, goal, action="done", before=before, reason=reason)
+        done.append(goal)
+    return done
+
+
+async def mark_cancelled(
+    session: AsyncSession,
+    *,
+    goal_ids: list[int],
+    reason: str,
+) -> list[Goal]:
+    """前提が消えたので取り消す（完了条件4）。
+
+    予定そのものが無くなった場合。達成とは別の終わり方として残す。「見に行くのを
+    やめた映画の感想」は、聞いても意味がない。
+    """
+    if not goal_ids:
+        return []
+    stmt = select(Goal).where(
+        Goal.id.in_(goal_ids),
+        Goal.status.in_([GoalStatus.ACTIVE.value, GoalStatus.PENDING.value]),
+    )
+    cancelled: list[Goal] = []
+    for goal in (await session.execute(stmt)).scalars():
+        before = snapshot(goal)
+        goal.status = GoalStatus.CANCELLED.value
+        await session.flush()
+        record_revision(session, goal, action="cancelled", before=before, reason=reason)
+        cancelled.append(goal)
+    return cancelled
+
+
+async def expire_overdue(
+    session: AsyncSession, *, after_days: float, now: datetime | None = None
+) -> list[Goal]:
+    """実行しないまま時期を過ぎた目標を、期限切れにする（完了条件4）。
+
+    予定の話題は時間が経つと持ち出しにくくなる。「3か月前に見た映画の感想」を
+    いま聞くのは不自然で、目標として残しておくほうが害になる。
+
+    **実行済みのものは対象にしない。** 一度聞いたが答えてもらえなかった目標は、
+    期限ではなく、達成したかどうかで終わらせる。
+    """
+    now = as_utc(now) if now is not None else utcnow()
+    limit = now - timedelta(days=after_days)
+    stmt = select(Goal).where(
+        Goal.status == GoalStatus.ACTIVE.value,
+        Goal.trigger == GoalTrigger.AFTER_DATE.value,
+        Goal.due_at.is_not(None),
+        Goal.due_at < limit,
+        Goal.last_executed_at.is_(None),
+    )
+    expired: list[Goal] = []
+    for goal in (await session.execute(stmt)).scalars():
+        before = snapshot(goal)
+        goal.status = GoalStatus.EXPIRED.value
+        await session.flush()
+        record_revision(
+            session,
+            goal,
+            action="expired",
+            before=before,
+            reason=f"実行しないまま {after_days:.0f} 日を過ぎた",
+        )
+        expired.append(goal)
+    return expired

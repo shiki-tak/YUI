@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     memory_retrieval_limit: int = 8
     recent_message_limit: int = 12
 
+    # 目標（フェーズ4）
+    # 一度聞いた目標を、次に持ち出せるようになるまでの間隔。**恒久的な禁止では
+    # ない。** 届いたが答えてもらえなかった質問を二度と聞けなくしないため
+    # （PR8 から渡した条件2・3）。繰り返し防止そのものは達成（done）で行う。
+    goal_reask_interval_hours: float = 12.0
+    # 実行してよくなる日から、これだけ過ぎても実行していない目標は期限切れに
+    # する。予定の話題は時間が経つと持ち出しにくくなるため。
+    goal_expiry_days: float = 14.0
+
     # カンマ区切り。.env に JSON を書かせないため文字列で受ける。
     cors_origins: str = "http://localhost:5173"
 

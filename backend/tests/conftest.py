@@ -65,6 +65,10 @@ class FakeLLM(LLMClient):
         # 特定の呼び出しだけを止めたいとき、その指示文を入れる。振り返りは
         # 3回呼ぶため、何回目で止めるかを選べないと、止めたい経路を測れない。
         self.gate_on: str | None = None
+        # 何回目から止めるか。指示文で選べない呼び出し（返答の生成は人格の
+        # プロンプトで、内容が実行時にしか決まらない）を止めるために使う。
+        # 1 を入れると最初の1回は通し、2回目から止める。
+        self.gate_skip = 0
         # 実際に門で止まったことを知らせる。entered は呼び出しごとに立つため、
         # 何回目で止まったかを待ち分けられない。
         self.held = asyncio.Event()
@@ -99,8 +103,11 @@ class FakeLLM(LLMClient):
         self.entered.set()
         system = messages[0].content if messages else ""
         if self.gate is not None and (self.gate_on is None or self.gate_on == system):
-            self.held.set()
-            await self.gate.wait()
+            if self.gate_skip > 0:
+                self.gate_skip -= 1
+            else:
+                self.held.set()
+                await self.gate.wait()
         if messages and messages[0].content in {
             REPLY_ACTION_INSTRUCTION,
             OPEN_ACTION_INSTRUCTION,

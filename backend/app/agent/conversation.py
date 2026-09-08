@@ -22,11 +22,18 @@ from sqlalchemy.orm import selectinload
 from app.agent import prompt as prompt_builder
 from app.agent.action_selector import ActionChoice, select_action
 from app.agent.character_state import active_states
-from app.agent.goal import active_goals, mark_executed
+from app.agent.goal import (
+    active_goals,
+    expire_overdue,
+    mark_cancelled,
+    mark_done,
+    mark_executed,
+)
 from app.agent.memory_store import RetrievedMemory, search_memories
 from app.config import Settings
 from app.llm.base import LLMClient
 from app.models import (
+    Action,
     ActionRecord,
     Conversation,
     DeliveryState,
@@ -138,9 +145,35 @@ class ConversationAgent:
         states = await active_states(session, speaker_id=speaker.id, mode=conversation.mode)
         # 実行してよい目標。期限が来ていないもの、再評価の印が付いたものは
         # ここで落ちる（agent/goal.py）。
-        goals = await active_goals(
-            session, speaker_id=speaker.id, mode=conversation.mode, now=reference_time
+        # 実行しないまま時期を過ぎた目標を終わらせる。**行動選択に渡す前に
+        # 走らせる。** 起動点が増えても通る位置に置くため、目標を読む直前で行う。
+        await expire_overdue(
+            session, after_days=self._settings.goal_expiry_days, now=reference_time
         )
+        # 判定に渡す目標と、質問してよい目標を分ける。
+        #
+        # 判定用は、**実行条件で絞らない**。予定の取消は実行してよくなる日より
+        # 前にも起こる（第1回レビューの指摘2）。間隔でも絞らない。相手が答えた
+        # ばかりの目標を隠すと、いつまでも達成にならない。
+        candidates = await active_goals(
+            session,
+            speaker_id=speaker.id,
+            mode=conversation.mode,
+            now=reference_time,
+            ignore_trigger=True,
+        )
+        askable = {
+            goal.id
+            for goal in await active_goals(
+                session,
+                speaker_id=speaker.id,
+                mode=conversation.mode,
+                now=reference_time,
+                reask_interval_hours=self._settings.goal_reask_interval_hours,
+            )
+        }
+        # この相手に質問した記録がある目標。再生の通知の有無では決めない。
+        asked = await self._raised_goal_ids(session, conversation.id, speaker_id=speaker.id)
         retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
 
         # **モデルを呼ぶ前にトランザクションを閉じる。** SQLite は書き込みロックを
@@ -157,20 +190,95 @@ class ConversationAgent:
         # （設計書「常時LLMを呼び続けず」）。
         choice = await select_action(
             llm=self._llm,
-            goals=goals,
+            goals=candidates,
             history=history,
             character_name=persona.name,
             user_text=text,
+            asked_ids=asked,
+            askable_ids=askable,
         )
+
+        # 相手の返答で終わった目標を片付ける。**達成と取消は別の終わり方**で、
+        # どちらも「実行した」こととは違う（PR8 から渡した条件1）。
+        done = (
+            await mark_done(
+                session,
+                # この会話で実際に持ち出した目標だけを達成にする。聞いていない
+                # 目標を「答えた」と判定されても達成にしない。
+                goal_ids=[gid for gid in choice.answered_goal_ids if gid in asked],
+                reason=f"相手が答えた：{choice.reason or '返答を受けた'}",
+                at=reference_time,
+            )
+            if choice.answered_goal_ids
+            else []
+        )
+        cancelled = (
+            await mark_cancelled(
+                session,
+                goal_ids=choice.cancelled_goal_ids,
+                reason=f"前提が無くなった：{choice.reason or '相手が取り消した'}",
+            )
+            if choice.cancelled_goal_ids
+            else []
+        )
+        # 終わった目標は、この返答では持ち出さない。
+        finished = {goal.id for goal in done} | {goal.id for goal in cancelled}
+        goals = [goal for goal in candidates if goal.id not in finished]
+        choice.goal_ids = [gid for gid in choice.goal_ids if gid not in finished]
+
+        # 聞くと決めた目標が、いま聞いてよいものかを確かめる。
+        #
+        # - 直前に聞いたばかり（間隔の内側）なら聞かない。
+        # - 終わらせた目標を選んでいた場合、**別の目標へ勝手に振り替えない**。
+        #   選び直しは行動選択の仕事で、ここで補うと、渡す目標と実行の記録が
+        #   食い違う（第1回レビューの指摘3）。
+        if choice.executes_a_goal and (
+            not choice.goal_ids or not set(choice.goal_ids) <= askable
+        ):
+            choice.action = Action.ANSWER.value
+            choice.goal_ids = []
+            choice.reason = "いま聞いてよい目標が残っていないので、聞かない。"
+
+        # 行動の判断を、**生成より前に**残す。目標の状態を変えた判断が、返答の
+        # 生成に失敗しただけで記録から消えると、何がその状態にしたのかを追え
+        # なくなる（第2回レビューの指摘1）。発言との結び付きは、生成が成功して
+        # から入れる。
+        action_record: ActionRecord | None = None
+        if candidates:
+            action_record = ActionRecord(
+                conversation_id=conversation.id,
+                speaker_id=speaker.id,
+                action=choice.action,
+                reason=choice.reason,
+                # 判定に渡した候補。**終わらせた目標も含めて残す。**
+                # 更新後の残りで決めると、最後の1件を完了・取消したときに
+                # 判断そのものが記録から消える（第1回レビューの指摘5）。
+                candidate_goal_ids=[goal.id for goal in candidates],
+                selected_goal_ids=choice.goal_ids or None,
+                message_id=None,
+                is_proactive=False,
+                is_fallback=choice.is_fallback,
+                provider=choice.provider,
+                model=choice.model,
+                model_digest=choice.model_digest,
+                options=choice.options,
+            )
+            session.add(action_record)
+
+        # **書き込みを確定させてから生成へ入る。** 開いたまま応答を待つと、
+        # 他の会話や記憶の訂正が「database is locked」で失敗する。1回目の
+        # 呼び出しの前では閉じていたのに、2回目の前で同じ形を作っていた
+        # （第1回レビューの指摘1）。
+        await session.commit()
 
         # 聞くと決めたときは、選んだ目標だけを渡す。全部渡して生成側に選び
         # 直させると、相手の様子を見て選んだ判断が伝わらない
-        # （第1回レビューの指摘3）。触れないときは、持っているものとして
-        # 全部渡す（渡さないことで待機させない）。
+        # （第1回レビューの指摘3）。触れないときは、いま聞いてよい目標を
+        # 持っているものとして渡す（渡さないことで待機させない）。
         if choice.executes_a_goal:
-            passed_goals = [goal for goal in goals if goal.id in choice.goal_ids] or goals[:1]
+            passed_goals = [goal for goal in goals if goal.id in choice.goal_ids]
         else:
-            passed_goals = goals
+            passed_goals = [goal for goal in goals if goal.id in askable]
 
         messages, system_prompt = prompt_builder.build_messages(
             persona=persona,
@@ -241,24 +349,11 @@ class ConversationAgent:
             )
         # 行動の判断を残す。目標が無いときは判断していないので作らない
         # （すべての返答に1件ずつ増やしても、読む材料にならない）。
-        if goals:
-            session.add(
-                ActionRecord(
-                    conversation_id=conversation.id,
-                    speaker_id=speaker.id,
-                    action=choice.action,
-                    reason=choice.reason,
-                    candidate_goal_ids=[goal.id for goal in goals],
-                    selected_goal_ids=choice.goal_ids or None,
-                    message_id=reply_message.id,
-                    is_proactive=False,
-                    is_fallback=choice.is_fallback,
-                    provider=choice.provider,
-                    model=choice.model,
-                    model_digest=choice.model_digest,
-                    options=choice.options,
-                )
-            )
+        if action_record is not None:
+            # 話せたので、発言と結び付ける。**発言のない判断は「持ち出した」
+            # ことにしない**（下の _raised_goal_ids と、実行済みの判定が
+            # message_id で見る）。
+            action_record.message_id = reply_message.id
         await session.flush()
 
         return ReplyResult(
@@ -268,6 +363,40 @@ class ConversationAgent:
             memories=memories,
             choice=choice,
         )
+
+    async def _raised_goal_ids(
+        self,
+        session: AsyncSession,
+        conversation_id: int,
+        *,
+        speaker_id: int | None = None,
+    ) -> set[int]:
+        """実際に持ち出した目標。
+
+        行動の記録から引く。渡しただけの目標（待機のときも渡る）は含めない。
+        **再生の通知の有無では決めない。** 通知は欠けることがあり、話した記録が
+        あれば聞いてはいる（ISSUE-013）。
+
+        speaker_id を渡すと、その相手に対して持ち出したものを会話をまたいで
+        拾う。**達成の判定も相手単位で行う。** 「昨日聞かれたやつだけど」と
+        後から答えることがあり、会話に閉じると達成にできない。
+
+        **発言が残っている記録だけを見る。** 判断は生成の前に保存するため、
+        生成に失敗した判断も記録に残る。それを「持ち出した」と数えると、
+        一度も話していない質問を聞いたことにする（第2回レビューの指摘1）。
+        """
+        stmt = select(ActionRecord).where(
+            ActionRecord.action.in_([Action.ASK.value, Action.SUGGEST.value]),
+            ActionRecord.message_id.is_not(None),
+        )
+        if speaker_id is not None:
+            stmt = stmt.where(ActionRecord.speaker_id == speaker_id)
+        else:
+            stmt = stmt.where(ActionRecord.conversation_id == conversation_id)
+        raised: set[int] = set()
+        for record in (await session.execute(stmt)).scalars():
+            raised.update(record.selected_goal_ids or [])
+        return raised
 
     async def open(
         self,
@@ -292,8 +421,17 @@ class ConversationAgent:
         reference_time = now or utcnow()
 
         history = await self._recent_history(session, conversation.id, exclude_id=0)
+        await expire_overdue(
+            session, after_days=self._settings.goal_expiry_days, now=reference_time
+        )
+        # 自分から始める場面では、聞いてよい目標だけを見る。相手の発言が無いので、
+        # 答えた・取り消したの判定はここでは行わない。
         goals = await active_goals(
-            session, speaker_id=speaker.id, mode=conversation.mode, now=reference_time
+            session,
+            speaker_id=speaker.id,
+            mode=conversation.mode,
+            now=reference_time,
+            reask_interval_hours=self._settings.goal_reask_interval_hours,
         )
         # モデルを呼ぶ前に、開いている書き込みを閉じる。呼び出し側が話者を
         # 作った直後に来ることがあり、そのまま待つとロックを握り続ける
