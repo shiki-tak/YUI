@@ -192,6 +192,8 @@ class ReflectionSpec(BaseModel):
 # 見られるものが違う。
 _SAY_FIELDS = {
     "expect_action",
+    "expect_executed_goals",
+    "expect_not_executed_goals",
     "expect_memories",
     "expect_not_memories",
     "expect_states",
@@ -225,10 +227,20 @@ _ALLOWED_FIELDS: dict[str, set[str]] = {
     "delete_memory": {"match", "expect_marked_goals"},
     "accept_goal": {"match", "goal_key"},
     "advance_time": {"days"},
+    "deliver": {"delivery"},
 }
 # human_check はどの手順にも書ける（人が読む欄）。
 _EXPECTATION_FIELDS = (
-    {"speaker", "text", "match", "content", "goal_key", "days", "expect_marked_goals"}
+    {
+        "speaker",
+        "text",
+        "match",
+        "content",
+        "goal_key",
+        "days",
+        "expect_marked_goals",
+        "delivery",
+    }
     | _SAY_FIELDS
     | _REFLECT_FIELDS
 )
@@ -252,6 +264,10 @@ class StepSpec(BaseModel):
       またぐために使う。**実際に待つのではなく、会話に渡す現在時刻を進める**。
     - start_conversation：YUI の側から会話を始める。自発的な発話の起動点は
       会話開始だけに絞っている（ISSUE-024）。
+    - deliver：直前の YUI の発言に、再生の通知を出す（playing / completed /
+      aborted）。**これを書かない限り、発言は生成しただけの状態のまま**で、
+      目標も実行済みにならない（ISSUE-011）。中断が「途中まで届いた」と
+      数えられるのは、鳴り始めた後（playing → aborted）だけである。
     """
 
     kind: Literal[
@@ -264,6 +280,7 @@ class StepSpec(BaseModel):
         "accept_goal",
         "advance_time",
         "start_conversation",
+        "deliver",
     ] = "say"
 
     # say
@@ -333,6 +350,17 @@ class StepSpec(BaseModel):
 
     # advance_time：何日進めるか。
     days: int | None = None
+
+    # deliver：どこまで届いたか。completed は最後まで、aborted は途中まで。
+    # 既定を None にしてあるのは、手順ごとの検査（_ALLOWED_FIELDS）が「値が
+    # 入っているか」で見るため。既定値を持たせると全手順で書かれた扱いになる。
+    delivery: Literal["playing", "completed", "aborted"] | None = None
+
+    # say / start_conversation：実行済みになってほしい目標（GoalSpec.key）。
+    # 「渡った」ではなく「相手へ届いて実行済みになった」ことを見る。生成した
+    # だけの質問を実行済みにしないことを測るために要る（ISSUE-011）。
+    expect_executed_goals: list[str] = Field(default_factory=list)
+    expect_not_executed_goals: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_fields(self) -> StepSpec:
@@ -435,6 +463,8 @@ class Scenario(BaseModel):
                 or step.expect_not_goals
                 or step.expect_marked_goals
                 or step.expect_action
+                or step.expect_executed_goals
+                or step.expect_not_executed_goals
                 or step.expect_any
                 or step.expect_none
                 or step.expect_not_repeating
@@ -502,7 +532,13 @@ class Scenario(BaseModel):
 
         default_speaker = self.speakers[0].key
         for item in [*self.turns, *self.steps]:
-            for field_name in ("expect_goals", "expect_not_goals", "expect_marked_goals"):
+            for field_name in (
+                "expect_goals",
+                "expect_not_goals",
+                "expect_marked_goals",
+                "expect_executed_goals",
+                "expect_not_executed_goals",
+            ):
                 for key in getattr(item, field_name, []):
                     if key not in goal_keys:
                         raise ValueError(f"{field_name} が goals にありません: {key}")

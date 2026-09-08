@@ -22,7 +22,7 @@ from sqlalchemy.orm import selectinload
 from app.agent import prompt as prompt_builder
 from app.agent.action_selector import ActionChoice, select_action
 from app.agent.character_state import active_states
-from app.agent.goal import active_goals
+from app.agent.goal import active_goals, mark_executed
 from app.agent.memory_store import RetrievedMemory, search_memories
 from app.config import Settings
 from app.llm.base import LLMClient
@@ -229,6 +229,16 @@ class ConversationAgent:
             completion_tokens=response.completion_tokens,
         )
         session.add(run)
+        # 読み上げない構成では、画面に出た時点で相手に届く。再生の通知は
+        # 来ないので、ここで実行済みにする。通知を待つと、文字だけの構成で
+        # 目標が永久に実行済みにならない（第1回レビューの指摘3）。
+        if not spoken and choice.executes_a_goal:
+            await mark_executed(
+                session,
+                goal_ids=[goal.id for goal in passed_goals],
+                delivered=DeliveryState.COMPLETED.value,
+                at=recorded_at,
+            )
         # 行動の判断を残す。目標が無いときは判断していないので作らない
         # （すべての返答に1件ずつ増やしても、読む材料にならない）。
         if goals:
@@ -390,6 +400,13 @@ class ConversationAgent:
             completion_tokens=response.completion_tokens,
         )
         session.add(run)
+        if not spoken:
+            await mark_executed(
+                session,
+                goal_ids=[goal.id for goal in chosen],
+                delivered=DeliveryState.COMPLETED.value,
+                at=recorded_at,
+            )
         session.add(
             ActionRecord(
                 conversation_id=conversation.id,

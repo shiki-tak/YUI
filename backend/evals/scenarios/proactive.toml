@@ -223,8 +223,10 @@ accepted = true
 [[scenario.steps]]
 kind = "start_conversation"
 expect_goals = ["movie-impression"]
+# 生成しただけで、再生の通知を出さない。相手は一度も聞いていない。
+# **deliver を書かない限り、発言は生成しただけの状態のまま**である。
+expect_not_executed_goals = ["movie-impression"]
 
-# 生成しただけで再生しなかった状態を作る。相手は一度も聞いていない。
 [[scenario.steps]]
 kind = "new_conversation"
 
@@ -232,6 +234,95 @@ kind = "new_conversation"
 kind = "start_conversation"
 # 届いていないので、まだ実行済みにしない。もう一度聞けること。
 expect_goals = ["movie-impression"]
+expect_not_executed_goals = ["movie-impression"]
+human_check = "相手が聞いていない質問を「もう聞いた」として扱っていないか"
+
+[[scenario]]
+id = "a-delivered-question-is-executed"
+aspect = "proactive"
+description = "音声が鳴った質問は実行済みになる（unplayed の対）"
+
+# 片方だけでは、実行済みの判定が常に偽でも通ってしまう。届いた場合に
+# 実行済みになることも測る。
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_goals = ["movie-impression"]
+
+[[scenario.steps]]
+kind = "deliver"
+delivery = "completed"
+
+[[scenario.steps]]
+kind = "say"
+text = "うん、面白かったよ"
+expect_executed_goals = ["movie-impression"]
+human_check = "実行済みだが、まだ達成ではない。相手の返答を受けて完了にするのは別の段階"
+
+[[scenario]]
+id = "an-aborted-question-is-executed-but-recorded"
+aspect = "proactive"
+description = "途中で止めた質問も、途中までは届いている"
+
+# 単純に除外すると逆に不正確になる（ISSUE-011 の修正方針）。実行済みにはするが、
+# どこまで届いたかは履歴に残す。
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_goals = ["movie-impression"]
+
+# 鳴り始めてから止める。**鳴り始める前の中断は届いていない**ので、
+# 実行済みにはしない（下の対のシナリオで測る）。
+[[scenario.steps]]
+kind = "deliver"
+delivery = "playing"
+
+[[scenario.steps]]
+kind = "deliver"
+delivery = "aborted"
+
+[[scenario.steps]]
+kind = "say"
+text = "ごめん、途中で切っちゃった"
+expect_executed_goals = ["movie-impression"]
+human_check = "途中までしか届いていないことを踏まえた返答か。最後まで聞いた前提になっていないか"
+
+[[scenario]]
+id = "a-question-stopped-before-playing-is-not-executed"
+aspect = "proactive"
+description = "鳴り始める前に止めた質問は、届いていない"
+
+# 中断を一律で「途中まで届いた」と扱うと、鳴らずに止めた質問まで実行済みに
+# なる。相手は一度も聞いていない（第1回レビューの指摘2）。
+
+[[scenario.goals]]
+key = "movie-impression"
+content = "土曜に見た映画の感想を聞く"
+accepted = true
+
+[[scenario.steps]]
+kind = "start_conversation"
+expect_goals = ["movie-impression"]
+
+# playing を送らずに中断する。鳴り始めていない。
+[[scenario.steps]]
+kind = "deliver"
+delivery = "aborted"
+
+[[scenario.steps]]
+kind = "say"
+text = "ごめん、聞こえなかった"
+expect_not_executed_goals = ["movie-impression"]
 human_check = "相手が聞いていない質問を「もう聞いた」として扱っていないか"
 
 # --- 完了条件4：予定変更・訂正・取消を目標に反映する -----------------------

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
+from app.agent.delivery import apply_delivery_state
 from app.agent.goal import create_goal
 from app.agent.goal_reflection import GoalReflectionError
 from app.agent.memory_store import create_memory, get_or_create_speaker
@@ -39,10 +40,13 @@ from app.models import (
     CharacterState,
     Conversation,
     ConversationMode,
+    DeliveryState,
     Goal,
     GoalStatus,
     Memory,
+    Message,
     Speaker,
+    SpeakerKind,
     StateStatus,
     utcnow,
 )
@@ -164,8 +168,10 @@ def _check_turn(
     referenced_goals: list[str],
     previous_replies: list[str],
     action: str | None = None,
+    executed_goals: list[str] | None = None,
 ) -> list[Check]:
     checks: list[Check] = []
+    executed_goals = executed_goals or []
 
     if spec.expect_action:
         checks.append(
@@ -225,6 +231,36 @@ def _check_turn(
                 detail=("期待どおり" if not leaked else f"渡ってしまった: {'、'.join(leaked)}"),
             )
         )
+
+    if spec.expect_executed_goals or spec.expect_not_executed_goals:
+        # 実行済みは、渡ったこととは別に見る。生成しただけの質問を実行済みに
+        # しないことを測るために要る（ISSUE-011）。
+        missing = [key for key in spec.expect_executed_goals if key not in executed_goals]
+        if spec.expect_executed_goals:
+            checks.append(
+                Check(
+                    name="実行済みの目標",
+                    ok=not missing,
+                    detail=(
+                        "期待どおり"
+                        if not missing
+                        else f"実行済みになっていない: {'、'.join(missing)}"
+                    ),
+                )
+            )
+        early = [key for key in spec.expect_not_executed_goals if key in executed_goals]
+        if spec.expect_not_executed_goals:
+            checks.append(
+                Check(
+                    name="実行済みでない目標",
+                    ok=not early,
+                    detail=(
+                        "期待どおり"
+                        if not early
+                        else f"実行済みになってしまった: {'、'.join(early)}"
+                    ),
+                )
+            )
 
     if spec.expect_goals:
         missing = [key for key in spec.expect_goals if key not in referenced_goals]
@@ -465,6 +501,31 @@ async def run_attempt(
                             )
                         continue
 
+                    if step.kind == "deliver":
+                        # 直前の YUI の発言が相手へ届いたことにする。**これを
+                        # 書かない限り、発言は生成しただけの状態のまま**で、
+                        # 目標も実行済みにならない（ISSUE-011）。
+                        last = await _last_character_message(session, conversation.id)
+                        if last is None:
+                            detail = "届ける発言がありませんでした"
+                            ok = False
+                        else:
+                            await apply_delivery_state(
+                                session,
+                                last,
+                                DeliveryState(step.delivery or "completed"),
+                                now=started + clock,
+                            )
+                            detail = (
+                                f"発言 #{last.id} を {step.delivery or 'completed'} にした"
+                            )
+                            ok = True
+                        attempt.actions.append(f"deliver: {detail}")
+                        attempt.action_checks.append(
+                            Check(name="再生の通知", ok=ok, detail=detail)
+                        )
+                        continue
+
                     if step.kind == "accept_goal":
                         assert step.match is not None
                         accepted = await accept_goal(session, match=step.match)
@@ -566,6 +627,7 @@ async def run_attempt(
                                     referenced_goals,
                                     replies,
                                     opened.choice.action,
+                                    await _executed_goal_keys(session, goal_keys),
                                 ),
                                 referenced=referenced,
                                 referenced_states=referenced_states,
@@ -657,6 +719,7 @@ async def run_attempt(
                                 referenced_goals,
                                 replies,
                                 result.run.selected_action,
+                                await _executed_goal_keys(session, goal_keys),
                             ),
                             referenced=referenced,
                             referenced_states=referenced_states,
@@ -670,6 +733,33 @@ async def run_attempt(
         finally:
             await engine.dispose()
     return attempt
+
+
+async def _last_character_message(
+    session: AsyncSession, conversation_id: int
+) -> Message | None:
+    """その会話で最後に YUI が話した発言。再生の通知を出す先。"""
+    stmt = (
+        select(Message)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.speaker_kind == SpeakerKind.CHARACTER.value,
+        )
+        .order_by(Message.id.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def _executed_goal_keys(
+    session: AsyncSession, goal_keys: dict[int, str]
+) -> list[str]:
+    """実行済みになっている目標。記録から読む。"""
+    stmt = select(Goal).where(Goal.last_executed_at.is_not(None))
+    return [
+        goal_keys.get(goal.id, f"#{goal.id}")
+        for goal in (await session.execute(stmt)).scalars()
+    ]
 
 
 async def _state_contents(session: AsyncSession, ids: list[int] | None) -> list[str]:

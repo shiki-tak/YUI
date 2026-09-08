@@ -269,3 +269,48 @@ async def mark_for_review(
         record_revision(session, goal, action="needs_review", before=before, reason=reason)
         affected.append(goal)
     return affected
+
+
+async def mark_executed(
+    session: AsyncSession,
+    *,
+    goal_ids: list[int],
+    delivered: str,
+    at: datetime | None = None,
+) -> list[Goal]:
+    """質問が相手へ届いたので、実行済みにする（[ISSUE-011](docs/issues/issues.md)）。
+
+    **生成しただけでは実行済みにしない。** 質問文を作っても音声が鳴らなければ、
+    相手は一度も聞いていない。それを実行済みにすると、繰り返し防止の裏返しで
+    「相手は聞いていないのに、二度と聞かれない」ことになる。設計書 6 も
+    「質問文を生成しただけで、相手から感想を聞けたとは記録しない」と書いている。
+
+    中断（aborted）も実行済みにする。途中までは届いているためで、単純に
+    除外すると逆に不正確になる。ただし**どこまで届いたかは履歴に残す**。
+    完了と中断を混ぜない。
+
+    実行と達成は別である。ここで入れるのは last_executed_at だけで、
+    completed_at は相手の返答を受けてから入れる（PR9）。
+    """
+    if not goal_ids:
+        return []
+    at = at or utcnow()
+    stmt = select(Goal).where(
+        Goal.id.in_(goal_ids),
+        # 終わった目標は実行済みにしない。届いた通知が遅れて来ることがある。
+        Goal.status.in_([GoalStatus.ACTIVE.value, GoalStatus.WITHDRAWN.value]),
+    )
+    executed: list[Goal] = []
+    for goal in (await session.execute(stmt)).scalars():
+        before = snapshot(goal)
+        goal.last_executed_at = at
+        await session.flush()
+        record_revision(
+            session,
+            goal,
+            action="executed",
+            before=before,
+            reason=f"相手へ届いた（再生: {delivered}）",
+        )
+        executed.append(goal)
+    return executed
