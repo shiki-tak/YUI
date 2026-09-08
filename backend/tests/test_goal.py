@@ -586,3 +586,290 @@ async def test_the_evaluation_path_marks_the_goal(session_factory: async_session
         await session.refresh(by_conversation)
         assert by_conversation.needs_review is True
         assert "削除された" in by_conversation.review_reason
+
+
+# --- API と画面（PR4）------------------------------------------------------
+
+
+async def _post_goal(client: AsyncClient, **payload) -> dict:
+    body = {"content": "土曜に見た映画の感想を聞く", "visible_to_all": True}
+    body.update(payload)
+    return (await client.post("/api/goals", json=body)).json()
+
+
+async def test_a_goal_is_a_candidate_until_it_is_accepted(client: AsyncClient) -> None:
+    """画面から追加した目標も候補から始まる。採用するまで行動選択に渡さない。"""
+    created = await _post_goal(client)
+    assert created["status"] == "pending"
+    assert created["last_executed_at"] is None and created["completed_at"] is None
+
+    accepted = (
+        await client.post(f"/api/goals/{created['id']}/decide", json={"decision": "accept"})
+    ).json()
+    assert accepted["status"] == "active"
+
+    # 二度目の判断は受け付けない。
+    again = await client.post(
+        f"/api/goals/{created['id']}/decide", json={"decision": "reject"}
+    )
+    assert again.status_code == 409
+
+    listed = (await client.get("/api/goals?goal_status=active")).json()
+    assert [g["id"] for g in listed] == [created["id"]]
+
+
+async def test_the_schedule_is_checked_as_a_pair(client: AsyncClient) -> None:
+    """実行条件と期限は、組み合わせで検査する。
+
+    片方だけ変えられると、after_date のまま基準日時が無い目標や、
+    next_conversation なのに期限が残った目標が作れる。判定は agent 側の
+    normalize_due_at に集めてあり、API はそこへ渡すだけにする。
+    """
+    missing_due = await client.post(
+        "/api/goals",
+        json={"content": "感想を聞く", "trigger": "after_date", "visible_to_all": True},
+    )
+    assert missing_due.status_code == 400
+
+    goal = await _post_goal(
+        client, trigger="after_date", due_at="2026-09-13T00:00:00+09:00"
+    )
+    assert goal["trigger"] == "after_date"
+
+    # 条件を戻すと期限も消える。残ると、効かない期限が画面に出続ける。
+    updated = (
+        await client.patch(
+            f"/api/goals/{goal['id']}", json={"trigger": "next_conversation"}
+        )
+    ).json()
+    assert updated["trigger"] == "next_conversation"
+    assert updated["due_at"] is None
+
+    # 期限なしで after_date へは戻せない。
+    broken = await client.patch(
+        f"/api/goals/{goal['id']}", json={"trigger": "after_date"}
+    )
+    assert broken.status_code == 400
+
+
+async def test_a_goal_cannot_be_wider_than_its_basis(client: AsyncClient) -> None:
+    """根拠の記憶より広い参照範囲では作れない。
+
+    記憶側で相手を限定していても、そこから作った目標が別の相手へ渡ると、
+    限定した意味が無くなる（記憶・状態と同じ規則）。
+    """
+    speaker_id = (
+        await client.post(
+            "/api/chat",
+            json={
+                "text": "こんにちは",
+                "speaker": {
+                    "source": "local_text",
+                    "external_id": "goal-a",
+                    "display_name": "Aさん",
+                },
+            },
+        )
+    ).json()["user_message"]["speaker_id"]
+    memory = (
+        await client.post(
+            "/api/memories",
+            json={
+                "kind": "experience",
+                "content": "Aさんは土曜に映画を見に行く",
+                "keywords": "映画",
+                "visible_to_speaker_id": speaker_id,
+            },
+        )
+    ).json()
+
+    leaked = await client.post(
+        "/api/goals",
+        json={
+            "content": "映画の感想を聞く",
+            "basis_memory_ids": [memory["id"]],
+            "visible_to_all": True,
+        },
+    )
+    assert leaked.status_code == 400
+
+    ok = await client.post(
+        "/api/goals",
+        json={
+            "content": "映画の感想を聞く",
+            "basis_memory_ids": [memory["id"]],
+            "visible_to_speaker_id": speaker_id,
+        },
+    )
+    assert ok.status_code == 201
+
+
+async def test_completion_is_recorded_apart_from_execution(client: AsyncClient) -> None:
+    """達成の記録と、実行の記録を混ぜない（設計書 6）。
+
+    質問を投げただけでは達成にしない。画面から done にしたときに入るのは
+    completed_at で、last_executed_at は行動した側が入れる。
+    """
+    goal = await _post_goal(client)
+    await client.post(f"/api/goals/{goal['id']}/decide", json={"decision": "accept"})
+
+    done = (
+        await client.patch(
+            f"/api/goals/{goal['id']}",
+            json={"status": "done", "reason": "相手が感想を話した"},
+        )
+    ).json()
+    assert done["status"] == "done"
+    assert done["completed_at"] is not None
+    assert done["last_executed_at"] is None
+
+    revisions = (await client.get(f"/api/goals/{goal['id']}/revisions")).json()
+    assert [r["action"] for r in revisions] == ["corrected", "accepted", "created"]
+    assert revisions[0]["reason"] == "相手が感想を話した"
+
+
+async def test_the_review_mark_can_be_cleared_but_a_dead_basis_comes_back(
+    client: AsyncClient,
+) -> None:
+    """印は開発者が下ろす。撤回中に根拠が消えていれば、戻すときに付け直す。"""
+    memory = (
+        await client.post(
+            "/api/memories",
+            json={
+                "kind": "experience",
+                "content": "開発者は土曜に映画を見に行く",
+                "keywords": "映画",
+                "visible_to_all": True,
+            },
+        )
+    ).json()
+    goal = await _post_goal(client, basis_memory_ids=[memory["id"]])
+    await client.post(f"/api/goals/{goal['id']}/decide", json={"decision": "accept"})
+
+    # 根拠を訂正すると印が付く（PR2 の波及）。
+    await client.patch(
+        f"/api/memories/{memory['id']}",
+        json={"content": "開発者は土曜に美術館へ行く", "reason": "聞き違い"},
+    )
+    marked = (await client.get("/api/goals?needs_review=true")).json()
+    assert [g["id"] for g in marked] == [goal["id"]]
+
+    # 確認して印を下ろす。
+    cleared = (
+        await client.patch(f"/api/goals/{goal['id']}", json={"reviewed": True})
+    ).json()
+    assert cleared["needs_review"] is False
+
+    # 撤回している間に根拠が削除されると、有効へ戻すときに印が付く。
+    await client.patch(f"/api/goals/{goal['id']}", json={"status": "withdrawn"})
+    await client.delete(f"/api/memories/{memory['id']}")
+    await client.patch(f"/api/goals/{goal['id']}", json={"reviewed": True})
+    back = (
+        await client.patch(f"/api/goals/{goal['id']}", json={"status": "active"})
+    ).json()
+    assert back["needs_review"] is True
+    assert "有効でなくなっている" in back["review_reason"]
+
+
+async def test_a_goal_cannot_be_founded_on_a_dead_memory(client: AsyncClient) -> None:
+    """削除・訂正された記憶を根拠にした目標は作れない（第1回レビューの指摘1）。
+
+    訂正の波及は「後から変わったもの」を拾う仕組みなので、作る前に無効だった
+    根拠は拾えない。作れてしまうと、無効になった予定を根拠に質問する目標が、
+    印の付かない採用済みとして残る。
+    """
+    memory = (
+        await client.post(
+            "/api/memories",
+            json={
+                "kind": "experience",
+                "content": "開発者は土曜に映画を見に行く",
+                "keywords": "映画",
+                "visible_to_all": True,
+            },
+        )
+    ).json()
+    await client.delete(f"/api/memories/{memory['id']}")
+
+    refused = await client.post(
+        "/api/goals",
+        json={
+            "content": "映画の感想を聞く",
+            "basis_memory_ids": [memory["id"]],
+            "visible_to_all": True,
+        },
+    )
+    assert refused.status_code == 400
+    assert "有効ではありません" in refused.json()["detail"]
+
+
+async def test_a_candidate_whose_basis_died_is_marked_when_accepted(
+    client: AsyncClient,
+) -> None:
+    """候補を置いてから採用するまでの間に根拠が消えたら、採用時に印を付ける。
+
+    拒否はしない。目標そのものを捨てるかは開発者が決める。印が付いている間は
+    行動選択へ渡らない。
+    """
+    memory = (
+        await client.post(
+            "/api/memories",
+            json={
+                "kind": "experience",
+                "content": "開発者は土曜に映画を見に行く",
+                "keywords": "映画",
+                "visible_to_all": True,
+            },
+        )
+    ).json()
+    goal = await _post_goal(client, basis_memory_ids=[memory["id"]])
+    await client.delete(f"/api/memories/{memory['id']}")
+
+    accepted = (
+        await client.post(f"/api/goals/{goal['id']}/decide", json={"decision": "accept"})
+    ).json()
+    assert accepted["status"] == "active"
+    assert accepted["needs_review"] is True
+    assert "有効でなくなっている" in accepted["review_reason"]
+
+
+async def test_patch_cannot_take_the_place_of_accepting(client: AsyncClient) -> None:
+    """候補を PATCH で採用済みにできない（第1回レビューの指摘3）。
+
+    decide の採用だけが、会話単位の根拠を実際の記憶IDへ結び付け、暫定の印を
+    付け、accepted として履歴に残す。PATCH で迂回できると、同じ「採用」が
+    経路によって別の記録になる。
+    """
+    goal = await _post_goal(client)
+    refused = await client.patch(f"/api/goals/{goal['id']}", json={"status": "active"})
+    assert refused.status_code == 409
+    assert "decide" in refused.json()["detail"]
+
+    # 内容だけの変更は候補のままでもできる。
+    edited = await client.patch(f"/api/goals/{goal['id']}", json={"content": "感想を聞く"})
+    assert edited.status_code == 200
+    assert edited.json()["status"] == "pending"
+
+
+async def test_a_finished_goal_cannot_be_reopened(client: AsyncClient) -> None:
+    """終わった目標の状態は変えられない（第1回レビューの指摘2）。
+
+    達成した目標を有効へ戻せると、完了条件「一度完了した質問・目標を
+    繰り返さない」が状態の上で崩れる。しかも古い completed_at が残ったまま
+    行動候補になる。前提が戻ったのなら、新しい目標として作り直す。
+    """
+    goal = await _post_goal(client)
+    await client.post(f"/api/goals/{goal['id']}/decide", json={"decision": "accept"})
+    await client.patch(f"/api/goals/{goal['id']}", json={"status": "done"})
+
+    refused = await client.patch(f"/api/goals/{goal['id']}", json={"status": "active"})
+    assert refused.status_code == 409
+    assert "作り直して" in refused.json()["detail"]
+
+    # 撤回は開発者が一時的に外すためのもので、こちらは戻せる。
+    other = await _post_goal(client, content="旅行の話を聞く")
+    await client.post(f"/api/goals/{other['id']}/decide", json={"decision": "accept"})
+    await client.patch(f"/api/goals/{other['id']}", json={"status": "withdrawn"})
+    back = await client.patch(f"/api/goals/{other['id']}", json={"status": "active"})
+    assert back.status_code == 200
+    assert back.json()["status"] == "active"

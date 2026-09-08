@@ -159,6 +159,41 @@ export interface CharacterState {
   updated_at: string;
 }
 
+/** 目標：次に何を話したいか。関心・関係性とは別に、実行条件と期限を持つ。 */
+export interface Goal {
+  id: number;
+  content: string;
+  subject_speaker_id: number | null;
+  /** 実行条件。いまは「次の会話」と「指定日以降」の2種類。 */
+  trigger: "next_conversation" | "after_date";
+  /** after_date の基準日時。この日時を過ぎてから実行してよい。 */
+  due_at: string | null;
+  basis_memory_ids: number[] | null;
+  basis_is_provisional: boolean;
+  needs_review: boolean;
+  review_reason: string | null;
+  status: "pending" | "active" | "rejected" | "done" | "withdrawn" | "cancelled" | "expired";
+  visibility: Visibility;
+  visible_to_speaker_id: number | null;
+  source_conversation_id: number | null;
+  /** 最後に実行した時刻。質問を投げた時刻であって、答えを得た時刻ではない。 */
+  last_executed_at: string | null;
+  /** 目的を達成した時刻。実行とは分ける。 */
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GoalRevision {
+  id: number;
+  goal_id: number;
+  action: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  reason: string | null;
+  created_at: string;
+}
+
 export interface MemoryRevision {
   id: number;
   memory_id: number;

@@ -383,6 +383,102 @@ class CharacterStateRevisionOut(ORMModel):
     created_at: UtcDatetime
 
 
+class GoalOut(ORMModel):
+    """目標：次に何を話したいか。"""
+
+    id: int
+    content: str
+    subject_speaker_id: int | None
+    trigger: str
+    due_at: UtcDatetime | None
+    basis_memory_ids: list[int] | None
+    basis_is_provisional: bool
+    needs_review: bool
+    review_reason: str | None
+    status: str
+    visibility: str
+    visible_to_speaker_id: int | None
+    source_conversation_id: int | None
+    # 実行と達成は別に出す。質問を投げても相手が答えなければ、実行済みで
+    # 未達成である。画面でもこの2つを混ぜない。
+    last_executed_at: UtcDatetime | None
+    completed_at: UtcDatetime | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class GoalCreate(BaseModel):
+    """目標の追加。既定は候補（pending）で、採用するまで行動選択に渡さない。"""
+
+    content: str = Field(min_length=1, max_length=2000)
+    subject_speaker_id: int | None = None
+    trigger: Literal["next_conversation", "after_date"] = "next_conversation"
+    # after_date のときの基準日時。この日時を過ぎてから実行してよい。
+    due_at: datetime | None = None
+    basis_memory_ids: list[int] = Field(default_factory=list)
+    visibility: Visibility = Visibility.PRIVATE
+    # 参照範囲。記憶・状態と同じく、既定で全員に渡さない（ISSUE-010）。
+    visible_to_speaker_id: int | None = None
+    visible_to_all: bool = False
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _check_scope(self) -> GoalCreate:
+        if self.visible_to_all and self.visible_to_speaker_id is not None:
+            raise ValueError(
+                "visible_to_speaker_id と visible_to_all は同時に指定できません。"
+            )
+        if not self.visible_to_all and self.visible_to_speaker_id is None:
+            raise ValueError(
+                "参照範囲を指定してください。"
+                "特定の相手との会話に限る場合は visible_to_speaker_id、"
+                "限定しない場合は visible_to_all=true。"
+            )
+        return self
+
+
+class GoalDecision(BaseModel):
+    """候補の採用・却下。採用時に内容と実行条件を直せる。
+
+    振り返りが出した候補は、実行条件まで正しいとは限らない。採用の場で直せない
+    と、いったん採用してから直すことになり、その間に実行される。
+    """
+
+    decision: Literal["accept", "reject"]
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    trigger: Literal["next_conversation", "after_date"] | None = None
+    due_at: datetime | None = None
+    reason: str | None = None
+
+
+class GoalUpdate(BaseModel):
+    """採用済みの目標を直す。終わり方を記録するのもここで行う。
+
+    状態は終わり方ごとに分ける。達成（done）と、取消・前提の消滅・期限切れを
+    混ぜると、完了条件「一度完了した質問・目標を繰り返さない」を測れない。
+    """
+
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    trigger: Literal["next_conversation", "after_date"] | None = None
+    due_at: datetime | None = None
+    status: (
+        Literal["active", "withdrawn", "done", "cancelled", "expired"] | None
+    ) = None
+    # 確認したので再評価の印を下ろす。内容を直したかどうかとは別に指定する。
+    reviewed: bool = False
+    reason: str | None = None
+
+
+class GoalRevisionOut(ORMModel):
+    id: int
+    goal_id: int
+    action: str
+    before: dict[str, Any] | None
+    after: dict[str, Any] | None
+    reason: str | None
+    created_at: UtcDatetime
+
+
 class MemorySearchResult(BaseModel):
     query: str
     results: list[RetrievedMemoryOut]

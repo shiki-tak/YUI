@@ -13,6 +13,8 @@ import type {
   MemoryRevision,
   Message,
   CharacterState,
+  Goal,
+  GoalRevision,
   RetrievedMemory,
   RunRecord,
   Speaker,
@@ -177,4 +179,40 @@ export const api = {
 
   revisions: (memoryId: number) =>
     request<MemoryRevision[]>(`/memories/${memoryId}/revisions`),
+
+  // 目標。採用したものだけが行動の候補になる。
+  goals: () => request<Goal[]>("/goals"),
+
+  decideGoal: (
+    goalId: number,
+    body: {
+      decision: "accept" | "reject";
+      content?: string;
+      trigger?: Goal["trigger"];
+      due_at?: string | null;
+      reason?: string;
+    },
+  ) =>
+    request<Goal>(`/goals/${goalId}/decide`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateGoal: (
+    goalId: number,
+    body: {
+      content?: string;
+      trigger?: Goal["trigger"];
+      due_at?: string | null;
+      status?: Goal["status"];
+      reviewed?: boolean;
+      reason?: string;
+    },
+  ) =>
+    request<Goal>(`/goals/${goalId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  goalRevisions: (goalId: number) => request<GoalRevision[]>(`/goals/${goalId}/revisions`),
 };

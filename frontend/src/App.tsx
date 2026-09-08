@@ -5,6 +5,7 @@ import { CandidatePanel } from "./components/CandidatePanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { MemoryPanel } from "./components/MemoryPanel";
+import { GoalPanel } from "./components/GoalPanel";
 import { StatePanel } from "./components/StatePanel";
 import type {
   ChatResponse,
@@ -17,7 +18,7 @@ import type {
 import { SELF_SPEAKER, conversationState, shouldApplyDelivery } from "./types";
 import { useSpeechPlayer } from "./useSpeechPlayer";
 
-type Tab = "memories" | "candidates" | "states" | "history";
+type Tab = "memories" | "candidates" | "states" | "goals" | "history";
 
 function voiceLabel(health: Health): string {
   if (!health.voice.enabled) return "音声：無効";
@@ -245,6 +246,13 @@ export default function App() {
             </button>
             <button
               type="button"
+              className={tab === "goals" ? "active" : ""}
+              onClick={() => setTab("goals")}
+            >
+              目標
+            </button>
+            <button
+              type="button"
               className={tab === "history" ? "active" : ""}
               onClick={() => setTab("history")}
             >
@@ -267,6 +275,7 @@ export default function App() {
             />
           )}
           {tab === "states" && <StatePanel refreshKey={memoryRefresh} />}
+          {tab === "goals" && <GoalPanel refreshKey={memoryRefresh} />}
           {tab === "history" && (
             <>
               {historyError && <p className="error">{historyError}</p>}
