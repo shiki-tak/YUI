@@ -353,6 +353,7 @@ async def create_memory(
     source_message_id: int | None = None,
     source_conversation_id: int | None = None,
     reason: str | None = None,
+    created_at: datetime | None = None,
 ) -> Memory:
     memory = Memory(
         kind=kind,
@@ -366,6 +367,9 @@ async def create_memory(
         occurred_at=occurred_at,
         source_message_id=source_message_id,
         source_conversation_id=source_conversation_id,
+        # 既定は保存した時刻。差し替えられるのは、評価で時間を進めたときに
+        # 検索の減衰を進めた側の時刻で計算するため。
+        **({"created_at": created_at} if created_at is not None else {}),
     )
     session.add(memory)
     await session.flush()

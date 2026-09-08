@@ -46,6 +46,27 @@ from app.models import (
 
 
 @dataclass
+class MemoryChange:
+    """記憶を1件変えた結果と、その波及。
+
+    「印が付いた」ことを記録で確かめられるようにする。渡っていないことだけを
+    見ると、目標を一律に渡さない実装でも通る（第1回レビューの指摘2）。
+    """
+
+    memory: Memory
+    marked_goals: list[Goal] = field(default_factory=list)
+    marked_states: list[CharacterState] = field(default_factory=list)
+
+    @property
+    def id(self) -> int:
+        return self.memory.id
+
+    @property
+    def content(self) -> str:
+        return self.memory.content
+
+
+@dataclass
 class ReflectOutcome:
     """振り返りを1回流した結果。"""
 
@@ -139,6 +160,9 @@ async def run_reflection(
             source_message_id=candidate.source_message_id,
             source_conversation_id=candidate.conversation_id,
             reason="評価用会話で採用",
+            # 時間を進めた後に採用した記憶は、進めた側の時刻で作る。実時計だと、
+            # 検索の減衰が「まだ作られていない記憶」を新しいものとして扱う。
+            created_at=now,
         )
         candidate.status = CandidateStatus.ACCEPTED.value
         candidate.accepted_memory_id = memory.id
@@ -198,7 +222,9 @@ async def _find_memory(session: AsyncSession, match: str) -> Memory | None:
     return (await session.execute(stmt)).scalars().first()
 
 
-async def correct_memory(session: AsyncSession, *, match: str, content: str) -> Memory | None:
+async def correct_memory(
+    session: AsyncSession, *, match: str, content: str
+) -> MemoryChange | None:
     """開発者が記憶を訂正する。API と同じく、履歴と波及も起こす。"""
     memory = await _find_memory(session, match)
     if memory is None:
@@ -207,17 +233,17 @@ async def correct_memory(session: AsyncSession, *, match: str, content: str) -> 
     memory.content = content
     await session.flush()
     record_revision(session, memory, action="corrected", before=before, reason="評価用会話で訂正")
-    await mark_derived_for_review(
+    marks = await mark_derived_for_review(
         session,
         memory_id=memory.id,
         reason=f"根拠にした記憶 #{memory.id} が訂正された",
         source_conversation_id=memory.source_conversation_id,
     )
     await session.commit()
-    return memory
+    return MemoryChange(memory=memory, marked_goals=marks.goals, marked_states=marks.states)
 
 
-async def delete_memory(session: AsyncSession, *, match: str) -> Memory | None:
+async def delete_memory(session: AsyncSession, *, match: str) -> MemoryChange | None:
     """開発者が記憶を削除する。"""
     memory = await _find_memory(session, match)
     if memory is None:
@@ -226,14 +252,14 @@ async def delete_memory(session: AsyncSession, *, match: str) -> Memory | None:
     memory.status = MemoryStatus.DELETED.value
     await session.flush()
     record_revision(session, memory, action="deleted", before=before, reason="評価用会話で削除")
-    await mark_derived_for_review(
+    marks = await mark_derived_for_review(
         session,
         memory_id=memory.id,
         reason=f"根拠にした記憶 #{memory.id} が削除された",
         source_conversation_id=memory.source_conversation_id,
     )
     await session.commit()
-    return memory
+    return MemoryChange(memory=memory, marked_goals=marks.goals, marked_states=marks.states)
 
 
 async def accept_goal(session: AsyncSession, *, match: str) -> list[Goal]:

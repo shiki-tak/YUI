@@ -91,6 +91,10 @@ class ConversationAgent:
             source=source,
             content=text,
             delivery_state=DeliveryState.COMPLETED.value,
+            # 発言の時刻は、渡した現在時刻と同じ基準にする。ここだけ実時計だと、
+            # 評価で時間を進めたときに、振り返りが「今日」とする日と会話ログの
+            # 発言日がずれ、「昨日」が別の日を指す（第1回レビューの指摘3）。
+            created_at=reference_time,
         )
         session.add(user_message)
         await session.flush()
@@ -146,8 +150,11 @@ class ConversationAgent:
             delivery_state=(
                 DeliveryState.GENERATED.value if spoken else DeliveryState.COMPLETED.value
             ),
+            # 再生の記録は実時計のまま。いつ鳴らしたかは監査の記録で、
+            # 会話の中の時間の進み方とは別のもの。
             delivery_started_at=None if spoken else recorded_at,
             delivery_finished_at=None if spoken else recorded_at,
+            created_at=reference_time,
         )
         session.add(reply_message)
         await session.flush()

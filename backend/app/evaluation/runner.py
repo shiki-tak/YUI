@@ -313,12 +313,17 @@ async def _seed(
         )
         memory_keys[memory.id] = spec.key
 
+    # 記憶の鍵 → 実際のID。目標の根拠を結び付けるのに使う。
+    memory_ids = {key: memory_id for memory_id, key in memory_keys.items()}
+
     goal_keys: dict[int, str] = {}
     for spec in scenario.goals:
         goal: Goal = await create_goal(
             session,
             content=spec.content,
             subject_speaker_id=speakers[spec.subject].id if spec.subject else None,
+            # 根拠を結び付けないと、その記憶を訂正しても目標へ波及しない。
+            basis_memory_ids=[memory_ids[key] for key in spec.basis] or None,
             trigger=spec.trigger,
             # 期限は会話を始めた時点から数える。シナリオを何日に流しても
             # 同じ結果になるようにするため。
@@ -407,8 +412,14 @@ async def run_attempt(
                             )
                         else:
                             changed = await delete_memory(session, match=step.match)
+                        marked = (
+                            [goal_keys.get(g.id, f"#{g.id}") for g in changed.marked_goals]
+                            if changed
+                            else []
+                        )
                         detail = (
                             f"記憶 #{changed.id}「{changed.content}」"
+                            f"／印が付いた目標: {'、'.join(marked) or 'なし'}"
                             if changed
                             else f"「{step.match}」に当たる記憶が無かった"
                         )
@@ -422,6 +433,21 @@ async def run_attempt(
                                 detail=detail,
                             )
                         )
+                        if step.expect_marked_goals:
+                            missing = [
+                                key for key in step.expect_marked_goals if key not in marked
+                            ]
+                            attempt.action_checks.append(
+                                Check(
+                                    name="再評価の印が付いた目標",
+                                    ok=not missing,
+                                    detail=(
+                                        "期待どおり"
+                                        if not missing
+                                        else f"印が付かなかった: {'、'.join(missing)}"
+                                    ),
+                                )
+                            )
                         continue
 
                     if step.kind == "accept_goal":

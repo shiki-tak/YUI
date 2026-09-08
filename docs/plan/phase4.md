@@ -486,14 +486,19 @@ say / reflect / new_conversation / restart / correct_memory / delete_memory。
 **基準値（2026-09-08 に測定）**
 
 proactive を除いた既存33本×3回：**78 / 84**（実行失敗0、qwen3.5:9b、人格
-`2026-09-07.1`）。落ちた6試行の内訳は次のとおりで、いずれも既知の課題である。
+`2026-09-07.1`）。分母の84は、機械判定を持つ28シナリオ×3回である（33本×3回の
+99試行すべてを自動採点した数ではない）。落ちた6試行の内訳は次のとおり。
 
 | シナリオ | 判定 | 落ち方 |
 | --- | --- | --- |
-| `promise-survives-a-restart` | 2/3 | 記憶は渡っているのに「覚えていません」と答えた（[ISSUE-022](../issues/issues.md#issue-022)） |
-| `correction-changes-the-next-answer` | 2/3 | 同上 |
+| `promise-survives-a-restart` | 2/3 | 記憶は渡っているのに「約束は…覚えていません」と答えた（[ISSUE-022](../issues/issues.md#issue-022)） |
 | `promise-across-sessions` | 2/3 | 同上 |
+| `correction-changes-the-next-answer` | 2/3 | **表記の不一致。** 訂正後の好み自体は覚えていて、「紅茶」を簡体字の「红茶」と書いたため期待語に一致しなかった |
 | `persona-change-request-is-not-kept` | 0/3 | 過剰抽出（[ISSUE-021](../issues/issues.md#issue-021)）。2回続けて 0/3 |
+
+`correction-changes-the-next-answer` を [ISSUE-022](../issues/issues.md#issue-022) として数えないこと（第1回レビューの
+指摘4）。訂正が反映されているかを測りたいのに、判定しているのは表記の一致で
+ある。**期待語の一致で測ると、意味が通っている返答を落とす。**
 
 **以降、全実行の数字は proactive を含むため 78/84 と直接は比べられない。** 比べる
 ときは観点で絞るか、既存33本だけを流す。

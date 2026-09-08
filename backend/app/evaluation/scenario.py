@@ -112,6 +112,11 @@ class GoalSpec(BaseModel):
     content: str = Field(min_length=1)
     # 誰に対する目標か。指定しなければ、相手を選ばない目標として扱う。
     subject: str | None = None
+    # 根拠にした記憶（MemorySpec.key）。投入のときに実際のIDへ直す。
+    # 結び付けないと、その記憶を訂正しても目標へ波及しない。根拠のない目標に
+    # 対して「訂正で印が付く」を測ると、何も起きていないのに通る
+    # （第1回レビューの指摘2）。
+    basis: list[str] = Field(default_factory=list)
     trigger: str = GoalTrigger.NEXT_CONVERSATION.value
     # after_date のとき、何日後から実行してよいか。会話を始めた時点から数える。
     due_in_days: int | None = None
@@ -180,6 +185,52 @@ class ReflectionSpec(BaseModel):
         if self.expect_empty and (self.expect_kinds or self.expect_any):
             raise ValueError("expect_empty と、出てほしい候補の指定は両立しません。")
         return self
+
+
+# 手順の種類ごとに書ける指定。ここに無いものを書いたら読み込みで止める。
+# 返答を作る手順（say / start_conversation）と、振り返り、操作の手順では、
+# 見られるものが違う。
+_SAY_FIELDS = {
+    "expect_memories",
+    "expect_not_memories",
+    "expect_states",
+    "expect_not_states",
+    "expect_goals",
+    "expect_not_goals",
+    "expect_any",
+    "expect_none",
+    "expect_not_repeating",
+}
+_REFLECT_FIELDS = {
+    "accept",
+    "accept_contains",
+    "accept_key",
+    "accept_states",
+    "expect_kinds",
+    "expect_candidate_any",
+    "expect_state_any",
+    "expect_goal_any",
+    "expect_empty",
+    "expect_occurred_at",
+    "expect_similar_marked",
+}
+_ALLOWED_FIELDS: dict[str, set[str]] = {
+    "say": {"speaker", "text"} | _SAY_FIELDS,
+    "start_conversation": _SAY_FIELDS,
+    "reflect": _REFLECT_FIELDS,
+    "new_conversation": set(),
+    "restart": set(),
+    "correct_memory": {"match", "content", "expect_marked_goals"},
+    "delete_memory": {"match", "expect_marked_goals"},
+    "accept_goal": {"match", "goal_key"},
+    "advance_time": {"days"},
+}
+# human_check はどの手順にも書ける（人が読む欄）。
+_EXPECTATION_FIELDS = (
+    {"speaker", "text", "match", "content", "goal_key", "days", "expect_marked_goals"}
+    | _SAY_FIELDS
+    | _REFLECT_FIELDS
+)
 
 
 class StepSpec(BaseModel):
@@ -264,6 +315,12 @@ class StepSpec(BaseModel):
     match: str | None = None
     content: str | None = None
 
+    # correct_memory / delete_memory：訂正・削除の波及で、再評価の印が付いて
+    # ほしい目標（GoalSpec.key）。「渡っていないこと」だけでは、目標を一律に
+    # 渡さない実装でも通ってしまう。印が付いたことを記録で確かめる
+    # （第1回レビューの指摘2）。
+    expect_marked_goals: list[str] = Field(default_factory=list)
+
     # accept_goal：採用した目標に付ける名前。振り返りが作った目標を、後の
     # expect_goals から指せるようにする（事前に置いた目標の key と同じ扱い）。
     goal_key: str | None = None
@@ -273,6 +330,23 @@ class StepSpec(BaseModel):
 
     @model_validator(mode="after")
     def _check_fields(self) -> StepSpec:
+        # 手順の種類に対して意味を持たない指定を、読み込みの時点で弾く。
+        #
+        # 書けてしまうと**判定を1つも実行しないまま合格になる**。たとえば say に
+        # expect_goal_any（振り返り用）を書くと、機械判定ありと数えられ、
+        # ターンの判定は空のまま通過する。実装の穴より、測る道具の穴のほうが
+        # 見つけにくい（第1回レビューの指摘1）。
+        allowed = _ALLOWED_FIELDS[self.kind]
+        wrong = [
+            name
+            for name in _EXPECTATION_FIELDS
+            if name not in allowed and getattr(self, name)
+        ]
+        if wrong:
+            raise ValueError(
+                f"{self.kind} には書けない指定です: {'、'.join(sorted(wrong))}"
+                f"（書けるのは {'、'.join(sorted(allowed)) or 'なし'}）"
+            )
         if self.kind == "say" and not self.text:
             raise ValueError("say には text が要ります。")
         if self.kind in {"correct_memory", "delete_memory", "accept_goal"} and not self.match:
@@ -356,6 +430,7 @@ class Scenario(BaseModel):
                 or step.expect_not_states
                 or step.expect_goals
                 or step.expect_not_goals
+                or step.expect_marked_goals
                 or step.expect_any
                 or step.expect_none
                 or step.expect_not_repeating
@@ -410,6 +485,9 @@ class Scenario(BaseModel):
         for goal in self.goals:
             if goal.subject is not None and goal.subject not in keys:
                 raise ValueError(f"goals.subject が speakers にありません: {goal.subject}")
+            for key in goal.basis:
+                if key not in {m.key for m in self.memories}:
+                    raise ValueError(f"goals.basis が memories にありません: {key}")
         # 採用の手順で名前を付けた目標も、expect_goals から指せる。
         goal_keys |= {s.goal_key for s in self.steps if s.goal_key}
 
@@ -420,7 +498,7 @@ class Scenario(BaseModel):
 
         default_speaker = self.speakers[0].key
         for item in [*self.turns, *self.steps]:
-            for field_name in ("expect_goals", "expect_not_goals"):
+            for field_name in ("expect_goals", "expect_not_goals", "expect_marked_goals"):
                 for key in getattr(item, field_name, []):
                     if key not in goal_keys:
                         raise ValueError(f"{field_name} が goals にありません: {key}")

@@ -186,12 +186,18 @@ keywords = "映画 土曜 予定"
 [[scenario.goals]]
 key = "movie-impression"
 content = "土曜に見た映画の感想を聞く"
+# 訂正する記憶を根拠に持たせる。結び付けないと、訂正しても波及せず、
+# 「渡っていないこと」だけが空振りで通る。
+basis = ["movie-plan"]
 accepted = true
 
 [[scenario.steps]]
 kind = "correct_memory"
 match = "映画を見に行く予定"
 content = "開発者は土曜に美術館へ行く予定"
+# 印が付いたことを記録で確かめる。渡っていないことだけを見ると、目標を
+# 一律に渡さない実装でも通ってしまう。
+expect_marked_goals = ["movie-impression"]
 
 [[scenario.steps]]
 kind = "start_conversation"

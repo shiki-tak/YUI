@@ -748,3 +748,148 @@ async def test_advance_time_also_moves_the_day_used_by_the_reflection(
     expected = (datetime.now(UTC) + timedelta(days=5)).astimezone(LOCAL_TZ).date()
     prompts = "\n".join(message.content for call in fake_llm.calls for message in call)
     assert f"振り返りを行っている日: {expected.isoformat()}" in prompts
+
+
+# --- 第1回レビューへの対応（PR3）-------------------------------------------
+
+
+def test_expectations_that_do_not_apply_to_the_step_are_rejected() -> None:
+    """手順に対して意味を持たない指定を、読み込みの時点で弾く（指摘1）。
+
+    書けてしまうと、**判定を1つも実行しないまま合格**になる。say に
+    expect_goal_any（振り返り用）を書くと、機械判定ありと数えられ、ターンの
+    判定は空のまま通過していた。
+    """
+    for step in (
+        {"kind": "say", "text": "こんにちは", "expect_goal_any": ["出ない目標"]},
+        {"kind": "reflect", "expect_memories": ["m"]},
+        {"kind": "accept_goal", "match": "映画", "expect_any": ["映画"]},
+        {"kind": "advance_time", "days": 3, "expect_goals": ["g"]},
+        {"kind": "restart", "expect_any": ["何か"]},
+    ):
+        with pytest.raises(ValueError):
+            Scenario.model_validate(
+                {
+                    "id": "bad",
+                    "aspect": "proactive",
+                    "memories": [{"key": "m", "content": "内容"}],
+                    "goals": [{"key": "g", "content": "内容"}],
+                    "steps": [step],
+                }
+            )
+
+
+async def test_no_bundled_scenario_passes_without_executing_a_check(
+    fake_llm: FakeLLM,
+) -> None:
+    """宣言した期待が、実際に判定へ結び付いていること。
+
+    機械判定ありと数えられたシナリオが、判定を1つも実行しないまま通ると、
+    実装が空でも数字が上がる。測る道具の穴は、実装の穴より見つけにくい。
+    """
+    scenarios = load_scenarios(SCENARIOS)
+    results = await run_scenarios(
+        scenarios, llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    for result in results:
+        if not result.scenario.has_machine_checks:
+            continue
+        attempt = result.attempts[0]
+        executed = (
+            sum(len(turn.checks) for turn in attempt.turns)
+            + len(attempt.action_checks)
+            + sum(len(reflection.checks) for reflection in attempt.reflections)
+            + sum(1 for turn in attempt.turns if turn.error)
+            + sum(1 for reflection in attempt.reflections if reflection.error)
+        )
+        assert executed > 0, f"{result.scenario.id} は判定を1つも実行していない"
+
+
+async def test_correcting_the_basis_is_measured_by_the_mark_not_by_absence(
+    fake_llm: FakeLLM,
+) -> None:
+    """訂正の波及は「印が付いたこと」で測る（指摘2）。
+
+    「目標が渡っていないこと」だけを見ると、目標を一律に渡さない実装でも通る。
+    根拠を結び付けていない目標に対しては、この判定が落ちること（＝空振りで
+    通らないこと）まで確かめる。
+    """
+    base = {
+        "id": "basis",
+        "aspect": "proactive",
+        "memories": [{"key": "plan", "content": "開発者は土曜に映画を見に行く予定"}],
+        "steps": [
+            {
+                "kind": "correct_memory",
+                "match": "映画を見に行く予定",
+                "content": "開発者は土曜に美術館へ行く予定",
+                "expect_marked_goals": ["movie"],
+            }
+        ],
+    }
+    linked = Scenario.model_validate(
+        {
+            **base,
+            "goals": [
+                {
+                    "key": "movie",
+                    "content": "土曜に見た映画の感想を聞く",
+                    "basis": ["plan"],
+                    "accepted": True,
+                }
+            ],
+        }
+    )
+    unlinked = Scenario.model_validate(
+        {
+            **base,
+            "id": "no-basis",
+            "goals": [
+                {"key": "movie", "content": "土曜に見た映画の感想を聞く", "accepted": True}
+            ],
+        }
+    )
+
+    results = await run_scenarios(
+        [linked, unlinked], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    marks = [
+        [c for c in r.attempts[0].action_checks if c.name == "再評価の印が付いた目標"]
+        for r in results
+    ]
+    assert [c.ok for c in marks[0]] == [True]
+    # 根拠を結び付けていなければ落ちる。前提が欠けたまま通らせない。
+    assert [c.ok for c in marks[1]] == [False]
+
+
+async def test_the_advanced_clock_reaches_the_saved_message(fake_llm: FakeLLM) -> None:
+    """進めた時間で発言が保存される（指摘3）。
+
+    発言の日付だけ実時計のままだと、振り返りが「今日」とする日と食い違い、
+    「昨日」が別の日を指す。振り返りへ矛盾した日付を渡すことになる。
+    """
+    from datetime import timedelta
+
+    from app.config import LOCAL_TZ
+
+    scenario = Scenario.model_validate(
+        {
+            "id": "clock",
+            "aspect": "proactive",
+            "steps": [
+                {"kind": "advance_time", "days": 30},
+                {"kind": "say", "text": "昨日、映画を見たよ"},
+                {"kind": "reflect"},
+            ],
+        }
+    )
+    fake_llm.push_pickup('[{"content": "昨日 映画を見た", "source_message_id": null}]')
+    await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+
+    expected = (datetime.now(UTC) + timedelta(days=30)).astimezone(LOCAL_TZ).date()
+    prompts = "\n".join(message.content for call in fake_llm.calls for message in call)
+    # 会話ログの発言日と、振り返りが「今日」とする日が揃っていること。
+    assert f"[#1／{expected.isoformat()}] 開発者: 昨日、映画を見たよ" in prompts
+    assert f"振り返りを行っている日: {expected.isoformat()}" in prompts
