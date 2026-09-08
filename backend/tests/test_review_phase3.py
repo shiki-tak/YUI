@@ -521,3 +521,85 @@ async def test_third_model_call_does_not_hold_the_write_lock(
     fake_llm.gate_on = None
     gate.set()
     assert (await reflecting).status_code == 200
+
+
+# --- 第5回レビューの指摘 -----------------------------------------------------
+
+
+def test_broken_pickup_output_is_not_partially_accepted() -> None:
+    """壊れた部分があれば失敗させる（第5回レビューの指摘2）。
+
+    「読める別形式を許す」ことと「壊れた部分を捨てる」ことは別。捨てると、
+    拾い損ねた内容に気づけない。
+    """
+    import pytest  # noqa: PLC0415
+
+    from app.agent.reflection import ReflectionParseError, _parse_pickups  # noqa: PLC0415
+
+    with pytest.raises(ReflectionParseError) as exc:
+        _parse_pickups('[["写真が好き", "#1"], ["紅茶が好き", broken]]')
+    assert "読み取れない部分" in str(exc.value)
+
+    # 読める形は、これまでどおり受け入れる。
+    assert len(_parse_pickups('["写真が好き", "#1"] ["紅茶が好き", "#2"]')) == 2
+    assert len(_parse_pickups('[{"content": "山に登った", "source_message_id": 3}]')) == 1
+
+
+def test_migration_marks_old_auto_filled_basis_as_provisional(tmp_path) -> None:
+    """旧版が自動で並べた根拠を、移行で暫定として扱う（第5回レビューの指摘1）。
+
+    確定扱いのまま残すと、そこから漏れた記憶の訂正が届かない。手で指定した
+    根拠は確定のままにする。
+    """
+    import subprocess  # noqa: PLC0415
+    import sqlite3  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    from app.config import BACKEND_ROOT  # noqa: PLC0415
+
+    db = tmp_path / "migrate.db"
+    url = f"sqlite+aiosqlite:///{db}"
+    env = {"YUI_DATABASE_URL": url, "PATH": "/usr/bin:/bin"}
+
+    def alembic(*args: str) -> None:
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=BACKEND_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    # 暫定フラグが入る前の版まで上げ、その時点のデータを入れる。
+    alembic("upgrade", "3187f6b349d3")
+    connection = sqlite3.connect(db)
+    connection.executescript(
+        """
+        INSERT INTO conversations (id, mode, started_at) VALUES (1, 'local', '2026-09-01');
+        -- 振り返りが作り、採用のときに自動で根拠が入った状態
+        INSERT INTO character_states
+            (id, kind, content, basis_memory_ids, needs_review, status, visibility,
+             source_conversation_id, created_at, updated_at)
+        VALUES (1, 'interest', '自動で根拠が入った関心', '[1]', 0, 'active', 'private',
+                1, '2026-09-01', '2026-09-01');
+        -- APIから手で作り、根拠を明示した状態
+        INSERT INTO character_states
+            (id, kind, content, basis_memory_ids, needs_review, status, visibility,
+             source_conversation_id, created_at, updated_at)
+        VALUES (2, 'interest', '手で根拠を指定した関心', '[2]', 0, 'active', 'private',
+                NULL, '2026-09-01', '2026-09-01');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    alembic("upgrade", "head")
+
+    connection = sqlite3.connect(db)
+    rows = dict(
+        connection.execute("SELECT id, basis_is_provisional FROM character_states").fetchall()
+    )
+    connection.close()
+    assert rows[1] == 1, "振り返り由来の自動根拠は暫定として扱う"
+    assert rows[2] == 0, "手で指定した根拠は確定のまま"

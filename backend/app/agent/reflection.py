@@ -193,17 +193,28 @@ def _parse_pickups(text: str) -> list[PickupPayload]:
     try:
         raw = json.loads(match.group(0))
     except json.JSONDecodeError:
-        # 配列を分けて並べてくることがある。1つずつ読めれば拾い直す。
+        # 配列を分けて並べてくることがある。その形は受け入れるが、**読めない
+        # 部分があれば失敗させる**。読める形を許すことと、壊れた部分を捨てる
+        # ことは別である。捨てると、拾い損ねた内容に気づけない
+        # （フェーズ3第5回レビューの指摘2）。
+        pieces = re.findall(r"\[[^\[\]]*\]", text)
         raw = []
-        for piece in re.findall(r"\[[^\[\]]*\]", text):
+        broken = []
+        for piece in pieces:
             try:
                 parsed = json.loads(piece)
             except json.JSONDecodeError:
+                broken.append(piece)
                 continue
-            raw.append(parsed) if not isinstance(parsed, list) else raw.extend([parsed])
-        if not raw:
+            raw.append(parsed)
+        if broken or not raw:
+            detail = (
+                f"読み取れない部分がありました（{len(broken)} 件）"
+                if broken
+                else "JSON配列として読み取れませんでした"
+            )
             raise ReflectionParseError(
-                f"拾い出しの出力をJSONとして読み取れませんでした: {_excerpt(text)}"
+                f"拾い出しの出力を{detail}: {_excerpt(text)}"
             ) from None
     if not isinstance(raw, list):
         raise ReflectionParseError("拾い出しの出力が配列ではありませんでした。")
