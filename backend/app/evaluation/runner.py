@@ -13,14 +13,15 @@ from __future__ import annotations
 import tempfile
 from dataclasses import dataclass, field
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
 from app.agent.memory_store import create_memory, get_or_create_speaker
-from app.agent.reflection import ReflectionParseError, extract_candidates
 from app.config import Settings, to_local
-from app.evaluation.scenario import Scenario, TurnSpec
+from app.evaluation.scenario import Scenario, StepSpec
+from app.evaluation.steps import ReflectOutcome, correct_memory, delete_memory, run_reflection
 from app.llm.base import LLMClient, LLMError
 from app.models import Base, Conversation, ConversationMode, Memory, Speaker, StateStatus
 from app.persona import Persona
@@ -68,6 +69,8 @@ class Attempt:
 
     turns: list[TurnResult] = field(default_factory=list)
     reflection: ReflectionResult | None = None
+    # 採用・訂正など、会話以外に行った操作。何をした後の返答かを読めるようにする。
+    actions: list[str] = field(default_factory=list)
     # 実際に応答したモデルとその版。レポートの見出しに残し、後から
     # モデルを変えた比較に使う（設計書「モデル・人格・記憶状態の版」）。
     model: str | None = None
@@ -119,7 +122,7 @@ def _contains_any(text: str, words: list[str]) -> tuple[bool, list[str]]:
 
 
 def _check_turn(
-    spec: TurnSpec,
+    spec: StepSpec,
     reply: str,
     referenced: list[str],
     previous_replies: list[str],
@@ -231,40 +234,102 @@ async def _seed(session, scenario: Scenario) -> tuple[dict[str, Speaker], dict[i
 async def run_attempt(
     scenario: Scenario, *, llm: LLMClient, persona: Persona, settings: Settings
 ) -> Attempt:
-    """シナリオを1回流す。使い捨てのDBを使う。"""
+    """シナリオを1回流す。使い捨てのDBを使う。
+
+    手順（say / reflect / new_conversation / restart / correct_memory /
+    delete_memory）を順に実行する。restart では接続を作り直し、記憶が保存から
+    読み直されることを確かめられるようにする。
+    """
     attempt = Attempt()
     with tempfile.TemporaryDirectory(prefix="yui-eval-") as directory:
-        engine = create_async_engine(f"sqlite+aiosqlite:///{directory}/eval.db")
+        url = f"sqlite+aiosqlite:///{directory}/eval.db"
+        engine = create_async_engine(url)
         try:
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
             factory = async_sessionmaker(engine, expire_on_commit=False)
             agent = ConversationAgent(llm=llm, persona=persona, settings=settings)
 
-            async with factory() as session:
-                speakers, memory_keys = await _seed(session, scenario)
-                conversation = Conversation(mode=ConversationMode.LOCAL.value)
-                session.add(conversation)
-                await session.flush()
-                await session.commit()
+            session = factory()
+            speakers, memory_keys = await _seed(session, scenario)
+            conversation = await _new_conversation(session)
+            replies: list[str] = []
 
-                replies: list[str] = []
-                for spec in scenario.turns:
-                    assert spec.speaker is not None  # 読み込み時に既定を入れている
+            try:
+                for step in scenario.effective_steps:
+                    if step.kind == "restart":
+                        # 接続を作り直す。プロセスの再起動に近い状態にして、
+                        # 記憶が保存から読み直されることを確かめる。
+                        await session.close()
+                        await engine.dispose()
+                        engine = create_async_engine(url)
+                        factory = async_sessionmaker(engine, expire_on_commit=False)
+                        agent = ConversationAgent(
+                            llm=llm, persona=persona, settings=settings
+                        )
+                        session = factory()
+                        speakers = await _reload_speakers(session, scenario)
+                        # 記憶IDは再起動で変わらないので、採用したものに付けた
+                        # 名前もそのまま使える。事前に入れた記憶だけ読み直す。
+                        memory_keys = {
+                            **memory_keys,
+                            **(await _reload_memory_keys(session, scenario)),
+                        }
+                        conversation = await _new_conversation(session)
+                        replies = []
+                        continue
+
+                    if step.kind == "new_conversation":
+                        conversation = await _new_conversation(session)
+                        replies = []
+                        continue
+
+                    if step.kind in {"correct_memory", "delete_memory"}:
+                        assert step.match is not None
+                        if step.kind == "correct_memory":
+                            assert step.content is not None
+                            changed = await correct_memory(
+                                session, match=step.match, content=step.content
+                            )
+                        else:
+                            changed = await delete_memory(session, match=step.match)
+                        attempt.actions.append(
+                            f"{step.kind}: {step.match} → "
+                            + ("実行した" if changed else "対象が見つからなかった")
+                        )
+                        continue
+
+                    if step.kind == "reflect":
+                        outcome = await run_reflection(
+                            session,
+                            llm=llm,
+                            conversation=conversation,
+                            character_name=persona.name,
+                            step=step,
+                        )
+                        # 採用した記憶も、シナリオの鍵で読めるようにしておく。
+                        for memory in outcome.accepted:
+                            memory_keys.setdefault(memory.id, f"採用:{memory.content[:12]}")
+                        attempt.reflection = _check_reflection(step, outcome)
+                        if attempt.reflection.error:
+                            return attempt
+                        continue
+
+                    assert step.text is not None and step.speaker is not None
                     try:
                         result = await agent.respond(
                             session,
                             conversation=conversation,
-                            speaker=speakers[spec.speaker],
-                            text=spec.text,
+                            speaker=speakers[step.speaker],
+                            text=step.text,
                         )
                         await session.commit()
                     except LLMError as exc:
                         attempt.turns.append(
                             TurnResult(
-                                text=spec.text,
+                                text=step.text,
                                 reply="",
-                                human_check=spec.human_check,
+                                human_check=step.human_check,
                                 error=str(exc),
                             )
                         )
@@ -281,51 +346,60 @@ async def run_attempt(
                     ]
                     attempt.turns.append(
                         TurnResult(
-                            text=spec.text,
+                            text=step.text,
                             reply=reply,
-                            checks=_check_turn(spec, reply, referenced, replies),
+                            checks=_check_turn(step, reply, referenced, replies),
                             referenced=referenced,
-                            human_check=spec.human_check,
+                            human_check=step.human_check,
                         )
                     )
                     replies.append(reply)
-
-                if scenario.reflection is not None and scenario.reflection.run:
-                    attempt.reflection = await _run_reflection(
-                        session,
-                        scenario=scenario,
-                        llm=llm,
-                        persona=persona,
-                        conversation=conversation,
-                        speakers=speakers,
-                    )
+            finally:
+                await session.close()
         finally:
             await engine.dispose()
     return attempt
 
 
-async def _run_reflection(
-    session,
-    *,
-    scenario: Scenario,
-    llm: LLMClient,
-    persona: Persona,
-    conversation: Conversation,
-    speakers: dict[str, Speaker],
-) -> ReflectionResult:
-    spec = scenario.reflection
-    assert spec is not None
-    try:
-        candidates = await extract_candidates(
-            session,
-            llm=llm,
-            conversation=conversation,
-            character_name=persona.name,
-        )
-        await session.commit()
-    except (LLMError, ReflectionParseError) as exc:
-        return ReflectionResult(error=str(exc))
+async def _new_conversation(session: AsyncSession) -> Conversation:
+    conversation = Conversation(mode=ConversationMode.LOCAL.value)
+    session.add(conversation)
+    await session.flush()
+    await session.commit()
+    return conversation
 
+
+async def _reload_speakers(session: AsyncSession, scenario: Scenario) -> dict[str, Speaker]:
+    """再起動後に、相手を読み直す。"""
+    speakers: dict[str, Speaker] = {}
+    for spec in scenario.speakers:
+        speakers[spec.key] = await get_or_create_speaker(
+            session,
+            source=spec.source,
+            external_id=spec.external_id,
+            display_name=spec.display_name,
+        )
+    await session.commit()
+    return speakers
+
+
+async def _reload_memory_keys(session: AsyncSession, scenario: Scenario) -> dict[int, str]:
+    """再起動後に、記憶IDとシナリオの鍵の対応を作り直す。"""
+    keys: dict[int, str] = {}
+    for spec in scenario.memories:
+        stmt = select(Memory).where(Memory.content == spec.content)
+        memory = (await session.execute(stmt)).scalars().first()
+        if memory is not None:
+            keys[memory.id] = spec.key
+    return keys
+
+
+def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResult:
+    """振り返りの結果を判定する。"""
+    if outcome.error:
+        return ReflectionResult(error=outcome.error)
+
+    candidates = outcome.candidates
     result = ReflectionResult(
         # 人が判定するのに要る属性まで出す。種別と本文だけでは、伝聞かどうかや
         # 誰についての記憶かを読み取れない（全体レビューの指摘6）。
@@ -334,9 +408,14 @@ async def _run_reflection(
             f"#{c.source_message_id}] {c.content}"
             for c in candidates
         ],
-        human_check=spec.human_check,
+        human_check=step.human_check,
     )
-    if spec.expect_empty:
+    if outcome.accepted:
+        result.candidates.append(
+            f"（採用した記憶 {len(outcome.accepted)} 件）"
+        )
+
+    if step.expect_empty:
         result.checks.append(
             Check(
                 name="候補が出ないこと",
@@ -348,22 +427,20 @@ async def _run_reflection(
                 ),
             )
         )
-    if spec.expect_occurred_at:
+    if step.expect_occurred_at:
         dated = [c for c in candidates if c.occurred_at is not None]
         result.checks.append(
             Check(
                 name="出来事の日付",
                 ok=bool(dated),
                 detail=(
-                    "、".join(
-                        to_local(c.occurred_at).strftime("%Y-%m-%d") for c in dated
-                    )
+                    "、".join(to_local(c.occurred_at).strftime("%Y-%m-%d") for c in dated)
                     if dated
                     else "会話に日付の手がかりがあるのに、入らなかった"
                 ),
             )
         )
-    if spec.expect_similar_marked:
+    if step.expect_similar_marked:
         marked = [c for c in candidates if c.similar_memory_ids]
         result.checks.append(
             Check(
@@ -376,10 +453,10 @@ async def _run_reflection(
                 ),
             )
         )
-    if spec.expect_kinds:
+    if step.expect_kinds:
         kinds = {c.kind for c in candidates}
         missing = [
-            entry for entry in spec.expect_kinds if not (set(entry.split("|")) & kinds)
+            entry for entry in step.expect_kinds if not (set(entry.split("|")) & kinds)
         ]
         result.checks.append(
             Check(
@@ -388,9 +465,9 @@ async def _run_reflection(
                 detail="期待どおり" if not missing else f"出なかった種別: {'、'.join(missing)}",
             )
         )
-    if spec.expect_any:
+    if step.expect_candidate_any:
         joined = "\n".join(c.content for c in candidates)
-        ok, hit = _contains_any(joined, spec.expect_any)
+        ok, hit = _contains_any(joined, step.expect_candidate_any)
         result.checks.append(
             Check(
                 name="候補に含まれてほしい語",
@@ -398,7 +475,7 @@ async def _run_reflection(
                 detail=(
                     f"一致: {'、'.join(hit)}"
                     if ok
-                    else f"どれも含まれない: {'、'.join(spec.expect_any)}"
+                    else f"どれも含まれない: {'、'.join(step.expect_candidate_any)}"
                 ),
             )
         )

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -142,6 +143,58 @@ class ReflectionSpec(BaseModel):
         return self
 
 
+class StepSpec(BaseModel):
+    """会話の途中で行う操作（ISSUE-006 の通し評価）。
+
+    完了条件1・2は、記憶が**作られてから**使われるまでを見る必要がある。
+    記憶を事前に入れて1会話を流すだけでは、抽出と採用の経路を通らない。
+
+    - say：発言する（turns と同じ）。
+    - reflect：会話を振り返り、候補を出す。accept で採用まで行う。
+    - new_conversation：会話を分ける。別のセッションとして続ける。
+    - restart：DBへの接続を作り直す。プロセスの再起動に近い状態にする。
+    - correct_memory / delete_memory：開発者が記憶を訂正・削除する。
+    """
+
+    kind: Literal[
+        "say", "reflect", "new_conversation", "restart", "correct_memory", "delete_memory"
+    ] = "say"
+
+    # say
+    speaker: str | None = None
+    text: str | None = None
+    expect_memories: list[str] = Field(default_factory=list)
+    expect_not_memories: list[str] = Field(default_factory=list)
+    expect_any: list[str] = Field(default_factory=list)
+    expect_none: list[str] = Field(default_factory=list)
+    expect_not_repeating: bool = False
+    human_check: str | None = None
+
+    # reflect
+    accept: bool = False
+    # 本文にこの語を含む候補だけ採用する。空なら出た候補をすべて採用する。
+    accept_contains: list[str] = Field(default_factory=list)
+    expect_kinds: list[str] = Field(default_factory=list)
+    expect_candidate_any: list[str] = Field(default_factory=list)
+    expect_empty: bool = False
+    expect_occurred_at: bool = False
+    expect_similar_marked: bool = False
+
+    # correct_memory / delete_memory：本文にこの語を含む記憶を選ぶ
+    match: str | None = None
+    content: str | None = None
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> StepSpec:
+        if self.kind == "say" and not self.text:
+            raise ValueError("say には text が要ります。")
+        if self.kind in {"correct_memory", "delete_memory"} and not self.match:
+            raise ValueError(f"{self.kind} には match が要ります。")
+        if self.kind == "correct_memory" and not self.content:
+            raise ValueError("correct_memory には content が要ります。")
+        return self
+
+
 class Scenario(BaseModel):
     id: str = Field(min_length=1)
     aspect: str
@@ -149,8 +202,44 @@ class Scenario(BaseModel):
     speakers: list[SpeakerSpec] = Field(default_factory=list)
     memories: list[MemorySpec] = Field(default_factory=list)
     states: list[StateSpec] = Field(default_factory=list)
-    turns: list[TurnSpec] = Field(min_length=1)
+    # turns は1会話を流すだけの書き方。steps は採用・訂正・再起動を挟める。
+    turns: list[TurnSpec] = Field(default_factory=list)
+    steps: list[StepSpec] = Field(default_factory=list)
     reflection: ReflectionSpec | None = None
+
+    @property
+    def effective_steps(self) -> list[StepSpec]:
+        """turns 形式も steps へ揃えて返す。実行側は steps だけを見る。"""
+        if self.steps:
+            return self.steps
+        steps = [
+            StepSpec(
+                kind="say",
+                speaker=turn.speaker,
+                text=turn.text,
+                expect_memories=turn.expect_memories,
+                expect_not_memories=turn.expect_not_memories,
+                expect_any=turn.expect_any,
+                expect_none=turn.expect_none,
+                expect_not_repeating=turn.expect_not_repeating,
+                human_check=turn.human_check,
+            )
+            for turn in self.turns
+        ]
+        spec = self.reflection
+        if spec is not None and spec.run:
+            steps.append(
+                StepSpec(
+                    kind="reflect",
+                    expect_kinds=spec.expect_kinds,
+                    expect_candidate_any=spec.expect_any,
+                    expect_empty=spec.expect_empty,
+                    expect_occurred_at=spec.expect_occurred_at,
+                    expect_similar_marked=spec.expect_similar_marked,
+                    human_check=spec.human_check,
+                )
+            )
+        return steps
 
     @property
     def has_machine_checks(self) -> bool:
@@ -160,23 +249,21 @@ class Scenario(BaseModel):
         呼び出しが失敗して1つも判定できなかった場合に、人手専用のシナリオと
         取り違えて集計から落とさないため（フェーズ3再レビューの指摘3）。
         """
-        for turn in self.turns:
+        for step in self.effective_steps:
             if (
-                turn.expect_memories
-                or turn.expect_not_memories
-                or turn.expect_any
-                or turn.expect_none
-                or turn.expect_not_repeating
+                step.expect_memories
+                or step.expect_not_memories
+                or step.expect_any
+                or step.expect_none
+                or step.expect_not_repeating
+                or step.expect_kinds
+                or step.expect_candidate_any
+                or step.expect_empty
+                or step.expect_similar_marked
+                or step.expect_occurred_at
             ):
                 return True
-        spec = self.reflection
-        return spec is not None and bool(
-            spec.expect_kinds
-            or spec.expect_any
-            or spec.expect_empty
-            or spec.expect_similar_marked
-            or spec.expect_occurred_at
-        )
+        return False
 
     @model_validator(mode="after")
     def _check_references(self) -> Scenario:
@@ -209,17 +296,24 @@ class Scenario(BaseModel):
             if state.subject is not None and state.subject not in keys:
                 raise ValueError(f"states.subject が speakers にありません: {state.subject}")
 
+        if not self.turns and not self.steps:
+            raise ValueError("turns か steps のどちらかが要ります。")
+        if self.turns and self.steps:
+            raise ValueError("turns と steps は両方書けません。")
+
         default_speaker = self.speakers[0].key
-        for turn in self.turns:
-            if turn.speaker is None:
-                turn.speaker = default_speaker
-            elif turn.speaker not in keys:
-                raise ValueError(f"turns.speaker が speakers にありません: {turn.speaker}")
+        for item in [*self.turns, *self.steps]:
+            if getattr(item, "kind", "say") != "say":
+                continue
+            if item.speaker is None:
+                item.speaker = default_speaker
+            elif item.speaker not in keys:
+                raise ValueError(f"speaker が speakers にありません: {item.speaker}")
             for field_name in ("expect_memories", "expect_not_memories"):
-                for key in getattr(turn, field_name):
+                for key in getattr(item, field_name):
                     if key not in memory_keys:
-                        raise ValueError(f"turns.{field_name} が memories にありません: {key}")
-                    if key in turn.expect_memories and key in turn.expect_not_memories:
+                        raise ValueError(f"{field_name} が memories にありません: {key}")
+                    if key in item.expect_memories and key in item.expect_not_memories:
                         raise ValueError(f"渡す・渡さないの両方に書かれています: {key}")
         return self
 

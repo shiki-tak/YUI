@@ -551,8 +551,8 @@ def test_migration_marks_old_auto_filled_basis_as_provisional(tmp_path) -> None:
     確定扱いのまま残すと、そこから漏れた記憶の訂正が届かない。手で指定した
     根拠は確定のままにする。
     """
-    import subprocess  # noqa: PLC0415
     import sqlite3  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
     import sys  # noqa: PLC0415
 
     from app.config import BACKEND_ROOT  # noqa: PLC0415

@@ -16,8 +16,8 @@
 
 | 完了条件 | 判定 | 根拠 |
 | --- | --- | --- |
-| 複数セッションと再起動をまたいで、約束・共有経験を参照できる | ○ | `promise-across-sessions` 3/3、`stays-within-given-memory` 3/3。pytest でも再起動をまたぐ参照を固定 |
-| 好みや予定の訂正後、古い情報を現在の事実として回答しない | △ | `correction-is-reflected` 3/3。ただしレビューで、**振り返りが作った状態に訂正が届いていない**ことが分かり、一度○としたのは誤りだった（[ISSUE-016](../issues/issues.md)）。2026-09-08 に修正済み。評価は訂正APIを実行しない形なので、通しでは測っていない |
+| 複数セッションと再起動をまたいで、約束・共有経験を参照できる | ○ | **`promise-survives-a-restart` 3/3**（会話 → 振り返り → 採用 → 接続の作り直し → 別の会話、を通した）。`promise-across-sessions` 3/3、`stays-within-given-memory` 3/3 |
+| 好みや予定の訂正後、古い情報を現在の事実として回答しない | ○ | **`correction-changes-the-next-answer` 2/3**（会話 → 採用 → 訂正の操作 → 再起動 → 別の会話）。落ちた1回は訂正の失敗ではなく、振り返りが候補を出さなかった回（[ISSUE-021](../issues/issues.md)）。訂正が派生した状態へ波及することは pytest で固定 |
 | 記憶がない場合に、架空の共有経験を作らない | ○ | `no-memory-is-admitted` 3/3、`does_not_invent_own_experience` 3/3、`distinguishes-how-it-was-experienced` 3/3 |
 | 相手に合わせつつ、自分の好みや価値観を保持する | ○ | `adopted-interest-is-kept` 3/3、`keeps-own-preference` 3/3、`keeps-own-preference-against-two-people` 3/3 |
 | 参照した記憶・人格版・可変状態を追跡できる | ○ | `run_records` に3つとも記録（pytest で固定）。画面の「根拠」に人格版を表示 |
@@ -79,6 +79,25 @@
 - 発言の種別（本人／伝聞／不明）を持たせ、伝聞を相手本人の情報として保存しない（[ISSUE-017](../issues/issues.md)）。
 - 同じ出来事の二重保存に印を付ける（[ISSUE-018](../issues/issues.md)）。
 - 会話履歴に発言者名を付け、相手の取り違えを直した（[ISSUE-020](../issues/issues.md)）。
+
+## 通しの評価（2026-09-08 に追加）
+
+完了条件1・2は、記憶が**作られてから**使われるまでを見る必要がある。それまでの
+評価は記憶を事前に入れており、**抽出と採用の経路を通っていなかった**。レビューで
+5回続けて指摘され、シナリオに手順を書けるようにした。
+
+書ける手順は say（発言）／reflect（振り返り、採用まで）／new_conversation／
+restart（接続の作り直し）／correct_memory／delete_memory。採用と訂正は、API と
+同じ処理を呼ぶ。評価のためだけの近道を作ると、実際の経路と違うものを測る。
+
+| シナリオ | 手順 | 結果 |
+| --- | --- | ---: |
+| `promise-survives-a-restart` | 発言 → 発言 → 振り返り＋採用 → 再起動 → 別の会話で尋ねる | 3 / 3 |
+| `correction-changes-the-next-answer` | 発言 → 振り返り＋採用 → 会話を分ける → 訂正 → 再起動 → 尋ねる | 2 / 3 |
+
+**分かったこと：完了条件1・2は、抽出が候補を出すかどうかに乗っている。**
+落ちた1回は、訂正が効かなかったのではなく、振り返りが候補を出さず、採用する
+記憶が無かった回だった。記憶を事前に入れる評価では、この依存が見えなかった。
 
 ## 評価用会話（ISSUE-006）
 

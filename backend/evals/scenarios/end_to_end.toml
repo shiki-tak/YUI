@@ -1,0 +1,75 @@
+# 完了条件1・2を、記憶が作られるところから通して見る。
+#
+# 他のシナリオは記憶を事前に入れており、抽出と採用の経路を通っていない。
+# ここでは会話 → 振り返り → 採用 → 再起動 → 別の会話、という順で流す。
+# レビューで5回続けて「この通し評価が無い」と指摘された部分にあたる。
+
+[[scenario]]
+id = "promise-survives-a-restart"
+aspect = "memory"
+description = """完了条件1：複数セッションと再起動をまたいで、約束を参照できるか。
+記憶を事前に入れず、会話から抽出して採用したものが、接続を作り直した後の
+別の会話で使われるかを見る。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "写真を撮るのが好きなんだ。休みの日はカメラを持って歩いてる"
+
+[[scenario.steps]]
+kind = "say"
+text = "次は山で撮った写真の話をしよう"
+human_check = "約束を受け止めているか"
+
+# 振り返って、出た候補を採用する。ここが従来の評価では通っていなかった。
+[[scenario.steps]]
+kind = "reflect"
+accept = true
+expect_kinds = ["promise"]
+expect_candidate_any = ["写真", "山"]
+human_check = "約束が、後で引ける形の本文になっているか"
+
+# 接続を作り直す。プロセスの再起動に近い状態にする。
+[[scenario.steps]]
+kind = "restart"
+
+[[scenario.steps]]
+kind = "say"
+text = "前に何を話す約束をしたっけ？"
+expect_any = ["写真", "山"]
+human_check = "採用した約束を踏まえて答えているか。作り話を足していないか"
+
+[[scenario]]
+id = "correction-changes-the-next-answer"
+aspect = "memory"
+description = """完了条件2：訂正した後、古い情報を現在の事実として答えないか。
+記憶を事前に入れず、会話から作った記憶を実際に訂正してから、次の会話で
+好みを尋ねる。設計書の確認シナリオ（コーヒー → 紅茶）にあたる。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "私、コーヒーが好きでね。朝は必ず淹れてるんだ"
+
+[[scenario.steps]]
+kind = "reflect"
+accept = true
+accept_contains = ["コーヒー"]
+expect_candidate_any = ["コーヒー"]
+
+[[scenario.steps]]
+kind = "new_conversation"
+
+# 開発者が記憶を訂正する。会話で言い直すのではなく、訂正の操作を通す。
+[[scenario.steps]]
+kind = "correct_memory"
+match = "コーヒー"
+content = "開発者は最近は紅茶が好き"
+
+[[scenario.steps]]
+kind = "restart"
+
+[[scenario.steps]]
+kind = "say"
+text = "私の好きな飲み物、覚えてる？"
+expect_any = ["紅茶"]
+expect_none = ["コーヒーがお好き", "コーヒーが好きだと"]
+human_check = "紅茶を現在の好みとして答えているか。コーヒーを現在の事実として断定していないか"

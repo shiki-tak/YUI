@@ -307,3 +307,78 @@ expect_not_memories = ["a"]
     )
     with pytest.raises(ScenarioError):
         load_scenarios(directory)
+
+
+async def test_steps_run_reflection_acceptance_and_restart(fake_llm: FakeLLM) -> None:
+    """会話 → 振り返り → 採用 → 再起動 → 別の会話、を通せる（完了条件1の形）。
+
+    記憶を事前に入れず、抽出して採用したものが、接続を作り直した後の会話で
+    渡ることを見る。ここが従来の評価で通っていなかった経路。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "e2e",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "say", "text": "次は山の写真の話をしよう"},
+                {
+                    "kind": "reflect",
+                    "accept": True,
+                    "expect_kinds": ["promise"],
+                    "expect_candidate_any": ["写真"],
+                },
+                {"kind": "restart"},
+                {"kind": "say", "text": "前に何を話す約束をしたっけ？", "expect_any": ["写真"]},
+            ],
+        }
+    )
+    fake_llm.push("承知しました。")
+    fake_llm.push(
+        '[{"kind":"promise","content":"次は山で撮った写真の話をする","certainty":"fact",'
+        '"provenance":"firsthand","keywords":"写真 山 約束","about_partner":false}]'
+    )
+    fake_llm.push("山で撮った写真のお話でしたね。")
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert attempt.ok, [c.detail for t in attempt.turns for c in t.checks if not c.ok]
+    # 再起動後の返答に、採用した記憶が渡っている。
+    assert any("採用:" in ref for ref in attempt.turns[-1].referenced)
+
+
+async def test_steps_can_correct_a_memory_between_conversations(
+    fake_llm: FakeLLM,
+) -> None:
+    """訂正の操作を挟める（完了条件2の形）。"""
+    scenario = Scenario.model_validate(
+        {
+            "id": "correction",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "say", "text": "コーヒーが好きなんだ"},
+                {"kind": "reflect", "accept": True},
+                {"kind": "correct_memory", "match": "コーヒー", "content": "開発者は紅茶が好き"},
+                {"kind": "new_conversation"},
+                {"kind": "say", "text": "私の好きな飲み物は？", "expect_any": ["紅茶"]},
+            ],
+        }
+    )
+    fake_llm.push("素敵ですね。")
+    fake_llm.push(
+        '[{"kind":"about_person","content":"開発者はコーヒーが好き","certainty":"fact",'
+        '"provenance":"firsthand","keywords":"コーヒー 飲み物","about_partner":true}]'
+    )
+    fake_llm.push("紅茶がお好きでしたよね。")
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert "correct_memory" in attempt.actions[0]
+    # 訂正後の内容が、次の会話のプロンプトへ渡っている。
+    last_prompt = fake_llm.calls[-1][0].content
+    assert "紅茶" in last_prompt
+    assert "開発者はコーヒーが好き" not in last_prompt
+    assert attempt.ok
