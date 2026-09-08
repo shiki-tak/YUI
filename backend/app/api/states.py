@@ -50,6 +50,20 @@ async def _check_scope_against_basis(
             f"根拠にした記憶が見つかりません: {'、'.join(str(m) for m in missing)}",
         )
 
+    dead = [
+        memory.id for memory in memories if memory.status != MemoryStatus.ACTIVE.value
+    ]
+    if dead:
+        # 削除・訂正された記憶を根拠にした状態は、作られた時点で古い前提を
+        # 持っている。訂正の波及（ISSUE-016）は「後から変わったもの」を拾う
+        # 仕組みなので、作る前から無効だった根拠は拾えない（ISSUE-026）。
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"根拠にした記憶が有効ではありません: "
+            f"{'、'.join(f'#{mid}' for mid in dead)}。"
+            "訂正後の記憶を根拠にしてください。",
+        )
+
     for memory in memories:
         if memory.visibility == Visibility.PRIVATE.value and (
             payload.visibility == Visibility.PUBLIC
@@ -153,6 +167,17 @@ async def decide_state(
             state.basis_is_provisional = True
         state.status = StateStatus.ACTIVE.value
         action = "accepted"
+        # 候補として置かれてから採用までの間に、根拠が消えていることがある。
+        # 拒否はせず印を付ける。状態そのものを捨てるかは開発者が決める
+        # （印が付いている間は会話へ渡らない）。撤回から有効へ戻すときの
+        # 検査と揃える（ISSUE-026）。
+        gone = await _dead_basis(session, state)
+        if gone:
+            state.needs_review = True
+            state.review_reason = (
+                f"根拠にした記憶 {'、'.join(f'#{mid}' for mid in gone)} が"
+                "有効でなくなっている"
+            )
     else:
         state.status = StateStatus.REJECTED.value
         action = "rejected"

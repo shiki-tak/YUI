@@ -269,3 +269,106 @@ async def test_no_state_candidates_when_the_partner_is_unclear(
     assert created == []
     # モデルも呼ばない。決められないと分かっている場合に問い合わせない。
     assert not any("いまの状態" in call[-1].content for call in fake_llm.calls)
+
+
+async def test_a_state_cannot_be_founded_on_a_dead_memory(client: AsyncClient) -> None:
+    """削除・訂正された記憶を根拠にした状態は作れない（ISSUE-026）。
+
+    訂正の波及（ISSUE-016）は「後から変わったもの」を拾う仕組みなので、作る前
+    から無効だった根拠は拾えない。作れてしまうと、無効になった前提から作った
+    状態が、印の付かない採用済みとして会話へ渡る。
+    """
+    speaker_id = await _speaker(client)
+    deleted = (
+        await client.post(
+            "/api/memories",
+            json={
+                "kind": "experience",
+                "content": "開発者と雨の日の話をした",
+                "keywords": "雨",
+                "visible_to_speaker_id": speaker_id,
+            },
+        )
+    ).json()
+    await client.delete(f"/api/memories/{deleted['id']}")
+
+    refused = await client.post(
+        "/api/states",
+        json={
+            "kind": "interest",
+            "content": "雨の日の静かな時間が好き",
+            "basis_memory_ids": [deleted["id"]],
+            "visible_to_speaker_id": speaker_id,
+        },
+    )
+    assert refused.status_code == 400
+    assert "有効ではありません" in refused.json()["detail"]
+
+    # 訂正した記憶は、その場で内容が書き換わり status は active のままになる。
+    # こちらは入口で止めるものではなく、訂正の波及（ISSUE-016）が印を付ける側の
+    # 経路である。根拠として指定できること自体は正しい。
+    corrected = (
+        await client.post(
+            "/api/memories",
+            json={
+                "kind": "experience",
+                "content": "開発者と雪の日の話をした",
+                "keywords": "雪",
+                "visible_to_speaker_id": speaker_id,
+            },
+        )
+    ).json()
+    await client.patch(
+        f"/api/memories/{corrected['id']}",
+        json={"content": "開発者と晴れの日の話をした", "reason": "聞き違い"},
+    )
+    accepted = await client.post(
+        "/api/states",
+        json={
+            "kind": "interest",
+            "content": "晴れの日が好き",
+            "basis_memory_ids": [corrected["id"]],
+            "visible_to_speaker_id": speaker_id,
+        },
+    )
+    assert accepted.status_code == 201
+
+
+async def test_a_candidate_whose_basis_died_is_marked_when_accepted(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """候補を置いてから採用するまでの間に根拠が消えたら、採用時に印を付ける。
+
+    拒否はしない。状態そのものを捨てるかは開発者が決める。印が付いている間は
+    会話へ渡らない。撤回から有効へ戻すときの検査と揃える（ISSUE-026）。
+    """
+    speaker_id = await _speaker(client)
+    memory = (
+        await client.post(
+            "/api/memories",
+            json={
+                "kind": "experience",
+                "content": "開発者と雨の日の話をした",
+                "keywords": "雨",
+                "visible_to_speaker_id": speaker_id,
+            },
+        )
+    ).json()
+    state = await _add(
+        client,
+        basis_memory_ids=[memory["id"]],
+        visible_to_all=False,
+        visible_to_speaker_id=speaker_id,
+    )
+    await client.delete(f"/api/memories/{memory['id']}")
+
+    accepted = (
+        await client.post(f"/api/states/{state['id']}/decide", json={"decision": "accept"})
+    ).json()
+    assert accepted["status"] == "active"
+    assert accepted["needs_review"] is True
+    assert "有効でなくなっている" in accepted["review_reason"]
+
+    # 印が付いている間は会話に渡らない。
+    await client.post("/api/chat", json={"text": "雨の日はどう？"})
+    assert "雨の日の静かな時間が好き" not in fake_llm.last_system_prompt
