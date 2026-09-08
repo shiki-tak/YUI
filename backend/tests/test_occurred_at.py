@@ -13,7 +13,7 @@ from httpx import AsyncClient
 
 from app.agent.reflection import _parse_occurred_on
 from app.config import LOCAL_TZ
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, end_and_wait
 
 TODAY = date(2026, 9, 7)
 
@@ -53,9 +53,10 @@ def test_date_is_stored_as_the_start_of_the_day_here() -> None:
 async def _reflect(client: AsyncClient, fake_llm: FakeLLM, text: str, output: str) -> list[dict]:
     first = await client.post("/api/chat", json={"text": text})
     fake_llm.push(output)
-    ended = await client.post(f"/api/conversations/{first.json()['conversation_id']}/end")
-    assert ended.status_code == 200, ended.text
-    return ended.json()
+    conversation_id = first.json()["conversation_id"]
+    ended = await end_and_wait(client, conversation_id)
+    assert ended.status_code == 202, ended.text
+    return (await client.get(f"/api/conversations/{conversation_id}/candidates")).json()
 
 
 async def test_today_is_given_to_the_model(client: AsyncClient, fake_llm: FakeLLM) -> None:

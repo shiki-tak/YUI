@@ -15,7 +15,7 @@ from httpx import AsyncClient
 
 from app.config import get_settings
 from app.persona import Persona, PersonaError, available_versions, load_persona
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, end_and_wait
 
 # 人格をコードに直接書いていたときのプロンプト。基準版はこれと同じでなければ
 # ならない。版管理の仕組みを入れた時点で人格が変わっていないことの確認で、
@@ -183,7 +183,7 @@ async def test_reflection_claim_is_released_when_the_persona_cannot_be_read(
     monkeypatch.setattr(type(settings), "persona_path", property(lambda self: empty))
     load_persona.cache_clear()
     try:
-        failed = await client.post(f"/api/conversations/{conversation_id}/end")
+        failed = await end_and_wait(client, conversation_id)
         # 500 ではなく、原因の分かるエラーで返す。
         assert failed.status_code == 503
         assert "人格" in failed.json()["detail"]
@@ -193,8 +193,8 @@ async def test_reflection_claim_is_released_when_the_persona_cannot_be_read(
 
     # 人格を直したら、期限切れを待たずにやり直せる。
     fake_llm.push("[]")
-    retried = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert retried.status_code == 200
+    retried = await end_and_wait(client, conversation_id)
+    assert retried.status_code == 202
 
 
 def test_symlink_out_of_the_persona_directory_is_not_loaded(

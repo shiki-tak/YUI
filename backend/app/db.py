@@ -19,6 +19,17 @@ engine = create_async_engine(_settings.database_url, echo=False, future=True)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """接続の作り方そのものを渡す依存。
+
+    リクエストの寿命より長く生きる処理（会話後の振り返りジョブ）は、ハンドラの
+    セッションを使えない。ハンドラが返した時点で閉じるため。差し替えられる形に
+    しておくのは、テストで一時DBへ向けるためでもある。通常利用のDBを、テストが
+    書き換えないようにする。
+    """
+    return SessionLocal
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI の依存。ハンドラが正常終了したらコミットする。"""
     async with SessionLocal() as session:

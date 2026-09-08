@@ -7,19 +7,17 @@ from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import CursorResult, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from app.agent.character_state import active_states, create_state
+from app.agent import reflection_job
 from app.agent.delivery import apply_delivery_state
 from app.agent.memory_store import create_memory
-from app.agent.reflection import ReflectionParseError, extract_candidates, format_transcript
-from app.agent.state_reflection import StateReflectionError, propose_state_candidates
 from app.agent.turn_lock import conversation_locks
 from app.config import Settings, get_settings
-from app.db import get_session
+from app.db import get_session, get_session_factory
 from app.llm import get_llm_client
-from app.llm.base import LLMClient, LLMError
+from app.llm.base import LLMClient
 from app.models import (
     CandidateStatus,
     Conversation,
@@ -31,8 +29,6 @@ from app.models import (
     Speaker,
     SpeakerKind,
     SpeechRun,
-    StateKind,
-    StateStatus,
     utcnow,
 )
 from app.persona import load_persona
@@ -45,6 +41,7 @@ from app.schemas import (
     IdealResponseOut,
     MemoryCandidateOut,
     MessageOut,
+    ReflectionProgress,
     RunRecordDetail,
     SpeechRunOut,
 )
@@ -134,14 +131,50 @@ async def _sole_partner(session: AsyncSession, conversation_id: int) -> Speaker 
     return found[0] if len(found) == 1 else None
 
 
-@router.post("/{conversation_id}/end", response_model=list[MemoryCandidateOut])
+def _progress(conversation: Conversation) -> ReflectionProgress:
+    """会話の記録から、振り返りの進み具合を組み立てる。
+
+    プロセス内の変数ではなく DB の内容だけで決める。画面を再読み込みしても、
+    別の接続から見ても同じものが見える（ISSUE-025）。
+    """
+    if conversation.reflection_completed_at is not None:
+        state = "completed"
+    elif conversation.reflection_started_at is not None:
+        state = "running"
+    elif conversation.reflection_error is not None:
+        state = "failed"
+    else:
+        state = "idle"
+    return ReflectionProgress(
+        conversation_id=conversation.id,
+        state=state,
+        step=conversation.reflection_step,
+        error=conversation.reflection_error,
+        started_at=conversation.reflection_started_at,
+        completed_at=conversation.reflection_completed_at,
+    )
+
+
+@router.post(
+    "/{conversation_id}/end",
+    response_model=ReflectionProgress,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def end_conversation(
     conversation_id: int,
     session: AsyncSession = Depends(get_session),
+    factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
     llm: LLMClient = Depends(get_llm_client),
     settings: Settings = Depends(get_settings),
-) -> list[MemoryCandidate]:
-    """会話を終了し、長期記憶の候補を抽出する。採用は別途 /candidates で行う。"""
+) -> ReflectionProgress:
+    """会話を終了し、振り返りのジョブを積む。**待たずに返す。**
+
+    振り返りは LLM を3回以上呼ぶため20秒以上かかる。同期で処理すると、その間
+    画面には何も出ない（設計書「重い振り返りは会話後のジョブへ分離します」）。
+
+    候補の抽出結果はここでは返さない。進み具合は GET /reflection、できた候補は
+    GET /candidates から取る。
+    """
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
@@ -152,11 +185,20 @@ async def end_conversation(
     # 人格の読み込みはファイルを読むため、ここで失敗しうる。
     character_name = load_persona().name
 
-    # 回収期限に含まれ、稼働中の振り返りまで期限切れとみなされてしまう。
     async with conversation_locks.hold(conversation_id):
         await session.refresh(conversation)
         if conversation.reflection_completed_at is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "この会話はすでに終了しています。")
+
+        # ジョブが走っている間は積み直さない。同期で処理していたころはロックを
+        # 掛けたまま最後まで走ったが、いまはロックを持つのが開始権を取る間だけ
+        # なので、走っているかどうかを別に見る必要がある。**回収期限を過ぎても、
+        # 実際に走っているものは横取りしない**（フェーズ4 PR5）。
+        if reflection_job.is_running(conversation_id):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "この会話の振り返りは実行中です。しばらく待って再試行してください。",
+            )
 
         # 同一プロセスではロックが排他を保証する。ここでの期限判定は、
         # プロセスが落ちて開始だけが残った場合を回収するためのもの。
@@ -173,7 +215,12 @@ async def end_conversation(
                     (Conversation.reflection_started_at.is_(None))
                     | (Conversation.reflection_started_at < stale_before),
                 )
-                .values(reflection_started_at=now)
+                .values(
+                    reflection_started_at=now,
+                    # やり直しなので、前回の失敗の記録は消す。
+                    reflection_error=None,
+                    reflection_step=None,
+                )
                 # SQLite は timezone を落として返すため、条件の評価を Python 側で
                 # 行わせない。判定は SQL に任せる。
                 .execution_options(synchronize_session=False)
@@ -184,73 +231,29 @@ async def end_conversation(
                 status.HTTP_409_CONFLICT,
                 "この会話の振り返りは実行中です。しばらく待って再試行してください。",
             )
-
-        sole_partner = await _sole_partner(session, conversation_id)
-        # 生成に入る前に DB の書き込みロックを手放す（会話 API と同じ理由）。
+        # 開始権を確定させてからジョブを積む。積んだ後に確定させると、ジョブが
+        # 先に走って自分の開始権を見つけられない。
         await session.commit()
 
-        # 相手がひとりの会話でだけ、関係性の候補を作る。複数いる会話で
-        # 「その相手との関係」を最後の話者へ寄せると、別人の関係になる。
-        partner_id = sole_partner.id if sole_partner else None
-        messages = await _conversation_messages(session, conversation_id)
-        current_states = await active_states(
-            session, speaker_id=partner_id, mode=conversation.mode
-        )
+    reflection_job.schedule(
+        factory,
+        conversation_id=conversation_id,
+        llm=llm,
+        character_name=character_name,
+    )
+    await session.refresh(conversation)
+    return _progress(conversation)
 
-        try:
-            # モデルを呼んでいる間は、書き込みのトランザクションを開かない。
-            # 開いたまま待つと、別の会話の書き込みが「database is locked」で
-            # 失敗する。抽出はここでは保存せず、すべて成功してからまとめて
-            # 保存する（フェーズ3全体レビューの指摘4・5）。
-            candidates = await extract_candidates(
-                session,
-                llm=llm,
-                conversation=conversation,
-                character_name=character_name,
-            )
-            # 関心・関係性の更新候補は、別の呼び出しで作る。同じ指示文へ項目を
-            # 足すと記憶の抽出が落ちるため（ISSUE-017 で実測）。
-            state_payloads = await propose_state_candidates(
-                llm=llm,
-                transcript=format_transcript(messages, character_name),
-                partner_speaker_id=partner_id,
-                current_states=current_states,
-            )
-        except (LLMError, ReflectionParseError, StateReflectionError) as exc:
-            # 抽出できなかった会話を処理中・終了済みのまま残すと、やり直せない。
-            # 特に出力の解析失敗は「候補なしの成功」と区別する必要がある。
-            # 途中まで作ったものは捨てる。残すと、再試行で二重に保存される。
-            await session.rollback()
-            await _release_reflection(session, conversation_id)
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
-        # ここから保存。すべて成功したものだけを、1つのトランザクションで書く。
-        session.add_all(candidates)
-        for payload in state_payloads:
-            is_relationship = payload.kind == StateKind.RELATIONSHIP.value
-            await create_state(
-                session,
-                kind=payload.kind,
-                content=payload.content,
-                topic=None if is_relationship else payload.topic,
-                subject_speaker_id=partner_id if is_relationship else None,
-                # 非公開の会話から作った状態は、その相手との会話に限る。
-                visible_to_speaker_id=partner_id,
-                source_conversation_id=conversation.id,
-                status=StateStatus.PENDING.value,
-                reason=payload.reason or "会話の振り返りから",
-            )
-        await session.flush()
-
-        completed = utcnow()
-        await session.execute(
-            update(Conversation)
-            .where(Conversation.id == conversation_id)
-            .values(reflection_completed_at=completed, ended_at=completed)
-        )
-        await session.commit()
-
-    return candidates
+@router.get("/{conversation_id}/reflection", response_model=ReflectionProgress)
+async def read_reflection(
+    conversation_id: int, session: AsyncSession = Depends(get_session)
+) -> ReflectionProgress:
+    """振り返りの進み具合。画面はこれを見て、終わったら候補を取りに行く。"""
+    conversation = await session.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
+    return _progress(conversation)
 
 
 @router.get("/{conversation_id}/candidates", response_model=list[MemoryCandidateOut])

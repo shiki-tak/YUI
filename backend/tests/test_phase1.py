@@ -11,7 +11,7 @@ import json
 
 from httpx import AsyncClient
 
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, end_and_wait
 
 
 async def _say(client: AsyncClient, text: str, conversation_id: int | None = None) -> dict:
@@ -210,9 +210,11 @@ async def test_reflection_extracts_and_accepts_candidates(
             ensure_ascii=False,
         )
     )
-    ended = await client.post(f"/api/conversations/{first['conversation_id']}/end")
-    assert ended.status_code == 200, ended.text
-    candidates = ended.json()
+    ended = await end_and_wait(client, first['conversation_id'])
+    assert ended.status_code == 202, ended.text
+    candidates = (
+        await client.get(f"/api/conversations/{first['conversation_id']}/candidates")
+    ).json()
     assert len(candidates) == 2
     assert all(c["status"] == "pending" for c in candidates)
 
@@ -236,7 +238,7 @@ async def test_reflection_extracts_and_accepts_candidates(
 async def test_ended_conversation_rejects_new_messages(client: AsyncClient, fake_llm: FakeLLM):
     first = await _say(client, "そろそろ終わろうか")
     fake_llm.push("[]")
-    await client.post(f"/api/conversations/{first['conversation_id']}/end")
+    await end_and_wait(client, first['conversation_id'])
 
     response = await client.post(
         "/api/chat", json={"text": "やっぱり続き", "conversation_id": first["conversation_id"]}

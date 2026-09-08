@@ -158,6 +158,20 @@ class CandidateStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ReflectionStep(StrEnum):
+    """振り返りがいまどこを処理しているか（フェーズ4 PR5）。
+
+    LLM の呼び出しは役割ごとに分けてある（ISSUE-021）。段階ごとの時間差が
+    大きく、まとめて「処理中」とだけ出すと、止まっているのか進んでいるのかが
+    分からない。実測は拾う3.9秒／選ぶ16.5秒／関心・関係性5.4秒。
+    """
+
+    PICKING = "picking"  # 会話から、後で話題にできそうな内容を拾う
+    SELECTING = "selecting"  # 拾ったものから、長期的に覚えるものを選ぶ
+    STATES = "states"  # 関心・関係性の更新候補を作る
+    SAVING = "saving"  # すべて成功したものをまとめて保存する
+
+
 class GoalTrigger(StrEnum):
     """目標を実行してよい条件（設計書 5「目標」の実行条件）。
 
@@ -224,6 +238,16 @@ class Conversation(Base):
     # 開始だけが残った場合に、やり直せるようにするため。
     reflection_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reflection_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # いまどこを処理しているか。振り返りは LLM を3回以上呼ぶため、終わるまで
+    # 20秒以上かかる。画面に何も出ないと、動いているのか止まっているのかが
+    # 分からない（フェーズ4 PR5）。
+    #
+    # プロセス内の変数ではなく DB に置く。単一プロセスのジョブで始めるが、
+    # 別プロセスへ移すときに進行の見え方を作り直さずに済む（ISSUE-025）。
+    reflection_step: Mapped[str | None] = mapped_column(String(24))
+    # 失敗した理由。開始だけが残った状態と、失敗して終わった状態を区別する。
+    # 失敗はやり直せるので、開始権は解放したうえで理由を残す。
+    reflection_error: Mapped[str | None] = mapped_column(Text)
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",

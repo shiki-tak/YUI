@@ -14,7 +14,7 @@ from datetime import datetime
 
 from httpx import AsyncClient
 
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, end_and_candidates, end_and_wait
 
 
 async def _say(client: AsyncClient, text: str, conversation_id: int | None = None) -> dict:
@@ -70,7 +70,7 @@ async def test_ended_conversation_is_marked_as_read_only(
     assert before["reflection_completed_at"] is None
 
     fake_llm.push("[]")
-    await client.post(f"/api/conversations/{first['conversation_id']}/end")
+    await end_and_wait(client, first['conversation_id'])
 
     after = (await client.get(f"/api/conversations/{first['conversation_id']}")).json()
     assert after["ended_at"] is not None
@@ -161,9 +161,7 @@ async def test_api_datetimes_carry_a_timezone(client: AsyncClient, fake_llm: Fak
             ensure_ascii=False,
         )
     )
-    candidates = (
-        await client.post(f"/api/conversations/{first['conversation_id']}/end")
-    ).json()
+    candidates = await end_and_candidates(client, first['conversation_id'])
     assert datetime.fromisoformat(candidates[0]["created_at"]).tzinfo is not None
 
     memory = (

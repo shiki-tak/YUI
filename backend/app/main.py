@@ -13,8 +13,10 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.agent import reflection_job
 from app.api import chat, conversations, goals, memories, states
 from app.config import get_settings
+from app.db import SessionLocal
 from app.llm import get_llm_client
 from app.llm.base import LLMClient
 from app.persona import PersonaError, available_versions, load_persona
@@ -26,13 +28,25 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """起動時に既定の人格を確かめる。
+    """起動時に既定の人格を確かめ、途中で止まった振り返りを戻す。
 
     人格が読めない状態で会話を受け付けると、どの人格で話したのかを後から
     追えない。設定の誤りは、最初のリクエストではなく起動で分かるようにする。
+
+    振り返りは単一プロセス内のジョブなので、プロセスが落ちると走っていた
+    ジョブは消えるが、開始権は DB に残る。起動で戻さないと
+    reflection_stale_seconds（既定180秒）を過ぎるまでやり直せない
+    （ISSUE-025 の修正方針2）。
+
+    停止のときは、走っているジョブを止めてから終わる。ジョブ側は中断されると
+    開始権を解放するので、次の起動で待たされない。
     """
     load_persona()
-    yield
+    await reflection_job.recover_orphaned(SessionLocal)
+    try:
+        yield
+    finally:
+        await reflection_job.shutdown(SessionLocal)
 
 
 app = FastAPI(

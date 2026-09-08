@@ -479,6 +479,24 @@ class GoalRevisionOut(ORMModel):
     created_at: UtcDatetime
 
 
+class ReflectionProgress(BaseModel):
+    """振り返りの進み具合（フェーズ4 PR5）。
+
+    会話終了は待たせずに返し、進行はここから見る。状態は3つに分ける。
+
+    - running：処理中。step がどこまで進んだかを示す。
+    - completed：終わった。候補は /candidates から取る。
+    - failed：失敗した。開始権は解放済みで、もう一度実行できる。
+    """
+
+    conversation_id: int
+    state: Literal["running", "completed", "failed", "idle"]
+    step: str | None = None
+    error: str | None = None
+    started_at: UtcDatetime | None = None
+    completed_at: UtcDatetime | None = None
+
+
 class MemorySearchResult(BaseModel):
     query: str
     results: list[RetrievedMemoryOut]

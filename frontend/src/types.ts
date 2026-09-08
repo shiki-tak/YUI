@@ -194,6 +194,17 @@ export interface GoalRevision {
   created_at: string;
 }
 
+/** 振り返りの進み具合。終了は待たずに返り、進行はこれで見る。 */
+export interface ReflectionProgress {
+  conversation_id: number;
+  state: "running" | "completed" | "failed" | "idle";
+  /** いまどこを処理しているか。段階ごとに待ち時間が大きく違う。 */
+  step: "picking" | "selecting" | "states" | "saving" | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 export interface MemoryRevision {
   id: number;
   memory_id: number;

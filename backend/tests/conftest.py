@@ -15,11 +15,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.agent import ConversationAgent, get_agent
+from app.agent import ConversationAgent, get_agent, reflection_job
 from app.agent.reflection import _PICKUP_INSTRUCTION as PICKUP_INSTRUCTION
 from app.agent.state_reflection import _INSTRUCTION as STATE_INSTRUCTION
 from app.config import get_settings
-from app.db import get_session
+from app.db import get_session, get_session_factory
 from app.llm import get_llm_client
 from app.llm.base import ChatMessage, LLMClient, LLMResponse
 from app.main import app
@@ -170,6 +170,9 @@ async def client(
 
     agent = ConversationAgent(llm=fake_llm, persona=load_persona(), settings=get_settings())
     app.dependency_overrides[get_session] = override_session
+    # 振り返りのジョブはリクエストより長く生きるので、独自に接続を作る。
+    # 一時DBへ向けないと、テストが通常利用のDBを書き換える。
+    app.dependency_overrides[get_session_factory] = lambda: session_factory
     app.dependency_overrides[get_agent] = lambda: agent
     app.dependency_overrides[get_llm_client] = lambda: fake_llm
     app.dependency_overrides[get_speech_client] = lambda: fake_speech
@@ -179,3 +182,47 @@ async def client(
         yield http_client
 
     app.dependency_overrides.clear()
+
+
+async def reflection_progress(client: AsyncClient, conversation_id: int) -> dict:
+    """振り返りの進み具合。"""
+    response = await client.get(f"/api/conversations/{conversation_id}/reflection")
+    return response.json()
+
+
+async def end_and_wait(client: AsyncClient, conversation_id: int):
+    """会話を終了し、振り返りのジョブが終わるまで待つ。
+
+    終了は待たずに返るようになった（フェーズ4 PR5）。テストは結果を見たいので、
+    ここで待ち合わせる。**同期に戻しているのではなく、ジョブの完了を待つだけ**で、
+    通る経路は実際の運用と同じである。
+    """
+    response = await client.post(f"/api/conversations/{conversation_id}/end")
+    await reflection_job.wait(conversation_id)
+    return response
+
+
+async def end_and_candidates(client: AsyncClient, conversation_id: int) -> list[dict]:
+    """終了して振り返り、**成功したことを確かめてから**候補を返す。
+
+    候補一覧を読むだけだと、失敗して0件だった場合と、残すものが無くて0件
+    だった場合を区別できない（第1回レビューの指摘）。
+    """
+    response = await end_and_wait(client, conversation_id)
+    assert response.status_code == 202, response.text
+    progress = await reflection_progress(client, conversation_id)
+    assert progress["state"] == "completed", progress
+    return (await client.get(f"/api/conversations/{conversation_id}/candidates")).json()
+
+
+async def end_and_expect_failure(client: AsyncClient, conversation_id: int) -> dict:
+    """終了して振り返り、ジョブが失敗したことを確かめて理由を返す。
+
+    終了そのものは受け付ける（202）。抽出の失敗はジョブの中で起きるので、
+    HTTP の応答ではなく進行状態で見る（フェーズ4 PR5）。
+    """
+    response = await end_and_wait(client, conversation_id)
+    assert response.status_code == 202, response.text
+    progress = await reflection_progress(client, conversation_id)
+    assert progress["state"] == "failed", progress
+    return progress

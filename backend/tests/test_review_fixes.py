@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from datetime import timedelta
 
@@ -14,8 +13,15 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.agent import reflection_job
 from app.models import Conversation, Memory, utcnow
-from tests.conftest import FakeLLM
+from tests.conftest import (
+    FakeLLM,
+    end_and_candidates,
+    end_and_expect_failure,
+    end_and_wait,
+    reflection_progress,
+)
 
 
 async def _say(
@@ -173,12 +179,15 @@ async def test_concurrent_end_produces_one_set_of_candidates(
         )
     ] * 2
 
+    # 終了は待たずに返るようになったが、開始権はロックの内側で確定させる。
+    # 2つ同時に来ても、ジョブが積まれるのは片方だけ（フェーズ4 PR5）。
     responses = await asyncio.gather(
         client.post(f"/api/conversations/{conversation_id}/end"),
         client.post(f"/api/conversations/{conversation_id}/end"),
     )
     codes = sorted(r.status_code for r in responses)
-    assert codes == [200, 409], [r.text for r in responses]
+    assert codes == [202, 409], [r.text for r in responses]
+    await reflection_job.wait(conversation_id)
 
     candidates = (
         await client.get(f"/api/conversations/{conversation_id}/candidates")
@@ -201,8 +210,7 @@ async def test_failed_reflection_can_be_retried(
         raise LLMError("接続できません")
 
     fake_llm.chat = failing_chat  # type: ignore[method-assign]
-    failed = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert failed.status_code == 503
+    await end_and_expect_failure(client, conversation_id)
 
     async with session_factory() as session:
         conversation = await session.get(Conversation, conversation_id)
@@ -210,8 +218,8 @@ async def test_failed_reflection_can_be_retried(
 
     fake_llm.chat = original_chat  # type: ignore[method-assign]
     fake_llm.scripted = ["[]"]
-    retried = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert retried.status_code == 200
+    retried = await end_and_wait(client, conversation_id)
+    assert retried.status_code == 202
 
 
 # --- #4 候補の根拠が発言ごとに正しいこと -----------------------------------
@@ -245,9 +253,7 @@ async def test_candidate_keeps_its_own_source_message(
             ensure_ascii=False,
         )
     )
-    candidates = (
-        await client.post(f"/api/conversations/{first['conversation_id']}/end")
-    ).json()
+    candidates = await end_and_candidates(client, first['conversation_id'])
     assert candidates[0]["source_message_id"] == photo_message_id
 
     accepted = await client.post(
@@ -281,7 +287,7 @@ async def test_invented_source_message_is_left_unverified(
             ensure_ascii=False,
         )
     )
-    candidates = (await client.post(f"/api/conversations/{conversation_id}/end")).json()
+    candidates = await end_and_candidates(client, conversation_id)
     assert candidates[0]["source_message_id"] is None
     assert candidates[0]["source_message_id"] != last["user_message"]["id"]
 
@@ -374,9 +380,7 @@ async def test_new_candidate_always_has_visibility_scope(
             ensure_ascii=False,
         )
     )
-    candidates = (
-        await client.post(f"/api/conversations/{first['conversation_id']}/end")
-    ).json()
+    candidates = await end_and_candidates(client, first['conversation_id'])
     assert candidates[0]["subject_speaker_id"] is None
     assert candidates[0]["visible_to_speaker_id"] == speaker_a_id
 
@@ -425,42 +429,47 @@ async def test_same_conversation_keeps_turn_order(client: AsyncClient, fake_llm:
 async def test_interrupted_reflection_can_be_retried(
     client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
 ):
-    """振り返り中に中断されても、時間が経てばやり直せる。
+    """振り返りの途中でプロセスが止められても、やり直せる。
 
-    以前は生成前に ended_at を確定し、戻すのは LLMError のときだけだったため、
-    キャンセルされると候補0件のまま再試行が409になっていた。
+    振り返りは会話後のジョブになった（フェーズ4 PR5）。中断はリクエストの
+    取り消しではなく、**ジョブの停止**で起きる。止めるときに開始権を解放
+    しないと、次に起動しても回収期限を過ぎるまで再試行できない。
     """
     first = await _say(client, "中断される会話")
     conversation_id = first["conversation_id"]
 
     fake_llm.entered.clear()
     fake_llm.gate = asyncio.Event()
-    task = asyncio.create_task(client.post(f"/api/conversations/{conversation_id}/end"))
+    accepted = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert accepted.status_code == 202
     await asyncio.wait_for(fake_llm.entered.wait(), timeout=5)
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-    fake_llm.gate.set()
 
+    # 走っている間は積み直さない。回収期限を過ぎても横取りしない。
+    async with session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        conversation.reflection_started_at = utcnow() - timedelta(hours=1)
+        await session.commit()
+    busy = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert busy.status_code == 409
+
+    # 停止する（プロセスを落とすときと同じ経路）。
+    fake_llm.gate.set()
+    fake_llm.gate = None
+    await reflection_job.shutdown()
+
+    progress = await reflection_progress(client, conversation_id)
+    assert progress["state"] == "failed"
+    assert progress["error"]
     candidates = (
         await client.get(f"/api/conversations/{conversation_id}/candidates")
     ).json()
     assert candidates == []
 
-    # 処理中の間は再試行を弾く。
-    busy = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert busy.status_code == 409
-
-    # 一定時間が過ぎたら回収できる。
-    async with session_factory() as session:
-        conversation = await session.get(Conversation, conversation_id)
-        conversation.reflection_started_at = utcnow() - timedelta(hours=1)
-        await session.commit()
-
-    fake_llm.gate = None
+    # 期限切れを待たずにやり直せる。
     fake_llm.scripted = ["[]"]
-    retried = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert retried.status_code == 200
+    retried = await end_and_wait(client, conversation_id)
+    assert retried.status_code == 202
+    assert (await reflection_progress(client, conversation_id))["state"] == "completed"
 
 
 async def test_completed_reflection_is_not_repeated(client: AsyncClient, fake_llm: FakeLLM):
@@ -469,10 +478,10 @@ async def test_completed_reflection_is_not_repeated(client: AsyncClient, fake_ll
     conversation_id = first["conversation_id"]
     fake_llm.push("[]")
     assert (
-        await client.post(f"/api/conversations/{conversation_id}/end")
-    ).status_code == 200
+        await end_and_wait(client, conversation_id)
+        ).status_code == 202
 
-    again = await client.post(f"/api/conversations/{conversation_id}/end")
+    again = await end_and_wait(client, conversation_id)
     assert again.status_code == 409
 
 
@@ -495,7 +504,7 @@ async def test_message_is_rejected_while_reflecting(
     fake_llm.gate = asyncio.Event()
     fake_llm.scripted = ["[]"]
     end_task = asyncio.create_task(
-        client.post(f"/api/conversations/{conversation_id}/end")
+        end_and_wait(client, conversation_id)
     )
     await asyncio.wait_for(fake_llm.entered.wait(), timeout=5)
 
@@ -513,7 +522,7 @@ async def test_message_is_rejected_while_reflecting(
 
     end_response = await asyncio.wait_for(end_task, timeout=10)
     chat_response = await asyncio.wait_for(chat_task, timeout=10)
-    assert end_response.status_code == 200
+    assert end_response.status_code == 202
     assert chat_response.status_code == 409
 
     detail = (await client.get(f"/api/conversations/{conversation_id}")).json()
@@ -547,7 +556,7 @@ async def test_running_reflection_is_not_reclaimed_after_stale_window(
     fake_llm.scripted = [payload, payload]
 
     running = asyncio.create_task(
-        client.post(f"/api/conversations/{conversation_id}/end")
+        end_and_wait(client, conversation_id)
     )
     await asyncio.wait_for(fake_llm.entered.wait(), timeout=5)
 
@@ -558,7 +567,7 @@ async def test_running_reflection_is_not_reclaimed_after_stale_window(
         await session.commit()
 
     second = asyncio.create_task(
-        client.post(f"/api/conversations/{conversation_id}/end")
+        end_and_wait(client, conversation_id)
     )
     await asyncio.sleep(0.05)
 
@@ -568,7 +577,7 @@ async def test_running_reflection_is_not_reclaimed_after_stale_window(
 
     first_response = await asyncio.wait_for(running, timeout=10)
     second_response = await asyncio.wait_for(second, timeout=10)
-    assert sorted([first_response.status_code, second_response.status_code]) == [200, 409]
+    assert sorted([first_response.status_code, second_response.status_code]) == [202, 409]
 
     candidates = (
         await client.get(f"/api/conversations/{conversation_id}/candidates")
@@ -587,9 +596,8 @@ async def test_unparsable_reflection_is_reported_and_retryable(
     conversation_id = first["conversation_id"]
 
     fake_llm.push("すみません、うまくまとめられませんでした。")
-    failed = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert failed.status_code == 503
-    detail = failed.json()["detail"]
+    progress = await end_and_expect_failure(client, conversation_id)
+    detail = progress["error"]
     assert "読み取れません" in detail or "見つかりません" in detail
 
     async with session_factory() as session:
@@ -604,9 +612,9 @@ async def test_unparsable_reflection_is_reported_and_retryable(
     assert resumed.status_code == 200
 
     fake_llm.push("[]")
-    retried = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert retried.status_code == 200
-    assert retried.json() == []
+    retried = await end_and_wait(client, conversation_id)
+    assert retried.status_code == 202
+    assert (await reflection_progress(client, conversation_id))["state"] == "completed"
 
 
 @pytest.mark.parametrize(
@@ -638,9 +646,8 @@ async def test_invalid_candidate_element_is_reported(
     conversation_id = first["conversation_id"]
 
     fake_llm.push(output)
-    failed = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert failed.status_code == 503
-    detail = failed.json()["detail"]
+    progress = await end_and_expect_failure(client, conversation_id)
+    detail = progress["error"]
     assert "読み取れない候補" in detail
     assert expected_reason in detail
 
@@ -651,8 +658,8 @@ async def test_invalid_candidate_element_is_reported(
 
     fake_llm.push("[]")
     assert (
-        await client.post(f"/api/conversations/{conversation_id}/end")
-    ).status_code == 200
+        await end_and_wait(client, conversation_id)
+        ).status_code == 202
 
 
 async def test_partially_invalid_candidates_fail_as_a_whole(
@@ -677,9 +684,8 @@ async def test_partially_invalid_candidates_fail_as_a_whole(
             ensure_ascii=False,
         )
     )
-    failed = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert failed.status_code == 503
-    assert "2件目" in failed.json()["detail"]
+    progress = await end_and_expect_failure(client, conversation_id)
+    assert "2件目" in progress["error"]
 
     # 有効だった候補も保存しない（部分的に採らない）。
     candidates = (
@@ -707,20 +713,22 @@ async def test_valid_candidates_are_kept(client: AsyncClient, fake_llm: FakeLLM)
             ensure_ascii=False,
         )
     )
-    response = await client.post(f"/api/conversations/{first['conversation_id']}/end")
-    assert response.status_code == 200
-    assert [c["content"] for c in response.json()] == ["ひとつめ", "ふたつめ"]
+    candidates = await end_and_candidates(client, first['conversation_id'])
+    assert [c["content"] for c in candidates] == ["ひとつめ", "ふたつめ"]
 
 
 async def test_empty_reflection_is_a_success(client: AsyncClient, fake_llm: FakeLLM):
     """残す価値が無い会話は、空の結果として正常に終了する。"""
     first = await _say(client, "とくに残すことのない雑談")
     fake_llm.push("[]")
-    response = await client.post(
-        f"/api/conversations/{first['conversation_id']}/end"
-    )
-    assert response.status_code == 200
-    assert response.json() == []
+    response = await end_and_wait(client, first['conversation_id'])
+    assert response.status_code == 202
+    # 候補は空でも、失敗ではない。やり直しの対象にもしない。
+    progress = await reflection_progress(client, first['conversation_id'])
+    assert progress["state"] == "completed"
+    assert (
+        await client.get(f"/api/conversations/{first['conversation_id']}/candidates")
+    ).json() == []
 
 
 # --- #5 未判断の候補を会話をまたいで回収できること ---------------------------
@@ -739,7 +747,7 @@ async def test_pending_candidates_survive_across_conversations(
             ensure_ascii=False,
         )
     )
-    await client.post(f"/api/conversations/{first['conversation_id']}/end")
+    await end_and_wait(client, first['conversation_id'])
 
     second = await _say(client, "ふたつめの会話")
     fake_llm.push(
@@ -750,7 +758,7 @@ async def test_pending_candidates_survive_across_conversations(
             ensure_ascii=False,
         )
     )
-    await client.post(f"/api/conversations/{second['conversation_id']}/end")
+    await end_and_wait(client, second['conversation_id'])
 
     pending = (await client.get("/api/conversations/candidates/pending")).json()
     contents = [c["content"] for c in pending]

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from httpx import AsyncClient
 
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, end_and_wait
 
 
 async def _speaker(client: AsyncClient, text: str = "こんにちは", **speaker) -> int:
@@ -214,8 +214,8 @@ async def test_reflection_creates_state_candidates(
         '{"kind":"relationship","content":"開発者とは写真の話でよく盛り上がる",'
         '"reason":"同じ話題が続いている"}]'
     )
-    ended = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert ended.status_code == 200
+    ended = await end_and_wait(client, conversation_id)
+    assert ended.status_code == 202
 
     states = (await client.get("/api/states?state_status=pending")).json()
     kinds = {s["kind"] for s in states}
@@ -240,13 +240,15 @@ async def test_state_extraction_failure_can_be_retried(
 
     fake_llm.push("[]")
     fake_llm.push_state("関心はありません")
-    failed = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert failed.status_code == 503
-    assert "状態の更新候補" in failed.json()["detail"]
+    # 失敗はジョブの中で起きる。終了は受け付けたうえで、理由を進行状態に残す。
+    assert (await end_and_wait(client, conversation_id)).status_code == 202
+    progress = (await client.get(f"/api/conversations/{conversation_id}/reflection")).json()
+    assert progress["state"] == "failed"
+    assert "状態の更新候補" in progress["error"]
 
     fake_llm.push("[]")
     fake_llm.push_state("[]")
-    assert (await client.post(f"/api/conversations/{conversation_id}/end")).status_code == 200
+    assert (await end_and_wait(client, conversation_id)).status_code == 202
 
 
 async def test_no_state_candidates_when_the_partner_is_unclear(

@@ -218,6 +218,13 @@ export default function App() {
             refreshCandidates();
             setTab("candidates");
           }}
+          onReflectionFailed={(token) => {
+            // 振り返りに失敗した会話は、終了していない。読み取り専用のままだと
+            // その場でやり直せないので、続けられる状態へ戻す
+            // （第2回レビューの指摘1）。開始権はジョブ側で解放済み。
+            if (token === viewRef.current) setConversation("open");
+            setHistoryRefresh((n) => n + 1);
+          }}
           onNewConversation={startNewConversation}
         />
 

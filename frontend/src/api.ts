@@ -11,6 +11,7 @@ import type {
   Memory,
   MemoryCandidate,
   MemoryRevision,
+  ReflectionProgress,
   Message,
   CharacterState,
   Goal,
@@ -69,10 +70,15 @@ export const api = {
   conversation: (conversationId: number) =>
     request<ConversationDetail>(`/conversations/${conversationId}`),
 
+  /** 会話を終了し、振り返りのジョブを積む。**結果は待たない。** */
   endConversation: (conversationId: number) =>
-    request<MemoryCandidate[]>(`/conversations/${conversationId}/end`, {
+    request<ReflectionProgress>(`/conversations/${conversationId}/end`, {
       method: "POST",
     }),
+
+  /** 振り返りの進み具合。終わったら候補を取りに行く。 */
+  reflection: (conversationId: number) =>
+    request<ReflectionProgress>(`/conversations/${conversationId}/reflection`),
 
   candidates: (conversationId: number) =>
     request<MemoryCandidate[]>(`/conversations/${conversationId}/candidates`),

@@ -12,16 +12,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import MemoryCandidate, Provenance
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, end_and_wait
 
 
 async def _talk_and_reflect(client: AsyncClient, fake_llm: FakeLLM, text: str, output: str):
     first = await client.post("/api/chat", json={"text": text})
     conversation_id = first.json()["conversation_id"]
     fake_llm.push(output)
-    ended = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert ended.status_code == 200, ended.text
-    return ended.json()
+    ended = await end_and_wait(client, conversation_id)
+    assert ended.status_code == 202, ended.text
+    return (await client.get(f"/api/conversations/{conversation_id}/candidates")).json()
 
 
 async def test_hearsay_is_not_attached_to_the_partner(
@@ -81,9 +81,13 @@ async def test_invalid_provenance_fails_the_whole_reflection(
     fake_llm.push(
         '[{"kind":"experience","content":"何か","provenance":"聞いた話"}]'
     )
-    failed = await client.post(f"/api/conversations/{conversation_id}/end")
-    assert failed.status_code == 503
-    assert "入手経路が不正" in failed.json()["detail"]
+    # 抽出はジョブの中で失敗する。終了そのものは受け付けたうえで、失敗の理由を
+    # 進行状態から見る（フェーズ4 PR5）。
+    accepted = await end_and_wait(client, conversation_id)
+    assert accepted.status_code == 202
+    progress = (await client.get(f"/api/conversations/{conversation_id}/reflection")).json()
+    assert progress["state"] == "failed"
+    assert "入手経路が不正" in progress["error"]
 
 
 async def test_accepted_candidate_keeps_its_provenance(

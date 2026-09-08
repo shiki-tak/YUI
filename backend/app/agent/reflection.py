@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, time
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -26,6 +27,7 @@ from app.models import (
     MemoryKind,
     Message,
     Provenance,
+    ReflectionStep,
     SpeakerKind,
     Visibility,
     utcnow,
@@ -364,6 +366,7 @@ async def extract_candidates(
     conversation: Conversation,
     character_name: str,
     now: datetime | None = None,
+    on_step: Callable[[str], Awaitable[None]] | None = None,
 ) -> list[MemoryCandidate]:
     """会話から記憶の候補を作る。**セッションへは入れない。**
 
@@ -372,6 +375,10 @@ async def extract_candidates(
     記憶の訂正が「database is locked」で失敗する。また、途中で失敗したときに
     一部だけ保存された状態を残さないためでもある（フェーズ3全体レビューの
     指摘4・5）。保存は呼び出し側が、すべて成功してからまとめて行う。
+
+    on_step は、どの段階に入ったかを呼び出し側へ伝える。待ち時間の大半は
+    2段階目にあり（実測で拾う3.9秒・選ぶ16.5秒）、まとめて「処理中」とだけ
+    出すと、止まっているのか進んでいるのかが分からない。
     """
     stmt = (
         select(Message)
@@ -403,6 +410,8 @@ async def extract_candidates(
 
     # 1段階目：拾う。残すかどうかを判断させない。1回の呼び出しで「拾う」と
     # 「選ぶ」を同時にさせると、種類によっては一度も挙がらなかった（ISSUE-021）。
+    if on_step is not None:
+        await on_step(ReflectionStep.PICKING.value)
     picked = await llm.chat(
         [
             ChatMessage(role="system", content=_PICKUP_INSTRUCTION),
@@ -415,6 +424,8 @@ async def extract_candidates(
         return []
 
     # 2段階目：選ぶ。拾ったものだけを見て、残すものを決める。
+    if on_step is not None:
+        await on_step(ReflectionStep.SELECTING.value)
     response = await llm.chat(
         [
             ChatMessage(role="system", content=_INSTRUCTION),
