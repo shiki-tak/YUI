@@ -211,12 +211,29 @@ export const VISIBILITY_LABEL: Record<Visibility, string> = {
   public: "配信で使える",
 };
 
-/** この画面を使っている相手。表示名ではなく source と external_id で同定する。 */
-export const SELF_SPEAKER = {
-  source: "local",
-  external_id: "developer",
-  display_name: "開発者",
-} as const;
+/** 誰として話すか。表示名ではなく source と external_id で同定する。 */
+export interface SpeakerRef {
+  source: string;
+  external_id: string;
+  display_name: string;
+}
+
+/**
+ * 開発用画面から話せる相手。複数人の会話を別々に覚えているかを確かめるため、
+ * 送信ごとに選べるようにしている（設計書フェーズ3の3C）。
+ *
+ * shiki の external_id が developer なのは、これまでの会話・記憶がその識別子に
+ * 紐づいているため。同定は source と external_id で行うので、表示名だけを
+ * 変えても過去の記憶との対応は切れない。
+ */
+export const SPEAKERS: readonly SpeakerRef[] = [
+  { source: "local", external_id: "developer", display_name: "shiki" },
+  { source: "local", external_id: "alice", display_name: "alice" },
+  { source: "local", external_id: "bob", display_name: "bob" },
+];
+
+/** 既定の相手。画面を開いた直後はこの相手として話す。 */
+export const SELF_SPEAKER = SPEAKERS[0];
 
 /** 会話が続けられるか。終了済み・振り返り中は読み取り専用として開く。 */
 export type ConversationState = "open" | "reflecting" | "ended";

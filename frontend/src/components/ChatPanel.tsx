@@ -7,12 +7,14 @@ import type {
   Message,
   RetrievedMemory,
   RunRecord,
+  SpeakerRef,
   SpeechRun,
 } from "../types";
 import {
   CERTAINTY_LABEL,
   DELIVERY_LABEL,
   KIND_LABEL,
+  SPEAKERS,
   formatDateTime,
 } from "../types";
 import type { ClientSpeechTiming, SpeechPlayer } from "../useSpeechPlayer";
@@ -31,6 +33,11 @@ interface Props {
   speechAvailable: boolean;
   /** 読み上げの再生器。アバターと共有するため App が持つ。 */
   player: SpeechPlayer;
+  /** いま誰として話すか。1つの会話に複数の相手を入れられるようにする。 */
+  speaker: SpeakerRef;
+  onSpeakerChange: (speaker: SpeakerRef) => void;
+  /** 発言者IDと表示名の対応。誰の発言かを会話欄に出すために使う。 */
+  speakerNames: Record<number, string>;
   /** 表示している会話の世代。結果を反映してよいかの判定に使う。 */
   view: number;
   /** 返答を画面へ反映する。世代が変わっていれば false を返す。 */
@@ -48,6 +55,9 @@ export function ChatPanel({
   loading,
   speechAvailable,
   player,
+  speaker,
+  onSpeakerChange,
+  speakerNames,
   view,
   onEntry,
   onEnded,
@@ -95,7 +105,7 @@ export function ChatPanel({
     const sentView = view;
     try {
       const sentAt = performance.now();
-      const entry = await api.chat(trimmed, conversationId);
+      const entry = await api.chat(trimmed, conversationId, speaker);
       const roundTrip = Math.round(performance.now() - sentAt);
       setChatMs((prev) => ({ ...prev, [entry.reply.id]: roundTrip }));
       setText("");
@@ -180,8 +190,15 @@ export function ChatPanel({
         )}
         {messages.map((message) =>
           message.speaker_kind === "user" ? (
-            <div key={message.id} className="bubble user" title={formatDateTime(message.created_at)}>
-              {message.content}
+            <div key={message.id} className="turn user">
+              {/* 誰の発言かを出す。複数人の会話では本文だけでは追えない。 */}
+              <div className="speaker-name">
+                {(message.speaker_id !== null && speakerNames[message.speaker_id]) ||
+                  "相手"}
+              </div>
+              <div className="bubble user" title={formatDateTime(message.created_at)}>
+                {message.content}
+              </div>
             </div>
           ) : (
             <ReplyTurn
@@ -210,6 +227,24 @@ export function ChatPanel({
       )}
 
       <div className="composer">
+        <label className="speaker-select">
+          <span className="muted small">話しているのは</span>
+          <select
+            value={speaker.external_id}
+            onChange={(e) => {
+              const next = SPEAKERS.find((s) => s.external_id === e.target.value);
+              if (next) onSpeakerChange(next);
+            }}
+            disabled={busy || readOnly || loading}
+            title="この発言を誰のものとして送るかを選びます"
+          >
+            {SPEAKERS.map((option) => (
+              <option key={option.external_id} value={option.external_id}>
+                {option.display_name}
+              </option>
+            ))}
+          </select>
+        </label>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}

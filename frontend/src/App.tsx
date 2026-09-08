@@ -12,6 +12,7 @@ import type {
   Health,
   MemoryCandidate,
   Message,
+  SpeakerRef,
 } from "./types";
 import { SELF_SPEAKER, conversationState, shouldApplyDelivery } from "./types";
 import { useSpeechPlayer } from "./useSpeechPlayer";
@@ -38,8 +39,19 @@ export default function App() {
   const [memoryRefresh, setMemoryRefresh] = useState(0);
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  // 記憶検索を会話と同じ条件で行うために、自分の speaker id を解決する。
-  const [selfSpeakerId, setSelfSpeakerId] = useState<number | null>(null);
+  // いま誰として話すか。同じ会話へ別の相手を入れて、記憶を別々に持てて
+  // いるかを確かめられるようにする（設計書フェーズ3の3C）。
+  const [speaker, setSpeaker] = useState<SpeakerRef>(SELF_SPEAKER);
+  // 相手の識別子（source/external_id）と、保存された speaker id の対応。
+  // 記憶検索を会話と同じ条件で行うために使う。
+  const [speakerIds, setSpeakerIds] = useState<Record<string, number>>({});
+  // 発言者IDと表示名の対応。誰の発言かを会話欄に出すために使う。
+  const [speakerNames, setSpeakerNames] = useState<Record<number, string>>({});
+
+  const speakerKey = (ref: { source: string; external_id: string }) =>
+    `${ref.source}:${ref.external_id}`;
+  // 選んでいる相手の speaker id。まだ一度も話していない相手は null。
+  const selfSpeakerId = speakerIds[speakerKey(speaker)] ?? null;
 
   // 表示している会話の世代。切り替えるたびに進める。送信・履歴の読み込み・
   // 終了の結果は、始めたときの世代がいまも一致するときだけ反映する。
@@ -68,22 +80,30 @@ export default function App() {
   // 会話欄とアバターの両方が見るため、再生器はここで持つ。
   const player = useSpeechPlayer(applyDelivery);
 
+  // 保存済みの相手を読み直す。過去の会話を開いたときにも、誰の発言かを
+  // 名前で出せるようにする。
+  const loadSpeakers = useCallback(async () => {
+    try {
+      const speakers = await api.speakers();
+      setSpeakerIds(
+        Object.fromEntries(
+          speakers.map((s) => [`${s.source}:${s.external_id}`, s.id]),
+        ),
+      );
+      setSpeakerNames(
+        Object.fromEntries(speakers.map((s) => [s.id, s.display_name])),
+      );
+    } catch {
+      // 読めなくても会話はできる。名前の代わりに「相手」と出す。
+    }
+  }, []);
+
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null));
-    api
-      .speakers()
-      .then((speakers) => {
-        const self = speakers.find(
-          (s) =>
-            s.source === SELF_SPEAKER.source &&
-            s.external_id === SELF_SPEAKER.external_id,
-        );
-        setSelfSpeakerId(self ? self.id : null);
-      })
-      .catch(() => setSelfSpeakerId(null));
+    void loadSpeakers();
     // 前回の会話で出た未判断の候補を拾い直す。
     api.pendingCandidates().then(setCandidates).catch(() => setCandidates([]));
-  }, []);
+  }, [loadSpeakers]);
 
   // 判断済みの候補は一覧から外し、残りだけを見せる。
   const refreshCandidates = () => {
@@ -106,6 +126,8 @@ export default function App() {
       setConversationId(detail.id);
       setMessages(detail.messages);
       setConversation(conversationState(detail));
+      // この会話に出てくる相手の名前を出せるようにする。
+      void loadSpeakers();
     } catch (e) {
       if (token !== viewRef.current) return;
       setHistoryError(e instanceof Error ? e.message : String(e));
@@ -160,6 +182,9 @@ export default function App() {
           loading={loadingConversation}
           speechAvailable={speechAvailable}
           player={player}
+          speaker={speaker}
+          onSpeakerChange={setSpeaker}
+          speakerNames={speakerNames}
           view={view}
           onEntry={(entry, token) => {
             // 待っている間に別の会話へ移っていたら、この画面には出さない。
@@ -175,9 +200,11 @@ export default function App() {
             setConversation("open");
             // 新しい会話が作られたときだけ一覧を取り直す。
             if (isNew) setHistoryRefresh((n) => n + 1);
-            if (selfSpeakerId === null) {
-              // 初回の会話で相手が作られるので、ここで解決しておく。
-              setSelfSpeakerId(entry.user_message.speaker_id);
+            // 初めて話した相手はこの時点で作られる。ここで対応を覚えておく。
+            const id = entry.user_message.speaker_id;
+            if (id !== null) {
+              setSpeakerIds((prev) => ({ ...prev, [speakerKey(speaker)]: id }));
+              setSpeakerNames((prev) => ({ ...prev, [id]: speaker.display_name }));
             }
             return true;
           }}

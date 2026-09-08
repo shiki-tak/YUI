@@ -286,3 +286,79 @@ describe("再生の記録の反映", () => {
     expect(shouldApplyDelivery("playing", "playing")).toBe(true);
   });
 });
+
+describe("誰として話すか", () => {
+  /** 会話欄に出ている発言者の名前。選択肢の名前と混ざらないように絞る。 */
+  const shownNames = () =>
+    Array.from(document.querySelectorAll(".speaker-name")).map(
+      (el) => el.textContent,
+    );
+
+  it("選んだ相手として送り、発言者の名前を会話欄に出す", async () => {
+    // alice はまだ保存されていない。初回の送信で作られる。
+    vi.spyOn(api, "speakers").mockResolvedValue([
+      {
+        id: 1,
+        source: "local",
+        external_id: "developer",
+        display_name: "shiki",
+      },
+    ]);
+    const chat = vi.spyOn(api, "chat").mockResolvedValue({
+      ...chatResponse(),
+      user_message: { ...message(20, "user", "はじめまして"), speaker_id: 2 },
+    });
+
+    render(<App />);
+    await screen.findByText(/人格 YUI/);
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "alice" } });
+    fireEvent.change(screen.getByPlaceholderText(/話しかける/), {
+      target: { value: "はじめまして" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "送信" }));
+
+    await screen.findByText("はじめまして");
+    // 既定の相手ではなく、選んだ相手として送る。
+    expect(chat).toHaveBeenCalledWith("はじめまして", null, {
+      source: "local",
+      external_id: "alice",
+      display_name: "alice",
+    });
+    // 初めて話した相手も、名前で表示できる。
+    await waitFor(() => expect(shownNames()).toEqual(["alice"]));
+  });
+
+  it("保存済みの会話でも、発言ごとに誰の発言かを出す", async () => {
+    vi.spyOn(api, "speakers").mockResolvedValue([
+      {
+        id: 1,
+        source: "local",
+        external_id: "developer",
+        display_name: "shiki",
+      },
+      {
+        id: 2,
+        source: "local",
+        external_id: "bob",
+        display_name: "bob",
+      },
+    ]);
+    vi.spyOn(api, "conversation").mockResolvedValue({
+      ...CONVERSATIONS[0],
+      messages: [
+        message(10, "user", "shiki の発言"),
+        { ...message(11, "user", "bob の発言"), speaker_id: 2 },
+      ],
+    });
+
+    render(<App />);
+    await screen.findByText(/人格 YUI/);
+    fireEvent.click(screen.getByRole("button", { name: "会話履歴" }));
+    fireEvent.click(await screen.findByRole("button", { name: "開いて続ける" }));
+
+    await screen.findByText("bob の発言");
+    // 同じ会話に2人いても、どちらの発言かが順に読める。
+    await waitFor(() => expect(shownNames()).toEqual(["shiki", "bob"]));
+  });
+});

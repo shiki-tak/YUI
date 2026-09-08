@@ -16,6 +16,7 @@ import type {
   RetrievedMemory,
   RunRecord,
   Speaker,
+  SpeakerRef,
   SpeechRun,
 } from "./types";
 
@@ -40,14 +41,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>("/health"),
 
-  chat: (text: string, conversationId: number | null) =>
+  chat: (
+    text: string,
+    conversationId: number | null,
+    speaker: SpeakerRef = SELF_SPEAKER,
+  ) =>
     request<ChatResponse>("/chat", {
       method: "POST",
       // 誰として話しているかを明示する。バックエンドの既定に頼らない。
       body: JSON.stringify({
         text,
         conversation_id: conversationId,
-        speaker: SELF_SPEAKER,
+        speaker,
       }),
     }),
 

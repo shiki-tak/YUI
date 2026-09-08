@@ -194,15 +194,48 @@ body {
 }
 
 .composer {
-  display: flex;
+  /* 話者の選択を1行目に置き、2行目を入力欄と送信にする。 */
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "speaker speaker"
+    "text send";
   gap: 8px;
   padding: 12px 14px;
   border-top: 1px solid var(--line);
 }
 
 .composer textarea {
-  flex: 1;
+  grid-area: text;
   resize: vertical;
+}
+
+.composer > button {
+  grid-area: send;
+}
+
+/* 誰として話すか。複数人の会話を1つの会話に入れて確かめるために使う。 */
+.speaker-select {
+  grid-area: speaker;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.speaker-select select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+/* 発言者の名前。相手の吹き出しに合わせて右側へ寄せる。 */
+.speaker-name {
+  margin-left: 20%;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 textarea,
