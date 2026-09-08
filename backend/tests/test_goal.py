@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -422,3 +423,166 @@ async def test_a_public_goal_about_someone_stays_with_that_person(
         ) == []
         for_alice = await active_goals(session, speaker_id=alice.id, mode=on_stream)
         assert [g.content for g in for_alice] == ["アリスに配信で感想を聞く"]
+
+
+# --- 訂正の波及（PR2）------------------------------------------------------
+#
+# 記憶を訂正・削除・復元する経路が、目標にも印を付けることを見る。判定の規則
+# そのもの（記憶ID・会話単位・暫定の根拠・撤回中）は上の
+# test_correcting_the_basis_marks_the_goal で確かめている。ここで見るのは
+# **経路が波及を通っているか**で、フェーズ3で3回続けて漏れたのはこちら。
+
+
+async def _memory(client: AsyncClient, content: str, keywords: str = "映画") -> dict:
+    response = await client.post(
+        "/api/memories",
+        json={
+            "kind": "experience",
+            "content": content,
+            "keywords": keywords,
+            "visible_to_all": True,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def test_correcting_a_memory_marks_both_the_state_and_the_goal(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """記憶の訂正が、関心・関係性と目標の**両方**へ届く。
+
+    どちらか一方だけを呼ぶ経路を作らないため、派生物への波及は
+    mark_derived_for_review に集めている。片方だけが印なしで残ると、訂正が
+    反映されていない前提のまま会話・行動に使われる。
+    """
+    memory = await _memory(client, "週末に映画を見に行くと言っていた")
+    state = (
+        await client.post(
+            "/api/states",
+            json={
+                "kind": "interest",
+                "content": "映画の話が続くと嬉しい",
+                "topic": "映画",
+                "basis_memory_ids": [memory["id"]],
+                "visible_to_all": True,
+            },
+        )
+    ).json()
+    await client.post(f"/api/states/{state['id']}/decide", json={"decision": "accept"})
+
+    async with session_factory() as session:
+        goal = await create_goal(
+            session,
+            content="週末に見た映画の感想を聞く",
+            basis_memory_ids=[memory["id"]],
+            status=GoalStatus.ACTIVE.value,
+        )
+        await session.commit()
+        goal_id = goal.id
+
+    await client.patch(
+        f"/api/memories/{memory['id']}",
+        json={"content": "週末に美術館に行くと言っていた", "reason": "聞き違いだった"},
+    )
+
+    marked_states = (await client.get("/api/states?needs_review=true")).json()
+    assert [s["id"] for s in marked_states] == [state["id"]]
+
+    async with session_factory() as session:
+        stored = await session.get(Goal, goal_id)
+        assert stored.needs_review is True
+        assert "訂正された" in stored.review_reason
+        # 印が付いている間は行動選択へ渡さない。
+        assert await active_goals(session, speaker_id=None) == []
+
+
+async def test_deleting_and_restoring_a_memory_marks_the_goal(
+    client: AsyncClient, session_factory: async_sessionmaker
+) -> None:
+    """削除と復元も根拠の変更として扱う。
+
+    復元を波及の対象から外すと、訂正に合わせて印を付けた目標が、根拠が元へ
+    戻ったあとも古い理由の印を持ったままになる。
+    """
+    memory = await _memory(client, "土曜に映画を見ると言っていた")
+    async with session_factory() as session:
+        goal = await create_goal(
+            session,
+            content="土曜の映画の感想を聞く",
+            basis_memory_ids=[memory["id"]],
+            status=GoalStatus.ACTIVE.value,
+        )
+        await session.commit()
+        goal_id = goal.id
+
+    await client.delete(f"/api/memories/{memory['id']}")
+    async with session_factory() as session:
+        stored = await session.get(Goal, goal_id)
+        assert stored.needs_review is True
+        assert "削除された" in stored.review_reason
+        # 確認したことにして印を外す。復元でもう一度付くことを見るため。
+        stored.needs_review = False
+        stored.review_reason = None
+        await session.commit()
+
+    await client.post(f"/api/memories/{memory['id']}/restore")
+    async with session_factory() as session:
+        stored = await session.get(Goal, goal_id)
+        assert stored.needs_review is True
+        assert "復元された" in stored.review_reason
+
+
+async def test_the_evaluation_path_marks_the_goal(session_factory: async_sessionmaker) -> None:
+    """評価の訂正・削除も、API と同じ波及を通る。
+
+    評価のためだけの近道を作ると、実際の経路と違うものを測ることになる。
+    完了条件4は評価シナリオで測るため、ここがずれると測定そのものが嘘になる。
+    """
+    from app.agent.memory_store import create_memory
+    from app.evaluation.steps import correct_memory, delete_memory
+
+    async with session_factory() as session:
+        conversation = await _conversation(session)
+        basis = await create_memory(
+            session,
+            kind="experience",
+            content="日曜に映画を見ると言っていた",
+            keywords="映画",
+            source_conversation_id=conversation.id,
+        )
+        await create_memory(
+            session,
+            kind="experience",
+            content="来月に旅行へ行くと言っていた",
+            keywords="旅行",
+            source_conversation_id=conversation.id,
+        )
+        by_id = await create_goal(
+            session,
+            content="日曜の映画の感想を聞く",
+            basis_memory_ids=[basis.id],
+            status=GoalStatus.ACTIVE.value,
+        )
+        # 根拠をまだ持たない候補は、会話単位で拾う。振り返りが作った候補は
+        # 記憶が採用される前なので、記憶IDを持てない。
+        by_conversation = await create_goal(
+            session, content="旅行の話の続きを聞く", source_conversation_id=conversation.id
+        )
+        await session.commit()
+
+        assert await correct_memory(
+            session, match="日曜に映画", content="日曜に美術館へ行くと言っていた"
+        )
+        await session.refresh(by_id)
+        await session.refresh(by_conversation)
+        assert by_id.needs_review is True
+        assert by_conversation.needs_review is True
+
+        by_conversation.needs_review = False
+        await session.commit()
+
+        assert await delete_memory(session, match="来月に旅行")
+        await session.refresh(by_conversation)
+        assert by_conversation.needs_review is True
+        assert "削除された" in by_conversation.review_reason

@@ -5,7 +5,7 @@
 振り返り・採用・訂正・再起動を会話の途中に挟めるようにする。
 
 採用と訂正は、API と同じ処理（`create_memory`・`record_revision`・
-`mark_for_review`）を呼ぶ。評価のためだけの近道を作ると、実際の経路と
+`mark_derived_for_review`）を呼ぶ。評価のためだけの近道を作ると、実際の経路と
 違うものを測ることになる。
 """
 
@@ -17,9 +17,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.agent.character_state import active_states, create_state, mark_for_review
+from app.agent.character_state import active_states, create_state
 from app.agent.character_state import record_revision as state_revision
 from app.agent.character_state import snapshot as state_snapshot
+from app.agent.derived import mark_derived_for_review
 from app.agent.memory_store import create_memory, record_revision, snapshot
 from app.agent.reflection import extract_candidates, format_transcript
 from app.agent.state_reflection import propose_state_candidates
@@ -192,7 +193,7 @@ async def correct_memory(session: AsyncSession, *, match: str, content: str) -> 
     memory.content = content
     await session.flush()
     record_revision(session, memory, action="corrected", before=before, reason="評価用会話で訂正")
-    await mark_for_review(
+    await mark_derived_for_review(
         session,
         memory_id=memory.id,
         reason=f"根拠にした記憶 #{memory.id} が訂正された",
@@ -211,7 +212,7 @@ async def delete_memory(session: AsyncSession, *, match: str) -> Memory | None:
     memory.status = MemoryStatus.DELETED.value
     await session.flush()
     record_revision(session, memory, action="deleted", before=before, reason="評価用会話で削除")
-    await mark_for_review(
+    await mark_derived_for_review(
         session,
         memory_id=memory.id,
         reason=f"根拠にした記憶 #{memory.id} が削除された",
