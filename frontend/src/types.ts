@@ -199,7 +199,7 @@ export interface ReflectionProgress {
   conversation_id: number;
   state: "running" | "completed" | "failed" | "idle";
   /** いまどこを処理しているか。段階ごとに待ち時間が大きく違う。 */
-  step: "picking" | "selecting" | "states" | "saving" | null;
+  step: "picking" | "selecting" | "states" | "goals" | "saving" | null;
   error: string | null;
   started_at: string | null;
   completed_at: string | null;

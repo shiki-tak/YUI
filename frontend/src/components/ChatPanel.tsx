@@ -58,6 +58,7 @@ const REFLECTION_STEP_LABEL: Record<
   picking: "話に出たことを拾っています",
   selecting: "覚えておくものを選んでいます",
   states: "関心と関係を見直しています",
+  goals: "次に話したいことを考えています",
   saving: "保存しています",
 };
 

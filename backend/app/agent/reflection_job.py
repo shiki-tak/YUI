@@ -24,15 +24,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from app.agent.character_state import active_states, create_state
+from app.agent.goal import create_goal, list_goals
+from app.agent.goal_reflection import GoalReflectionError, propose_goal_candidates
 from app.agent.reflection import (
     ReflectionParseError,
     extract_candidates,
     format_transcript,
 )
 from app.agent.state_reflection import StateReflectionError, propose_state_candidates
+from app.config import LOCAL_TZ
 from app.llm.base import LLMClient, LLMError
 from app.models import (
     Conversation,
+    GoalStatus,
     Message,
     ReflectionStep,
     Speaker,
@@ -147,7 +151,12 @@ async def run_reflection(
         # reflection_stale_seconds を過ぎるまでやり直せない。
         await _release(factory, conversation_id, "処理が中断されました。")
         raise
-    except (LLMError, ReflectionParseError, StateReflectionError) as exc:
+    except (
+        LLMError,
+        ReflectionParseError,
+        StateReflectionError,
+        GoalReflectionError,
+    ) as exc:
         # 抽出できなかった会話を処理中のまま残すと、やり直せない。特に出力の
         # 解析失敗は「候補なしの成功」と区別する必要がある。
         logger.warning("会話 #%s の振り返りに失敗しました: %s", conversation_id, exc)
@@ -178,6 +187,13 @@ async def _run(
         current_states = await active_states(
             session, speaker_id=partner_id, mode=conversation.mode
         )
+        # いまある目標。同じ内容を重ねて出さないために渡す。終わったものは
+        # 除く（達成した目標を、もう一度作らせないため）。
+        current_goals = [
+            goal
+            for goal in await list_goals(session, subject_speaker_id=partner_id)
+            if goal.status in {GoalStatus.PENDING.value, GoalStatus.ACTIVE.value}
+        ]
         transcript = format_transcript(messages, character_name)
 
     async def step(name: str) -> None:
@@ -204,8 +220,20 @@ async def _run(
         current_states=current_states,
     )
 
+    await step(ReflectionStep.GOALS.value)
+    # 目標も別の呼び出しで作る。記憶・関心と混ぜない（ISSUE-017 の教訓）。
+    goal_payloads = await propose_goal_candidates(
+        llm=llm,
+        transcript=transcript,
+        partner_speaker_id=partner_id,
+        current_goals=current_goals,
+        today=utcnow().astimezone(LOCAL_TZ).date(),
+    )
+
     await step(ReflectionStep.SAVING.value)
-    await _save(factory, conversation_id, candidates, state_payloads, partner_id)
+    await _save(
+        factory, conversation_id, candidates, state_payloads, goal_payloads, partner_id
+    )
     logger.info(
         "会話 #%s の振り返りが完了しました（候補 %s 件）", conversation_id, len(candidates)
     )
@@ -216,6 +244,7 @@ async def _save(
     conversation_id: int,
     candidates: list,
     state_payloads: list,
+    goal_payloads: list,
     partner_id: int | None,
 ) -> None:
     """抽出がすべて成功したものを、1つのトランザクションで書く。"""
@@ -234,6 +263,20 @@ async def _save(
                 source_conversation_id=conversation_id,
                 status=StateStatus.PENDING.value,
                 reason=payload.reason or "会話の振り返りから",
+            )
+        for goal_payload in goal_payloads:
+            trigger, due_at = goal_payload.schedule()
+            await create_goal(
+                session,
+                content=goal_payload.content,
+                subject_speaker_id=partner_id,
+                trigger=trigger,
+                due_at=due_at,
+                # 非公開の会話から作った目標は、その相手との会話に限る。
+                visible_to_speaker_id=partner_id,
+                source_conversation_id=conversation_id,
+                status=GoalStatus.PENDING.value,
+                reason=goal_payload.reason or "会話の振り返りから",
             )
         completed = utcnow()
         await session.execute(

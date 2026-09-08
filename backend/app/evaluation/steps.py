@@ -22,11 +22,14 @@ from app.agent.character_state import active_states, create_state
 from app.agent.character_state import record_revision as state_revision
 from app.agent.character_state import snapshot as state_snapshot
 from app.agent.derived import mark_derived_for_review
+from app.agent.goal import create_goal, list_goals
 from app.agent.goal import record_revision as goal_revision
 from app.agent.goal import snapshot as goal_snapshot
+from app.agent.goal_reflection import propose_goal_candidates
 from app.agent.memory_store import create_memory, record_revision, snapshot
 from app.agent.reflection import extract_candidates, format_transcript
 from app.agent.state_reflection import propose_state_candidates
+from app.config import LOCAL_TZ
 from app.evaluation.scenario import StepSpec
 from app.llm.base import LLMClient
 from app.models import (
@@ -42,6 +45,7 @@ from app.models import (
     SpeakerKind,
     StateKind,
     StateStatus,
+    utcnow,
 )
 
 
@@ -110,11 +114,26 @@ async def run_reflection(
         # 時間を進めた評価では、進めた側の日付で「昨日」「先週」を解釈させる。
         now=now,
     )
+    transcript = format_transcript(messages, character_name)
     state_payloads = await propose_state_candidates(
         llm=llm,
-        transcript=format_transcript(messages, character_name),
+        transcript=transcript,
         partner_speaker_id=partner_id,
         current_states=current_states,
+    )
+    # 目標の抽出も、API と同じく別の呼び出しで行う。評価だけ経路が欠けると、
+    # 完了条件1（自分から質問できる）を抽出から測れない。
+    goal_payloads = await propose_goal_candidates(
+        llm=llm,
+        transcript=transcript,
+        partner_speaker_id=partner_id,
+        current_goals=[
+            goal
+            for goal in await list_goals(session, subject_speaker_id=partner_id)
+            if goal.status in {GoalStatus.PENDING.value, GoalStatus.ACTIVE.value}
+        ],
+        # 時間を進めた評価では、進めた側の日付で予定を数えさせる。
+        today=(now or utcnow()).astimezone(LOCAL_TZ).date(),
     )
 
     session.add_all(candidates)
@@ -134,9 +153,25 @@ async def run_reflection(
                 reason=payload.reason or "会話の振り返りから",
             )
         )
+    goals: list[Goal] = []
+    for goal_payload in goal_payloads:
+        trigger, due_at = goal_payload.schedule()
+        goals.append(
+            await create_goal(
+                session,
+                content=goal_payload.content,
+                subject_speaker_id=partner_id,
+                trigger=trigger,
+                due_at=due_at,
+                visible_to_speaker_id=partner_id,
+                source_conversation_id=conversation.id,
+                status=GoalStatus.PENDING.value,
+                reason=goal_payload.reason or "会話の振り返りから",
+            )
+        )
     await session.flush()
 
-    outcome = ReflectOutcome(candidates=candidates, states=states)
+    outcome = ReflectOutcome(candidates=candidates, states=states, goals=goals)
     if not step.accept:
         await session.commit()
         return outcome

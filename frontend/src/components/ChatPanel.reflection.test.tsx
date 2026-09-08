@@ -76,6 +76,9 @@ describe("会話の終了と振り返り", () => {
     vi.spyOn(api, "reflection")
       .mockResolvedValueOnce(progress({ step: "picking" }))
       .mockResolvedValueOnce(progress({ step: "selecting" }))
+      // 4回目の呼び出し（目標の抽出）も段階として出す。ラベルが無いと
+      // 「振り返っています：」だけになる（PR6 の第1回レビューの指摘4）。
+      .mockResolvedValueOnce(progress({ step: "goals" }))
       .mockResolvedValue(progress({ state: "completed", step: null }));
 
     const { onEnded } = renderPanel();
@@ -83,6 +86,7 @@ describe("会話の終了と振り返り", () => {
 
     expect(await screen.findByText(/話に出たことを拾っています/)).toBeInTheDocument();
     expect(await screen.findByText(/覚えておくものを選んでいます/)).toBeInTheDocument();
+    expect(await screen.findByText(/次に話したいことを考えています/)).toBeInTheDocument();
     // 終わってから、候補の取り直しへ進む。
     await waitFor(() => expect(onEnded).toHaveBeenCalled());
   });

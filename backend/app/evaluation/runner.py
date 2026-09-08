@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
 from app.agent.goal import create_goal
+from app.agent.goal_reflection import GoalReflectionError
 from app.agent.memory_store import create_memory, get_or_create_speaker
 from app.agent.reflection import ReflectionParseError
 from app.agent.state_reflection import StateReflectionError
@@ -507,6 +508,7 @@ async def run_attempt(
                             LLMError,
                             ReflectionParseError,
                             StateReflectionError,
+                            GoalReflectionError,
                         ) as exc:
                             # 1回の失敗で評価全体を止めない。失敗として記録し、
                             # この試行だけを終える（第6回レビューの指摘1）。
@@ -663,7 +665,10 @@ def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResu
         result.candidates.append(f"[状態／{state.kind}／{mark}] {state.content}")
     for goal in outcome.goals:
         mark = "採用" if goal in outcome.accepted_goals else "候補"
-        result.candidates.append(f"[目標／{goal.trigger}／{mark}] {goal.content}")
+        # 基準日時も出す。本文だけでは、いつから聞ける目標なのかを読み手が
+        # 確かめられない（第1回レビュー）。表示は地域時刻に直す。
+        due = f"／{to_local(goal.due_at).strftime('%Y-%m-%d %H:%M')}" if goal.due_at else ""
+        result.candidates.append(f"[目標／{goal.trigger}{due}／{mark}] {goal.content}")
 
     if step.expect_goal_any:
         joined = "\n".join(goal.content for goal in outcome.goals)

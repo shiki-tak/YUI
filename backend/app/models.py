@@ -169,6 +169,7 @@ class ReflectionStep(StrEnum):
     PICKING = "picking"  # 会話から、後で話題にできそうな内容を拾う
     SELECTING = "selecting"  # 拾ったものから、長期的に覚えるものを選ぶ
     STATES = "states"  # 関心・関係性の更新候補を作る
+    GOALS = "goals"  # 次に何を話したいかの候補を作る
     SAVING = "saving"  # すべて成功したものをまとめて保存する
 
 

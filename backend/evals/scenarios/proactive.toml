@@ -25,9 +25,45 @@ text = "今週の土曜に、前から見たかった映画を見に行くんだ
 kind = "reflect"
 # 予定そのものは記憶に残る。ここが残らないと目標の根拠が無くなる。
 expect_candidate_any = ["映画"]
-# 目標の候補が出ること。振り返りの4回目の呼び出しは後続の PR で入る。
-expect_goal_any = ["映画"]
+# 予定の「後」に聞く目標であること。「映画」を含むかだけでは、予定の前に
+# 聞く目標（タイトルは何か、なぜ見たいのか）でも通ってしまう。設計書の
+# 小実験は「予定日後に感想を聞く」なので、そこを見る。
+expect_goal_any = ["感想"]
 human_check = "目標の本文が「いつ・誰に・何を聞くか」を含んでいるか。予定の写しになっていないか"
+
+[[scenario]]
+id = "goal-is-extracted-adopted-and-asked"
+aspect = "proactive"
+description = "会話から目標を抽出し、採用し、期限後の会話で参照するまでを一続きに測る"
+
+# 事前に目標を置かない。**抽出から始める。** 事前に置いた目標を採用するだけでは、
+# 「会話 → 抽出 → 採用 → 参照」の経路を一度も通らない。フェーズ3で、記憶を
+# 事前に入れる評価が抽出と採用を通っていなかったのと同じ穴になる
+# （PR3 の第1回レビューで指摘され、PR6 の完了条件に含めた）。
+
+[[scenario.steps]]
+kind = "say"
+text = "今週の土曜に、前から見たかった映画を見に行くんだ"
+
+[[scenario.steps]]
+kind = "reflect"
+expect_goal_any = ["感想"]
+
+[[scenario.steps]]
+kind = "accept_goal"
+match = "感想"
+goal_key = "movie-impression"
+
+[[scenario.steps]]
+kind = "advance_time"
+days = 7
+
+[[scenario.steps]]
+kind = "start_conversation"
+# 抽出した目標が、採用を経て、期限の後の会話で参照されること。
+expect_goals = ["movie-impression"]
+expect_any = ["映画"]
+human_check = "抽出された目標の本文が、そのまま質問として自然に使えるか"
 
 [[scenario]]
 id = "adopted-goal-is-asked-later"
@@ -67,6 +103,30 @@ kind = "start_conversation"
 expect_goals = ["movie-impression"]
 expect_any = ["映画"]
 human_check = "質問が唐突でないか。相手が話す前に一方的に畳みかけていないか"
+
+[[scenario]]
+id = "relative-date-is-counted-from-the-utterance"
+aspect = "proactive"
+description = "後日に振り返っても、予定の日付を発言の日から数える"
+
+# 発言と振り返りの日を離す。同じ日に振り返るシナリオでは、発言日基準と
+# 振り返り日基準の差が出ない（PR6 の第1回レビューの指摘2を観測するため）。
+#
+# 発言日を X とすると、正しくは「明日」= X+1（面接）、その翌日 = X+2 が基準日時。
+# 振り返り日（X+4）から数えると X+5 になり、4日ずれる。
+
+[[scenario.steps]]
+kind = "say"
+text = "明日、面接があるんだ"
+
+[[scenario.steps]]
+kind = "advance_time"
+days = 4
+
+[[scenario.steps]]
+kind = "reflect"
+expect_goal_any = ["面接"]
+human_check = "目標の基準日時が、発言の2日後（面接の翌日）になっているか。振り返った日から数えて4日ずれていないか"
 
 # --- 完了条件2：不適切なタイミングでは待機できる ---------------------------
 
