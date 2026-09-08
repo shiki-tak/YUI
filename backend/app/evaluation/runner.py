@@ -163,8 +163,22 @@ def _check_turn(
     referenced_states: list[str],
     referenced_goals: list[str],
     previous_replies: list[str],
+    action: str | None = None,
 ) -> list[Check]:
     checks: list[Check] = []
+
+    if spec.expect_action:
+        checks.append(
+            Check(
+                name="選んだ行動",
+                ok=action == spec.expect_action,
+                detail=(
+                    "期待どおり"
+                    if action == spec.expect_action
+                    else f"{spec.expect_action} ではなく {action} を選んだ"
+                ),
+            )
+        )
 
     if spec.expect_memories:
         missing = [key for key in spec.expect_memories if key not in referenced]
@@ -481,17 +495,86 @@ async def run_attempt(
                         continue
 
                     if step.kind == "start_conversation":
-                        # YUI の側から会話を始める。行動選択（回答・確認質問・
-                        # 話題提案・調査・待機）は PR7 で入る。それまでは
-                        # 「始められなかった」として落とす。黙って飛ばすと、
-                        # 自発性を測るシナリオが、何も起きていないのに通る。
+                        # YUI の側から会話を始める。話しかけないこともある。
+                        # **待機も正しい結果**なので、始まらなかったこと自体は
+                        # 失敗にしない。何を選んだかは記録して読めるようにする。
                         conversation = await _new_conversation(session)
                         replies = []
-                        detail = "自発的な発話は未実装（行動選択は後続の PR で入る）"
-                        attempt.actions.append(f"start_conversation → {detail}")
-                        attempt.action_checks.append(
-                            Check(name="自発的に会話を始める", ok=False, detail=detail)
+                        speaker = speakers[step.speaker or scenario.speakers[0].key]
+                        try:
+                            opened = await agent.open(
+                                session,
+                                conversation=conversation,
+                                speaker=speaker,
+                                now=started + clock,
+                            )
+                            await session.commit()
+                        except LLMError as exc:
+                            attempt.turns.append(
+                                TurnResult(
+                                    text="（YUI から話しかける）",
+                                    reply="",
+                                    human_check=step.human_check,
+                                    error=str(exc),
+                                )
+                            )
+                            return attempt
+
+                        if attempt.model is None and opened.run is not None:
+                            attempt.model = opened.run.model
+                            attempt.model_digest = opened.run.model_digest
+
+                        reply = (
+                            opened.reply_message.content
+                            if opened.reply_message is not None
+                            else ""
                         )
+                        # 自発発話でも記憶・状態を渡している。空として判定すると、
+                        # 渡ってはいけない記憶が渡っても落ちない
+                        # （第1回レビューの指摘6）。返答と同じ経路で読む。
+                        run = opened.run
+                        referenced = [
+                            memory_keys.get(memory_id, f"#{memory_id}")
+                            for memory_id in (
+                                (run.referenced_memory_ids or []) if run is not None else []
+                            )
+                        ]
+                        referenced_states = (
+                            await _state_contents(session, run.referenced_state_ids)
+                            if run is not None
+                            else []
+                        )
+                        referenced_goals = [
+                            goal_keys.get(goal_id, f"#{goal_id}")
+                            for goal_id in (
+                                (run.referenced_goal_ids or []) if run is not None else []
+                            )
+                        ]
+                        attempt.actions.append(
+                            f"start_conversation → {opened.choice.action}"
+                            f"（{opened.choice.reason or '理由なし'}）"
+                        )
+                        attempt.turns.append(
+                            TurnResult(
+                                text=f"（YUI から話しかける：{opened.choice.action}）",
+                                reply=reply,
+                                checks=_check_turn(
+                                    step,
+                                    reply,
+                                    referenced,
+                                    referenced_states,
+                                    referenced_goals,
+                                    replies,
+                                    opened.choice.action,
+                                ),
+                                referenced=referenced,
+                                referenced_states=referenced_states,
+                                referenced_goals=referenced_goals,
+                                human_check=step.human_check,
+                            )
+                        )
+                        if reply:
+                            replies.append(reply)
                         continue
 
                     if step.kind == "reflect":
@@ -573,6 +656,7 @@ async def run_attempt(
                                 referenced_states,
                                 referenced_goals,
                                 replies,
+                                result.run.selected_action,
                             ),
                             referenced=referenced,
                             referenced_states=referenced_states,

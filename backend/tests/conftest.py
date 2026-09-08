@@ -16,6 +16,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent import ConversationAgent, get_agent, reflection_job
+from app.agent.action_selector import _OPEN_INSTRUCTION as OPEN_ACTION_INSTRUCTION
+from app.agent.action_selector import _REPLY_INSTRUCTION as REPLY_ACTION_INSTRUCTION
 from app.agent.goal_reflection import _INSTRUCTION as GOAL_INSTRUCTION
 from app.agent.reflection import _PICKUP_INSTRUCTION as PICKUP_INSTRUCTION
 from app.agent.state_reflection import _INSTRUCTION as STATE_INSTRUCTION
@@ -48,6 +50,11 @@ class FakeLLM(LLMClient):
         # 記憶や関心を確かめるテストが、目標まで用意しなくても済むようにする。
         self.goal_scripted: list[str] = []
         self.goal_default = "[]"
+        # 行動選択（回答・確認質問・話題提案・調査・待機）。既定は「回答」で、
+        # 自分から始める場面では選べないので待機になる。**テストが明示しない
+        # 限り、YUI から話しかけない。**
+        self.action_scripted: list[str] = []
+        self.action_default = '{"action": "answer", "goal": null, "reason": "テストの既定"}'
         # 記憶の抽出は2段階（拾う → 選ぶ）。1段階目は既定で1件拾ったことに
         # して、テストは「選ぶ」側の出力だけを書けばよいようにする。
         self.pickup_scripted: list[str] = []
@@ -64,6 +71,10 @@ class FakeLLM(LLMClient):
 
     def push(self, text: str) -> None:
         self.scripted.append(text)
+
+    def push_action(self, text: str) -> None:
+        """行動選択が返す内容。"""
+        self.action_scripted.append(text)
 
     def push_goal(self, text: str) -> None:
         """目標の抽出が返す内容。"""
@@ -90,7 +101,12 @@ class FakeLLM(LLMClient):
         if self.gate is not None and (self.gate_on is None or self.gate_on == system):
             self.held.set()
             await self.gate.wait()
-        if messages and messages[0].content == GOAL_INSTRUCTION:
+        if messages and messages[0].content in {
+            REPLY_ACTION_INSTRUCTION,
+            OPEN_ACTION_INSTRUCTION,
+        }:
+            text = self.action_scripted.pop(0) if self.action_scripted else self.action_default
+        elif messages and messages[0].content == GOAL_INSTRUCTION:
             text = self.goal_scripted.pop(0) if self.goal_scripted else self.goal_default
         elif messages and messages[0].content == STATE_INSTRUCTION:
             text = self.state_scripted.pop(0) if self.state_scripted else self.state_default

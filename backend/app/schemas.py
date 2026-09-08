@@ -85,6 +85,10 @@ class RunRecordOut(ORMModel):
     options: dict[str, Any] | None
     referenced_memory_ids: list[int] | None
     referenced_state_ids: list[int] | None
+    # 返答に渡した目標と、選んだ行動。待機を選んだことも読める
+    # （完了条件「行動と状態変化の根拠を追える」）。
+    referenced_goal_ids: list[int] | None
+    selected_action: str | None
     retrieval_ms: int | None
     latency_ms: int | None
     prompt_tokens: int | None
@@ -477,6 +481,20 @@ class GoalRevisionOut(ORMModel):
     after: dict[str, Any] | None
     reason: str | None
     created_at: UtcDatetime
+
+
+class ProactiveTurn(BaseModel):
+    """YUI の側から会話を始めた結果（フェーズ4 PR7）。
+
+    **話しかけないこともある。** そのときは message が null になる。設計書
+    「常に話しかけることを自律性の達成条件にはしません」。何を選んだかは
+    action に残し、待機したことも読めるようにする。
+    """
+
+    action: Literal["ask", "suggest", "research", "wait", "answer"]
+    reason: str | None = None
+    referenced_goal_ids: list[int] = Field(default_factory=list)
+    message: MessageOut | None = None
 
 
 class ReflectionProgress(BaseModel):

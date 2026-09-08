@@ -158,6 +158,27 @@ class CandidateStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class Action(StrEnum):
+    """会話・自発的行動で選ぶ行動（設計書 6 の 3）。
+
+    設計書：「回答・確認質問・話題提案・調査・待機から適切な行動を選ぶ」。
+    **待機も行動である。** 合格は「よく喋ること」ではなく、適切に待てることも
+    測る対象なので、選んだことを記録する（run_records.selected_action）。
+    """
+
+    # 相手の発言に答える。目標には触れない。
+    ANSWER = "answer"
+    # 目標について聞く。「この前の映画どうだった？」
+    ASK = "ask"
+    # 自分から話題を出す。
+    SUGGEST = "suggest"
+    # 調べて伝える。フェーズ5A が未実装のため、選ばれても実行はしない。
+    # 目標は保留し、「調べた」と発言させない（設計書 6）。
+    RESEARCH = "research"
+    # いまは持ち出さない。相手が疲れている、話したくないときに選ぶ。
+    WAIT = "wait"
+
+
 class ReflectionStep(StrEnum):
     """振り返りがいまどこを処理しているか（フェーズ4 PR5）。
 
@@ -517,6 +538,56 @@ class GoalRevision(Base):
     before: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     after: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ActionRecord(Base):
+    """行動の判断の記録（設計書 6 の 3、完了条件5）。
+
+    **発言を伴わない判断も残す。** 待機を選んだとき、run_records は作られない
+    （発言が無いので message_id を持てない）。設計書は「不要な質問、重複、
+    誤った推測、適切な待機も確認する」としており、待機したことを後から追えない
+    と、適切に待てたのかを測れない（第1回レビューの指摘5）。
+
+    架空の空発言を作って辻褄を合わせない。発言があるときは message_id で
+    run_records と突き合わせる。
+    """
+
+    __tablename__ = "action_records"
+    __table_args__ = (Index("ix_action_records_conversation", "conversation_id", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+    # 選んだ行動（Action）。待機・調査も入る。
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    # そう判断した理由。モデルが返した文をそのまま残す。
+    reason: Mapped[str | None] = mapped_column(Text)
+    # 判断のときに渡した目標と、そのうち選んだもの。全候補だけでは、
+    # どれを選んだのかを後から確かめられない。
+    candidate_goal_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    selected_goal_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    # 発言したときだけ入る。待機のときは NULL。
+    message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))
+    # 自分から始めた判断か、返答の中での判断か。
+    is_proactive: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    # 判断に使ったモデルと生成設定。**発言が無い判断は run_records が作られない
+    # ため、ここに残さないと、どのモデル・設定が待機を選んだのかを後から追えない**
+    # （第2回レビューの指摘2）。モデルを呼ばずに決めた場合は NULL のままにして、
+    # 呼んだ判断と区別する。
+    provider: Mapped[str | None] = mapped_column(String(32))
+    model: Mapped[str | None] = mapped_column(String(128))
+    model_digest: Mapped[str | None] = mapped_column(String(128))
+    options: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # 出力を読み取れずに待機へ倒したか。正常な待機の判断と区別する。
+    # 区別できないと、適切に待てた回数を数えられない。
+    is_fallback: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

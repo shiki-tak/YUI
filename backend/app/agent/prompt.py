@@ -14,8 +14,11 @@ from app.agent.memory_store import KIND_LABEL, RetrievedMemory
 from app.config import LOCAL_TZ, to_local
 from app.llm.base import ChatMessage
 from app.models import (
+    Action,
     Certainty,
     CharacterState,
+    Goal,
+    GoalTrigger,
     Message,
     Provenance,
     Speaker,
@@ -83,12 +86,69 @@ def build_state_section(states: list[CharacterState]) -> str:
     return "\n".join(lines)
 
 
+def build_goal_section(goals: list[Goal], action: str, *, opening: bool = False) -> str:
+    """次に話したいこと。**渡し方は、選んだ行動で変える。**
+
+    目標は、聞くと決めたときだけ「聞いてください」と書く。持っているだけの
+    ときは「いまは持ち出さない」と書いて渡す。渡さないことで待機させると、
+    判断ではなく取り上げているだけになり、次の会話で聞ける状態かどうかを
+    モデルが見ないまま進む（設計書 6「回答・確認質問・話題提案・調査・待機
+    から適切な行動を選ぶ」）。
+    """
+    if not goals:
+        return ""
+    lines = ["# 次に話したいこと", ""]
+    for goal in goals:
+        when = ""
+        if goal.trigger == GoalTrigger.AFTER_DATE.value and goal.due_at:
+            when = f"（{to_local(goal.due_at).strftime('%Y-%m-%d')}以降）"
+        lines.append(f"- {goal.content}{when}")
+    lines.append("")
+    if action == Action.ASK.value:
+        if opening:
+            # 自分から始める場面では「会話の流れ」がまだ無い。流れに任せると、
+            # あいさつだけで終わって目標に触れない（PR7 の実測で 0/3）。
+            lines.append(
+                "**これがあなたの最初の一言です。この中の1つを、最初の発言で"
+                "切り出してください。** あいさつだけで終わらせないでください。"
+                "まとめて聞かないでください。"
+            )
+        else:
+            lines.append(
+                "この中から1つだけ、会話の流れの中で自然に聞いてください。"
+                "まとめて聞かないでください。"
+            )
+    elif action == Action.SUGGEST.value:
+        lines.append(
+            "この中から1つを手がかりに、**最初の発言で**話題を出してください。"
+            "質問を並べず、話しかけるように書いてください。"
+            if opening
+            else "この中から1つを手がかりに、話題を出してください。"
+            "質問を並べず、話しかけるように書いてください。"
+        )
+    elif action == Action.RESEARCH.value:
+        # フェーズ5A が未実装。調べていないことを調べたと言わせない。
+        lines.append(
+            "これは調べないと答えられないことです。**いまは調べられません。**"
+            "調べたふりをせず、型番・日付・価格などを作らないでください。"
+            "分からないことは分からないと言ってください。"
+        )
+    else:
+        lines.append(
+            "**いまは持ち出さないでください。** 相手の話に答えることを優先します。"
+        )
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     *,
     persona: Persona,
     memories: list[RetrievedMemory],
     speaker: Speaker | None,
     states: list[CharacterState] | None = None,
+    goals: list[Goal] | None = None,
+    action: str = Action.ANSWER.value,
+    opening: bool = False,
     now: datetime | None = None,
 ) -> str:
     now = (now or utcnow()).astimezone(JST)
@@ -105,6 +165,10 @@ def build_system_prompt(
         sections.append(state_section)
         sections.append("")
     sections.append(build_memory_section(memories))
+    goal_section = build_goal_section(goals or [], action, opening=opening)
+    if goal_section:
+        sections.append("")
+        sections.append(goal_section)
     return "\n".join(sections)
 
 
@@ -116,11 +180,21 @@ def build_messages(
     history: list[Message],
     user_text: str,
     states: list[CharacterState] | None = None,
+    goals: list[Goal] | None = None,
+    action: str = Action.ANSWER.value,
+    opening: bool = False,
     now: datetime | None = None,
 ) -> tuple[list[ChatMessage], str]:
     """LLM へ渡すメッセージ列と、記録用のシステムプロンプトを返す。"""
     system_prompt = build_system_prompt(
-        persona=persona, memories=memories, speaker=speaker, states=states, now=now
+        persona=persona,
+        memories=memories,
+        speaker=speaker,
+        states=states,
+        goals=goals,
+        action=action,
+        opening=opening,
+        now=now,
     )
     messages: list[ChatMessage] = [ChatMessage(role="system", content=system_prompt)]
     # 相手が複数いる会話では、発言に誰のものかを付ける。付けないと、履歴の

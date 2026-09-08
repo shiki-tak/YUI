@@ -191,6 +191,7 @@ class ReflectionSpec(BaseModel):
 # 返答を作る手順（say / start_conversation）と、振り返り、操作の手順では、
 # 見られるものが違う。
 _SAY_FIELDS = {
+    "expect_action",
     "expect_memories",
     "expect_not_memories",
     "expect_states",
@@ -283,6 +284,11 @@ class StepSpec(BaseModel):
     # 渡ってはいけない目標。完了したもの、再評価の印が付いたもの、別の相手の
     # ものが渡っていないかを見る。
     expect_not_goals: list[str] = Field(default_factory=list)
+    # 選んでほしい行動（answer / ask / suggest / research / wait）。
+    # 「話しかけなかった」と「話しかけたが目標に触れなかった」を区別する。
+    # 待機だけを見ていると、読み取り失敗による待機と正しい待機が混ざる
+    # （第1回レビューの指摘7）。
+    expect_action: str | None = None
     expect_any: list[str] = Field(default_factory=list)
     expect_none: list[str] = Field(default_factory=list)
     expect_not_repeating: bool = False
@@ -420,9 +426,6 @@ class Scenario(BaseModel):
             # （第6回レビューの指摘2）。
             if step.kind in {"correct_memory", "delete_memory", "accept_goal"}:
                 return True
-            # 自発発話は、始められたかどうかそのものを機械で判定する。
-            if step.kind == "start_conversation":
-                return True
             if (
                 step.expect_memories
                 or step.expect_not_memories
@@ -431,6 +434,7 @@ class Scenario(BaseModel):
                 or step.expect_goals
                 or step.expect_not_goals
                 or step.expect_marked_goals
+                or step.expect_action
                 or step.expect_any
                 or step.expect_none
                 or step.expect_not_repeating

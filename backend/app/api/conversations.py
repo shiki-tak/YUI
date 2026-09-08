@@ -10,14 +10,15 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from app.agent import reflection_job
+from app.agent import get_agent, reflection_job
+from app.agent.conversation import ConversationAgent
 from app.agent.delivery import apply_delivery_state
-from app.agent.memory_store import create_memory
+from app.agent.memory_store import create_memory, get_or_create_speaker
 from app.agent.turn_lock import conversation_locks
 from app.config import Settings, get_settings
 from app.db import get_session, get_session_factory
 from app.llm import get_llm_client
-from app.llm.base import LLMClient
+from app.llm.base import LLMClient, LLMError
 from app.models import (
     CandidateStatus,
     Conversation,
@@ -41,14 +42,33 @@ from app.schemas import (
     IdealResponseOut,
     MemoryCandidateOut,
     MessageOut,
+    ProactiveTurn,
     ReflectionProgress,
     RunRecordDetail,
+    SpeakerRef,
     SpeechRunOut,
 )
 from app.voice import get_speech_client
 from app.voice.base import SpeechClient, SpeechError
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+def _ensure_open(conversation: Conversation) -> None:
+    """発言を追加できる状態かを確かめる。
+
+    ロックを取る前と取った後の両方で呼ぶ。api/chat.py と同じ判定にする。
+    振り返りが始まった後に発言が入ると、抽出の対象と会話ログが食い違う。
+    """
+    if conversation.ended_at is not None or conversation.reflection_completed_at is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "この会話は終了しています。新しい会話を始めてください。"
+        )
+    if conversation.reflection_started_at is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "この会話は振り返り中です。終わるまで発言を追加できません。",
+        )
 
 
 async def _release_reflection(session: AsyncSession, conversation_id: int) -> None:
@@ -243,6 +263,61 @@ async def end_conversation(
     )
     await session.refresh(conversation)
     return _progress(conversation)
+
+
+@router.post("/{conversation_id}/open", response_model=ProactiveTurn)
+async def open_conversation(
+    conversation_id: int,
+    speaker: SpeakerRef = SpeakerRef(),
+    session: AsyncSession = Depends(get_session),
+    agent: ConversationAgent = Depends(get_agent),
+) -> ProactiveTurn:
+    """YUI の側から会話を始める（設計書 6「自発的行動」）。
+
+    起動点は会話開始だけに絞っている。話題の区切りと、許可された待機時間は
+    ISSUE-024 に記録した。
+
+    **話しかけないこともある。** 目標が無い、いま持ち出す場面ではないと判断
+    したら、発言を作らずに返す。呼んだ側は message が null であることで分かる。
+    """
+    conversation = await session.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
+    _ensure_open(conversation)
+
+    partner = await get_or_create_speaker(
+        session,
+        source=speaker.source,
+        external_id=speaker.external_id,
+        display_name=speaker.display_name,
+    )
+    # 話者の作成・表示名の更新をここで確定させる。**モデルを呼ぶ前に書き込みを
+    # 閉じる。** 未登録の相手を指定すると INSERT が開いたまま行動選択の応答を
+    # 待つことになり、他の会話や記憶の訂正が「database is locked」で失敗する
+    # （第2回レビューの指摘1。発言の API は同じ位置で閉じている）。
+    await session.commit()
+
+    async with conversation_locks.hold(conversation_id):
+        # ロック待ちの間に振り返りが始まる・終わることがある。取る前だけの
+        # 判定では、振り返りの対象を固めた後に発言が入り、抽出した内容と
+        # 会話ログが食い違う（第1回レビューの指摘2）。発言と同じ検査を通す。
+        await session.refresh(conversation)
+        _ensure_open(conversation)
+        try:
+            opened = await agent.open(
+                session, conversation=conversation, speaker=partner
+            )
+        except LLMError as exc:
+            # モデルに繋がらないことと、正しく待機したことを区別して返す
+            # （発言の API と同じ扱い。第1回レビューの指摘7）。
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+        await session.commit()
+    return ProactiveTurn(
+        action=opened.choice.action,
+        reason=opened.choice.reason,
+        referenced_goal_ids=[goal.id for goal in opened.goals],
+        message=opened.reply_message,
+    )
 
 
 @router.get("/{conversation_id}/reflection", response_model=ReflectionProgress)
