@@ -109,31 +109,41 @@ def build_markdown(
                 lines.append(f"  - 返答：{_escape(turn.reply)}")
                 if turn.referenced:
                     lines.append(f"  - 渡した記憶：{'、'.join(turn.referenced)}")
+                if turn.referenced_states:
+                    lines.append(
+                        f"  - 渡した状態：{_escape('、'.join(turn.referenced_states))}"
+                    )
                 for check in turn.checks:
                     lines.append(
                         f"  - {'○' if check.ok else '×'} {check.name}：{_escape(check.detail)}"
                     )
                 if turn.human_check:
                     lines.append(f"  - 人が見る点：{turn.human_check} → ")
-            if attempt.reflection is not None:
-                lines.append("- 振り返り")
-                if attempt.reflection.error:
-                    lines.append(f"  - **失敗：{_escape(attempt.reflection.error)}**")
+            # 会話以外に行った操作。どの操作の後の返答かを追えるようにする。
+            for action in attempt.actions:
+                lines.append(f"- 操作：{_escape(action)}")
+            for check in attempt.action_checks:
+                lines.append(
+                    f"  - {'○' if check.ok else '×'} {check.name}：{_escape(check.detail)}"
+                )
+            for index, reflection in enumerate(attempt.reflections, start=1):
+                label = "振り返り" if len(attempt.reflections) == 1 else f"振り返り{index}"
+                lines.append(f"- {label}")
+                if reflection.error:
+                    lines.append(f"  - **失敗：{_escape(reflection.error)}**")
+                    continue
+                if reflection.candidates:
+                    for candidate in reflection.candidates:
+                        lines.append(f"  - 候補：{_escape(candidate)}")
                 else:
-                    if attempt.reflection.candidates:
-                        for candidate in attempt.reflection.candidates:
-                            lines.append(f"  - 候補：{_escape(candidate)}")
-                    else:
-                        lines.append("  - 候補：なし")
-                    for check in attempt.reflection.checks:
-                        lines.append(
-                            f"  - {'○' if check.ok else '×'} {check.name}："
-                            f"{_escape(check.detail)}"
-                        )
-                    if attempt.reflection.human_check:
-                        lines.append(
-                            f"  - 人が見る点：{attempt.reflection.human_check} → "
-                        )
+                    lines.append("  - 候補：なし")
+                for check in reflection.checks:
+                    lines.append(
+                        f"  - {'○' if check.ok else '×'} {check.name}："
+                        f"{_escape(check.detail)}"
+                    )
+                if reflection.human_check:
+                    lines.append(f"  - 人が見る点：{reflection.human_check} → ")
             lines.append("")
 
     return "\n".join(lines)

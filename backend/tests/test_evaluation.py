@@ -190,8 +190,8 @@ async def test_reflection_candidates_are_checked(fake_llm: FakeLLM) -> None:
         [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
     )
     assert not missed[0].attempts[0].ok
-    assert missed[0].attempts[0].reflection is not None
-    assert missed[0].attempts[0].reflection.candidates == []
+    assert len(missed[0].attempts[0].reflections) == 1
+    assert missed[0].attempts[0].reflections[0].candidates == []
 
     fake_llm.push("楽しみですね。")
     fake_llm.push(
@@ -382,3 +382,156 @@ async def test_steps_can_correct_a_memory_between_conversations(
     assert "紅茶" in last_prompt
     assert "開発者はコーヒーが好き" not in last_prompt
     assert attempt.ok
+
+
+# --- 第6回レビューの指摘（評価の仕組みの不具合）-----------------------------
+
+
+async def test_reflection_failure_is_recorded_not_raised(fake_llm: FakeLLM) -> None:
+    """振り返りの失敗を記録し、評価全体を止めない（第6回レビューの指摘1）。
+
+    1回の不正な出力で、後続のシナリオ・試行まで失い、レポートも作られなかった。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "reflect-fails",
+            "aspect": "reflection",
+            "steps": [
+                {"kind": "say", "text": "写真の話"},
+                {"kind": "reflect", "expect_candidate_any": ["写真"]},
+            ],
+        }
+    )
+    fake_llm.push("そうなのですね。")
+    fake_llm.push_pickup("読み取れない出力")
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert not attempt.ok
+    assert attempt.reflections[0].error is not None
+    assert results[0].failed_to_run == 1
+
+
+async def test_missing_target_makes_the_attempt_fail(fake_llm: FakeLLM) -> None:
+    """訂正の対象が無ければ、返答が合っていても通さない（指摘2）。
+
+    訂正していない試行を「訂正後の返答」の成功に数えない。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "no-target",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "correct_memory", "match": "コーヒー", "content": "紅茶が好き"},
+                {"kind": "say", "text": "好きな飲み物は？", "expect_any": ["紅茶"]},
+            ],
+        }
+    )
+    fake_llm.push("紅茶がお好きですね。")
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    # 返答の語は合っているが、訂正できていないので通さない。
+    assert all(check.ok for turn in attempt.turns for check in turn.checks)
+    assert not attempt.ok
+    assert [c.ok for c in attempt.action_checks] == [False]
+    assert results[0].passed == 0
+
+
+async def test_later_reflection_does_not_hide_an_earlier_failure(
+    fake_llm: FakeLLM,
+) -> None:
+    """後の振り返りが、前の不合格を上書きしない（指摘3）。"""
+    scenario = Scenario.model_validate(
+        {
+            "id": "two-reflections",
+            "aspect": "reflection",
+            "steps": [
+                {"kind": "say", "text": "次はシューズの話をしよう"},
+                {"kind": "reflect", "expect_kinds": ["promise"]},
+                {"kind": "new_conversation"},
+                {"kind": "say", "text": "こんにちは"},
+                {"kind": "reflect", "expect_empty": True},
+            ],
+        }
+    )
+    fake_llm.push("楽しみですね。")
+    fake_llm.push("[]")  # 1回目：promise が出ない → 不合格
+    fake_llm.push("こんにちは。")
+    fake_llm.push("[]")  # 2回目：候補なし → 合格
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert len(attempt.reflections) == 2
+    assert not attempt.reflections[0].ok
+    assert attempt.reflections[1].ok
+    # 後の成功で、前の失敗が消えない。
+    assert not attempt.ok
+    assert results[0].passed == 0
+
+
+async def test_correcting_a_memory_withdraws_the_state_it_came_from(
+    fake_llm: FakeLLM,
+) -> None:
+    """振り返りが作った状態が、根拠の記憶を訂正すると会話へ渡らなくなる。
+
+    第6回レビューの「自動抽出した状態も採用してから訂正する評価が無い」に
+    あたる経路を、評価器の手順として通す。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "state-withdrawn",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "say", "text": "天体観測にはまっててね"},
+                {
+                    "kind": "reflect",
+                    "accept": True,
+                    "accept_states": True,
+                    "accept_key": "天体観測",
+                    "expect_candidate_any": ["天体観測"],
+                    "expect_state_any": ["星"],
+                },
+                {"kind": "new_conversation"},
+                {
+                    "kind": "say",
+                    "text": "天体観測の話、覚えてる？",
+                    "expect_memories": ["天体観測"],
+                    "expect_states": ["星"],
+                },
+                {
+                    "kind": "correct_memory",
+                    "match": "天体観測",
+                    "content": "開発者は天体観測をやめた",
+                },
+                {"kind": "restart"},
+                {
+                    "kind": "say",
+                    "text": "いま何にはまってる？",
+                    "expect_not_states": ["星"],
+                },
+            ],
+        }
+    )
+    fake_llm.push("いいですね。")
+    fake_llm.push('[{"kind": "about_person", "content": "開発者は天体観測にはまっている"}]')
+    fake_llm.push_state('[{"kind": "interest", "topic": "星", "content": "星を見てみたい"}]')
+    fake_llm.push("覚えていますよ。")
+    fake_llm.push("そうなんですね。")
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert attempt.ok, [
+        (c.name, c.detail) for t in attempt.turns for c in t.checks if not c.ok
+    ] + [(c.name, c.detail) for c in attempt.action_checks if not c.ok]
+    # 訂正前は渡り、訂正後は渡らない。
+    assert attempt.turns[1].referenced_states == ["星を見てみたい"]
+    assert attempt.turns[2].referenced_states == []

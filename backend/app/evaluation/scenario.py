@@ -152,7 +152,9 @@ class StepSpec(BaseModel):
     - say：発言する（turns と同じ）。
     - reflect：会話を振り返り、候補を出す。accept で採用まで行う。
     - new_conversation：会話を分ける。別のセッションとして続ける。
-    - restart：DBへの接続を作り直す。プロセスの再起動に近い状態にする。
+    - restart：DBへの接続を作り直し、会話の担当も作り直す。**実際のプロセス
+      再起動ではない**。保存から読み直されることは確かめられるが、起動時の
+      処理（lifespan、人格の読み込み）は通らない。
     - correct_memory / delete_memory：開発者が記憶を訂正・削除する。
     """
 
@@ -165,6 +167,13 @@ class StepSpec(BaseModel):
     text: str | None = None
     expect_memories: list[str] = Field(default_factory=list)
     expect_not_memories: list[str] = Field(default_factory=list)
+    # 渡された可変状態の本文に含まれる語。返答の語ではなく、プロンプトへ
+    # 実際に渡ったものを見る。訂正が状態へ届いたかは、返答の言い回しでは
+    # 決められない（第6回レビューの「測っていない観点」）。
+    expect_states: list[str] = Field(default_factory=list)
+    # 渡ってはいけない状態。根拠の記憶を訂正・削除した後に、古い状態が
+    # 会話へ入らないことを見る。
+    expect_not_states: list[str] = Field(default_factory=list)
     expect_any: list[str] = Field(default_factory=list)
     expect_none: list[str] = Field(default_factory=list)
     expect_not_repeating: bool = False
@@ -174,8 +183,17 @@ class StepSpec(BaseModel):
     accept: bool = False
     # 本文にこの語を含む候補だけ採用する。空なら出た候補をすべて採用する。
     accept_contains: list[str] = Field(default_factory=list)
+    # 採用した記憶に付ける名前。後の say の expect_memories で、
+    # 「振り返りで作った記憶が実際に渡ったか」を指せるようにする。
+    accept_key: str | None = None
+    # 関心・関係性の候補も採用する。記憶を訂正したときに、そこから作った状態へ
+    # 波及するかを測るために使う。
+    accept_states: bool = False
     expect_kinds: list[str] = Field(default_factory=list)
     expect_candidate_any: list[str] = Field(default_factory=list)
+    # 関心・関係性の候補に含まれてほしい語。状態が1件も出ていないのに、
+    # 後の「古い状態が渡っていない」が空振りで通るのを防ぐ。
+    expect_state_any: list[str] = Field(default_factory=list)
     expect_empty: bool = False
     expect_occurred_at: bool = False
     expect_similar_marked: bool = False
@@ -250,14 +268,21 @@ class Scenario(BaseModel):
         取り違えて集計から落とさないため（フェーズ3再レビューの指摘3）。
         """
         for step in self.effective_steps:
+            # 訂正・削除は、対象が見つかったかどうかを機械で判定する
+            # （第6回レビューの指摘2）。
+            if step.kind in {"correct_memory", "delete_memory"}:
+                return True
             if (
                 step.expect_memories
                 or step.expect_not_memories
+                or step.expect_states
+                or step.expect_not_states
                 or step.expect_any
                 or step.expect_none
                 or step.expect_not_repeating
                 or step.expect_kinds
                 or step.expect_candidate_any
+                or step.expect_state_any
                 or step.expect_empty
                 or step.expect_similar_marked
                 or step.expect_occurred_at
@@ -286,6 +311,9 @@ class Scenario(BaseModel):
         memory_keys = {m.key for m in self.memories}
         if len(memory_keys) != len(self.memories):
             raise ValueError("memories の key が重複しています。")
+        # 振り返りで採用した記憶にも名前を付けられる。事前に入れた記憶と
+        # 同じように expect_memories から指せるようにする。
+        memory_keys |= {s.accept_key for s in self.steps if s.accept_key}
 
         for memory in self.memories:
             for field, value in (("subject", memory.subject), ("visible_to", memory.visible_to)):

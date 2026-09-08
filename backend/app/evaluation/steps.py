@@ -15,18 +15,27 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.agent.character_state import mark_for_review
+from app.agent.character_state import active_states, create_state, mark_for_review
+from app.agent.character_state import record_revision as state_revision
+from app.agent.character_state import snapshot as state_snapshot
 from app.agent.memory_store import create_memory, record_revision, snapshot
-from app.agent.reflection import extract_candidates
+from app.agent.reflection import extract_candidates, format_transcript
+from app.agent.state_reflection import propose_state_candidates
 from app.evaluation.scenario import StepSpec
 from app.llm.base import LLMClient
 from app.models import (
     CandidateStatus,
+    CharacterState,
     Conversation,
     Memory,
     MemoryCandidate,
     MemoryStatus,
+    Message,
+    SpeakerKind,
+    StateKind,
+    StateStatus,
 )
 
 
@@ -36,6 +45,8 @@ class ReflectOutcome:
 
     candidates: list[MemoryCandidate] = field(default_factory=list)
     accepted: list[Memory] = field(default_factory=list)
+    states: list[CharacterState] = field(default_factory=list)
+    accepted_states: list[CharacterState] = field(default_factory=list)
     error: str | None = None
 
 
@@ -49,15 +60,47 @@ async def run_reflection(
 ) -> ReflectOutcome:
     """会話を振り返り、必要なら候補を採用する。
 
-    採用は API と同じ流れで、候補から記憶を作り、候補に採用済みの印を付ける。
+    会話終了のAPIと同じ順序で、記憶の抽出（拾う→選ぶ）と、関心・関係性の抽出を
+    行う。片方だけを流すと、状態への訂正の波及を測れない。
+
+    採用も API と同じ流れで、候補から記憶を作り、候補に採用済みの印を付ける。
     """
+    partner_id = await _sole_partner_id(session, conversation.id)
+    messages = await _conversation_messages(session, conversation.id)
+    current_states = await active_states(
+        session, speaker_id=partner_id, mode=conversation.mode
+    )
+
     candidates = await extract_candidates(
         session, llm=llm, conversation=conversation, character_name=character_name
     )
+    state_payloads = await propose_state_candidates(
+        llm=llm,
+        transcript=format_transcript(messages, character_name),
+        partner_speaker_id=partner_id,
+        current_states=current_states,
+    )
+
     session.add_all(candidates)
+    states: list[CharacterState] = []
+    for payload in state_payloads:
+        is_relationship = payload.kind == StateKind.RELATIONSHIP.value
+        states.append(
+            await create_state(
+                session,
+                kind=payload.kind,
+                content=payload.content,
+                topic=None if is_relationship else payload.topic,
+                subject_speaker_id=partner_id if is_relationship else None,
+                visible_to_speaker_id=partner_id,
+                source_conversation_id=conversation.id,
+                status=StateStatus.PENDING.value,
+                reason=payload.reason or "会話の振り返りから",
+            )
+        )
     await session.flush()
 
-    outcome = ReflectOutcome(candidates=candidates)
+    outcome = ReflectOutcome(candidates=candidates, states=states)
     if not step.accept:
         await session.commit()
         return outcome
@@ -86,8 +129,51 @@ async def run_reflection(
         candidate.accepted_memory_id = memory.id
         outcome.accepted.append(memory)
 
+    if step.accept_states:
+        # 状態も採用する。API と同じく、根拠が空ならその会話から採用された
+        # 記憶を暫定の根拠として結び付ける。
+        await session.flush()
+        for state in states:
+            before = state_snapshot(state)
+            if not state.basis_memory_ids and state.source_conversation_id is not None:
+                basis = [memory.id for memory in outcome.accepted]
+                state.basis_memory_ids = basis or None
+                state.basis_is_provisional = True
+            state.status = StateStatus.ACTIVE.value
+            await session.flush()
+            state_revision(
+                session, state, action="accepted", before=before, reason="評価用会話で採用"
+            )
+            outcome.accepted_states.append(state)
+
     await session.commit()
     return outcome
+
+
+async def _sole_partner_id(session: AsyncSession, conversation_id: int) -> int | None:
+    """その会話にひとりだけいる相手。複数いれば None（会話APIと同じ扱い）。"""
+    stmt = (
+        select(Message.speaker_id)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.speaker_kind == SpeakerKind.USER.value,
+            Message.speaker_id.isnot(None),
+        )
+        .distinct()
+        .limit(2)
+    )
+    found = list((await session.execute(stmt)).scalars())
+    return found[0] if len(found) == 1 else None
+
+
+async def _conversation_messages(session: AsyncSession, conversation_id: int) -> list[Message]:
+    stmt = (
+        select(Message)
+        .options(selectinload(Message.speaker))
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.id)
+    )
+    return list((await session.execute(stmt)).scalars())
 
 
 async def _find_memory(session: AsyncSession, match: str) -> Memory | None:

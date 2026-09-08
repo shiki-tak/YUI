@@ -19,11 +19,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
 from app.agent.memory_store import create_memory, get_or_create_speaker
+from app.agent.reflection import ReflectionParseError
+from app.agent.state_reflection import StateReflectionError
 from app.config import Settings, to_local
 from app.evaluation.scenario import Scenario, StepSpec
 from app.evaluation.steps import ReflectOutcome, correct_memory, delete_memory, run_reflection
 from app.llm.base import LLMClient, LLMError
-from app.models import Base, Conversation, ConversationMode, Memory, Speaker, StateStatus
+from app.models import (
+    Base,
+    CharacterState,
+    Conversation,
+    ConversationMode,
+    Memory,
+    Speaker,
+    StateStatus,
+)
 from app.persona import Persona
 
 
@@ -43,6 +53,9 @@ class TurnResult:
     checks: list[Check] = field(default_factory=list)
     # 渡された記憶。期待と実際の差を読めるように、鍵と本文の両方を残す。
     referenced: list[str] = field(default_factory=list)
+    # 渡された可変状態の本文。訂正が状態へ届いたかを、返答の言い回しでは
+    # なくプロンプトの中身で見る。
+    referenced_states: list[str] = field(default_factory=list)
     human_check: str | None = None
     error: str | None = None
 
@@ -68,9 +81,14 @@ class Attempt:
     """シナリオ1回ぶんの実行結果。"""
 
     turns: list[TurnResult] = field(default_factory=list)
-    reflection: ReflectionResult | None = None
+    # 振り返りは複数回あり得る。1つに上書きすると、途中の不合格と根拠が消える
+    # （第6回レビューの指摘3）。
+    reflections: list[ReflectionResult] = field(default_factory=list)
     # 採用・訂正など、会話以外に行った操作。何をした後の返答かを読めるようにする。
     actions: list[str] = field(default_factory=list)
+    # 操作そのものの成否。対象が見つからないまま「訂正後の返答」を測ると、
+    # 訂正していない試行が成功に数えられる（第6回レビューの指摘2）。
+    action_checks: list[Check] = field(default_factory=list)
     # 実際に応答したモデルとその版。レポートの見出しに残し、後から
     # モデルを変えた比較に使う（設計書「モデル・人格・記憶状態の版」）。
     model: str | None = None
@@ -80,7 +98,9 @@ class Attempt:
     def ok(self) -> bool:
         if not all(turn.ok for turn in self.turns):
             return False
-        return self.reflection is None or self.reflection.ok
+        if not all(check.ok for check in self.action_checks):
+            return False
+        return all(reflection.ok for reflection in self.reflections)
 
 
 @dataclass
@@ -108,7 +128,7 @@ class ScenarioResult:
             1
             for attempt in self.attempts
             if any(turn.error for turn in attempt.turns)
-            or (attempt.reflection is not None and attempt.reflection.error)
+            or any(reflection.error for reflection in attempt.reflections)
         )
 
     @property
@@ -125,6 +145,7 @@ def _check_turn(
     spec: StepSpec,
     reply: str,
     referenced: list[str],
+    referenced_states: list[str],
     previous_replies: list[str],
 ) -> list[Check]:
     checks: list[Check] = []
@@ -146,6 +167,30 @@ def _check_turn(
         checks.append(
             Check(
                 name="渡していない記憶",
+                ok=not leaked,
+                detail=("期待どおり" if not leaked else f"渡ってしまった: {'、'.join(leaked)}"),
+            )
+        )
+
+    if spec.expect_states:
+        joined = "\n".join(referenced_states)
+        missing = [word for word in spec.expect_states if word not in joined]
+        checks.append(
+            Check(
+                name="渡した状態",
+                ok=not missing,
+                detail=(
+                    "期待どおり" if not missing else f"渡らなかった状態: {'、'.join(missing)}"
+                ),
+            )
+        )
+
+    if spec.expect_not_states:
+        joined = "\n".join(referenced_states)
+        leaked = [word for word in spec.expect_not_states if word in joined]
+        checks.append(
+            Check(
+                name="渡していない状態",
                 ok=not leaked,
                 detail=("期待どおり" if not leaked else f"渡ってしまった: {'、'.join(leaked)}"),
             )
@@ -258,8 +303,10 @@ async def run_attempt(
             try:
                 for step in scenario.effective_steps:
                     if step.kind == "restart":
-                        # 接続を作り直す。プロセスの再起動に近い状態にして、
-                        # 記憶が保存から読み直されることを確かめる。
+                        # 接続と会話の担当を作り直し、記憶が保存から読み直される
+                        # ことを確かめる。**プロセスの再起動そのものではない**。
+                        # 起動時の処理（lifespan、人格の読み込み）は通らないので、
+                        # 実プロセス再起動を確認済みとしては扱わない。
                         await session.close()
                         await engine.dispose()
                         engine = create_async_engine(url)
@@ -293,26 +340,50 @@ async def run_attempt(
                             )
                         else:
                             changed = await delete_memory(session, match=step.match)
-                        attempt.actions.append(
-                            f"{step.kind}: {step.match} → "
-                            + ("実行した" if changed else "対象が見つからなかった")
+                        detail = (
+                            f"記憶 #{changed.id}「{changed.content}」"
+                            if changed
+                            else f"「{step.match}」に当たる記憶が無かった"
+                        )
+                        attempt.actions.append(f"{step.kind}: {step.match} → {detail}")
+                        # 操作できたことを合否に含める。できていない試行を
+                        # 「訂正後の返答」の成功に数えない。
+                        attempt.action_checks.append(
+                            Check(
+                                name=f"{step.kind} の実行",
+                                ok=changed is not None,
+                                detail=detail,
+                            )
                         )
                         continue
 
                     if step.kind == "reflect":
-                        outcome = await run_reflection(
-                            session,
-                            llm=llm,
-                            conversation=conversation,
-                            character_name=persona.name,
-                            step=step,
-                        )
-                        # 採用した記憶も、シナリオの鍵で読めるようにしておく。
-                        for memory in outcome.accepted:
-                            memory_keys.setdefault(memory.id, f"採用:{memory.content[:12]}")
-                        attempt.reflection = _check_reflection(step, outcome)
-                        if attempt.reflection.error:
+                        try:
+                            outcome = await run_reflection(
+                                session,
+                                llm=llm,
+                                conversation=conversation,
+                                character_name=persona.name,
+                                step=step,
+                            )
+                        except (
+                            LLMError,
+                            ReflectionParseError,
+                            StateReflectionError,
+                        ) as exc:
+                            # 1回の失敗で評価全体を止めない。失敗として記録し、
+                            # この試行だけを終える（第6回レビューの指摘1）。
+                            await session.rollback()
+                            attempt.reflections.append(ReflectionResult(error=str(exc)))
                             return attempt
+                        # 採用した記憶も、シナリオの鍵で読めるようにしておく。
+                        # accept_key を書けば、後の say の expect_memories から
+                        # 「振り返りで作った記憶が渡ったか」を指せる。
+                        for memory in outcome.accepted:
+                            memory_keys.setdefault(
+                                memory.id, step.accept_key or f"採用:{memory.content[:12]}"
+                            )
+                        attempt.reflections.append(_check_reflection(step, outcome))
                         continue
 
                     assert step.text is not None and step.speaker is not None
@@ -344,12 +415,18 @@ async def run_attempt(
                         memory_keys.get(item.memory.id, f"#{item.memory.id}")
                         for item in result.memories
                     ]
+                    referenced_states = await _state_contents(
+                        session, result.run.referenced_state_ids
+                    )
                     attempt.turns.append(
                         TurnResult(
                             text=step.text,
                             reply=reply,
-                            checks=_check_turn(step, reply, referenced, replies),
+                            checks=_check_turn(
+                                step, reply, referenced, referenced_states, replies
+                            ),
                             referenced=referenced,
+                            referenced_states=referenced_states,
                             human_check=step.human_check,
                         )
                     )
@@ -359,6 +436,14 @@ async def run_attempt(
         finally:
             await engine.dispose()
     return attempt
+
+
+async def _state_contents(session: AsyncSession, ids: list[int] | None) -> list[str]:
+    """会話へ実際に渡った状態の本文。run_records の記録から引き直す。"""
+    if not ids:
+        return []
+    stmt = select(CharacterState).where(CharacterState.id.in_(ids)).order_by(CharacterState.id)
+    return [state.content for state in (await session.execute(stmt)).scalars()]
 
 
 async def _new_conversation(session: AsyncSession) -> Conversation:
@@ -413,6 +498,24 @@ def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResu
     if outcome.accepted:
         result.candidates.append(
             f"（採用した記憶 {len(outcome.accepted)} 件）"
+        )
+    for state in outcome.states:
+        mark = "採用" if state in outcome.accepted_states else "候補"
+        result.candidates.append(f"[状態／{state.kind}／{mark}] {state.content}")
+
+    if step.expect_state_any:
+        joined = "\n".join(state.content for state in outcome.states)
+        ok, hit = _contains_any(joined, step.expect_state_any)
+        result.checks.append(
+            Check(
+                name="関心・関係性の候補",
+                ok=ok,
+                detail=(
+                    f"一致: {'、'.join(hit)}"
+                    if ok
+                    else f"どれも含まれない: {'、'.join(step.expect_state_any)}"
+                ),
+            )
         )
 
     if step.expect_empty:
