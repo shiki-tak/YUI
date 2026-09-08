@@ -5,10 +5,23 @@ from __future__ import annotations
 from functools import lru_cache
 
 from app.config import get_settings
-from app.voice.base import SpeechClient, SpeechError, SpeechResult
+from app.voice.base import (
+    Reading,
+    SpeechClient,
+    SpeechError,
+    SpeechResult,
+    parse_readings,
+)
 from app.voice.voicevox_client import VoicevoxClient
 
-__all__ = ["SpeechClient", "SpeechError", "SpeechResult", "get_speech_client"]
+__all__ = [
+    "Reading",
+    "SpeechClient",
+    "SpeechError",
+    "SpeechResult",
+    "get_speech_client",
+    "parse_readings",
+]
 
 
 @lru_cache
@@ -22,4 +35,5 @@ def get_speech_client() -> SpeechClient:
         host=settings.voicevox_host,
         speaker_id=settings.voicevox_speaker,
         timeout=settings.voicevox_timeout_seconds,
+        readings=parse_readings(settings.speech_readings),
     )

@@ -14,7 +14,7 @@ import pytest
 from httpx import AsyncClient
 
 from app import main
-from app.voice.base import SpeechError, wav_duration_ms
+from app.voice.base import Reading, SpeechError, parse_readings, wav_duration_ms
 from app.voice.voicevox_client import VoicevoxClient
 
 AUDIO_QUERY = {"accent_phrases": [], "speedScale": 1.0, "outputSamplingRate": 24000}
@@ -31,11 +31,14 @@ def make_wav(duration_ms: int, rate: int = 24000) -> bytes:
     return buffer.getvalue()
 
 
-def build_client(handler, *, speaker_id: int = 3) -> VoicevoxClient:
+def build_client(
+    handler, *, speaker_id: int = 3, readings: list[Reading] | None = None
+) -> VoicevoxClient:
     transport = httpx.MockTransport(handler)
     return VoicevoxClient(
         host="http://voicevox.test",
         speaker_id=speaker_id,
+        readings=readings,
         client=httpx.AsyncClient(base_url="http://voicevox.test", transport=transport),
     )
 
@@ -191,3 +194,122 @@ async def test_api_health_reports_disabled_voice(client: AsyncClient, monkeypatc
     assert body["voice"]["enabled"] is False
     assert body["voice"]["ok"] is False
     assert body["ok"] is True
+
+
+# --- 読み替え（ユーザー辞書）------------------------------------------------
+
+
+def test_parse_readings_reads_the_setting():
+    readings = parse_readings("YUI:ユイ:2, ぬるぽ:ヌルポ:0")
+    assert [(r.surface, r.pronunciation, r.accent) for r in readings] == [
+        ("YUI", "ユイ", 2),
+        ("ぬるぽ", "ヌルポ", 0),
+    ]
+    assert parse_readings("") == []
+
+
+@pytest.mark.parametrize("value", ["YUI:ユイ", "YUI:ユイ:あ", ":ユイ:2", "YUI::2"])
+def test_broken_reading_is_rejected(value: str):
+    """書き間違いは黙って捨てない。読みが直らない理由が分からなくなる。"""
+    with pytest.raises(ValueError):
+        parse_readings(value)
+
+
+async def test_reading_is_registered_before_the_first_synthesis():
+    """辞書に無い表記は登録してから合成する。合成に渡す文章は変えない。"""
+    calls: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, dict(request.url.params)))
+        if request.url.path == "/user_dict":
+            return httpx.Response(200, json={})
+        if request.url.path == "/user_dict_word":
+            return httpx.Response(200, json="uuid-1")
+        if request.url.path == "/audio_query":
+            return httpx.Response(200, json=AUDIO_QUERY)
+        if request.url.path == "/synthesis":
+            return httpx.Response(200, content=make_wav(300))
+        return httpx.Response(200, json="0.99.0")
+
+    client = build_client(handler, readings=[Reading("YUI", "ユイ", 2)])
+    result = await client.synthesize("私はYUIです")
+
+    assert ("POST", "/user_dict_word", {
+        "surface": "YUI",
+        "pronunciation": "ユイ",
+        "accent_type": "2",
+        "word_type": "PROPER_NOUN",
+    }) in calls
+    # 表記はそのまま渡す。字幕と読み上げを同じ文字列に保つため。
+    query = next(params for method, path, params in calls if path == "/audio_query")
+    assert query["text"] == "私はYUIです"
+    assert result.text == "私はYUIです"
+
+    # 2 回目は登録し直さない。同じ語で辞書が埋まらないようにする。
+    calls.clear()
+    await client.synthesize("もう一度")
+    assert [path for _, path, _ in calls] == ["/audio_query", "/synthesis"]
+
+
+async def test_existing_word_is_updated_only_when_the_reading_differs():
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/user_dict":
+            return httpx.Response(
+                200,
+                json={
+                    "uuid-1": {"surface": "YUI", "pronunciation": "ワイユウアイ", "accent_type": 1},
+                    "uuid-2": {"surface": "凪", "pronunciation": "ナギ", "accent_type": 1},
+                },
+            )
+        return httpx.Response(200, json="ok")
+
+    client = build_client(
+        handler, readings=[Reading("YUI", "ユイ", 2), Reading("凪", "ナギ", 1)]
+    )
+    await client.register_readings()
+
+    # 読みが違う YUI だけ書き換える。合っている語には触れない。
+    assert calls == [("GET", "/user_dict"), ("PUT", "/user_dict_word/uuid-1")]
+
+
+async def test_synthesis_continues_when_the_dictionary_fails():
+    """辞書が入らなくても音声は出す。読みが直らないだけで会話は続けられる。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user_dict":
+            return httpx.Response(500, text="辞書を読めません")
+        if request.url.path == "/audio_query":
+            return httpx.Response(200, json=AUDIO_QUERY)
+        if request.url.path == "/synthesis":
+            return httpx.Response(200, content=make_wav(200))
+        return httpx.Response(200, json="0.99.0")
+
+    client = build_client(handler, readings=[Reading("YUI", "ユイ", 2)])
+    result = await client.synthesize("こんばんは")
+    assert result.audio_ms == 200
+
+
+async def test_a_word_stored_in_full_width_is_not_registered_again():
+    """エンジンが全角へ直して保存しても、二重登録しない。
+
+    起動のたびに同じ語が増える不具合を、実エンジンで再現して直した。
+    """
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/user_dict":
+            return httpx.Response(
+                200,
+                # VOICEVOX は "YUI" を "ＹＵＩ" として保存する。
+                json={"uuid-1": {"surface": "ＹＵＩ", "pronunciation": "ユイ", "accent_type": 2}},
+            )
+        return httpx.Response(200, json="ok")
+
+    client = build_client(handler, readings=[Reading("YUI", "ユイ", 2)])
+    await client.register_readings()
+
+    assert calls == [("GET", "/user_dict")]
