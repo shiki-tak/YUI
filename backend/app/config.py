@@ -1,5 +1,6 @@
 """アプリ設定。環境変数（接頭辞 YUI_）と .env から読む。"""
 
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,6 +11,18 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 # 表示と、会話に出てくる日付の解釈に使う地域時刻。保存は UTC のまま。
 LOCAL_TZ = ZoneInfo("Asia/Tokyo")
+
+
+def to_local(value: datetime) -> datetime:
+    """保存された日時を、地域時刻へ直す。
+
+    SQLite は timezone を落として返すため、読み戻した値は timezone を持たない。
+    そのまま astimezone を呼ぶと、実行環境の時刻として解釈される。保存は UTC
+    なので、UTC を補ってから直す。補わないと、日本時間の 9/8 00:30 の発言が
+    9/7 の発言として扱われる（フェーズ3再レビューの指摘2）。
+    """
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware.astimezone(LOCAL_TZ)
 
 
 class Settings(BaseSettings):

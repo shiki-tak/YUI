@@ -20,7 +20,13 @@ async def _speaker(client: AsyncClient, text: str = "こんにちは", **speaker
 
 
 async def _add(client: AsyncClient, **payload) -> dict:
-    body = {"kind": "interest", "content": "雨の日の静かな時間が好き", "topic": "天気"}
+    body = {
+        "kind": "interest",
+        "content": "雨の日の静かな時間が好き",
+        "topic": "天気",
+        # 参照範囲は必ず指定する（記憶と同じ。ISSUE-010 と同じ考え方）。
+        "visible_to_all": True,
+    }
     body.update(payload)
     response = await client.post("/api/states", json=body)
     assert response.status_code == 201, response.text
@@ -80,6 +86,8 @@ async def test_relationship_is_only_used_with_that_partner(
         topic=None,
         content="Aさんとは写真の話でよく盛り上がる",
         subject_speaker_id=a_id,
+        visible_to_all=False,
+        visible_to_speaker_id=a_id,
     )
     await client.post(f"/api/states/{state['id']}/decide", json={"decision": "accept"})
 
@@ -124,7 +132,12 @@ async def test_correcting_the_basis_memory_marks_the_state(client: AsyncClient) 
             },
         )
     ).json()
-    state = await _add(client, basis_memory_ids=[memory["id"]])
+    state = await _add(
+        client,
+        basis_memory_ids=[memory["id"]],
+        visible_to_all=False,
+        visible_to_speaker_id=speaker_id,
+    )
     await client.post(f"/api/states/{state['id']}/decide", json={"decision": "accept"})
 
     await client.patch(
@@ -151,7 +164,12 @@ async def test_state_under_review_is_not_used(client: AsyncClient, fake_llm: Fak
             },
         )
     ).json()
-    state = await _add(client, basis_memory_ids=[memory["id"]])
+    state = await _add(
+        client,
+        basis_memory_ids=[memory["id"]],
+        visible_to_all=False,
+        visible_to_speaker_id=speaker_id,
+    )
     await client.post(f"/api/states/{state['id']}/decide", json={"decision": "accept"})
     await client.delete(f"/api/memories/{memory['id']}?reason=誤りのため")
 
@@ -231,30 +249,23 @@ async def test_state_extraction_failure_can_be_retried(
     assert (await client.post(f"/api/conversations/{conversation_id}/end")).status_code == 200
 
 
-async def test_relationship_without_a_partner_is_skipped(
-    client: AsyncClient, fake_llm: FakeLLM
+async def test_no_state_candidates_when_the_partner_is_unclear(
+    fake_llm: FakeLLM
 ) -> None:
-    """誰との関係か決められないものは作らない（ISSUE-010）。"""
-    from app.agent.state_reflection import extract_state_candidates  # noqa: PLC0415
-    from app.models import Conversation, ConversationMode  # noqa: PLC0415
+    """相手を決められない会話では、状態の候補を作らない。
+
+    非公開の会話から作った状態にも参照範囲を引き継ぐ必要があり、誰に限るかを
+    決められないまま作ると、別の相手へ渡る（全体レビューの指摘3）。
+    """
+    from app.agent.state_reflection import propose_state_candidates  # noqa: PLC0415
 
     fake_llm.push_state('[{"kind":"relationship","content":"距離が縮まった"}]')
-    conversation = Conversation(id=1, mode=ConversationMode.LOCAL.value)
-
-    class _Session:
-        async def flush(self):
-            return None
-
-        def add(self, _obj):
-            return None
-
-    # 相手が分からない場合は、関係性を作らずに終える。
-    created = await extract_state_candidates(
-        _Session(),  # type: ignore[arg-type]
+    created = await propose_state_candidates(
         llm=fake_llm,
-        conversation=conversation,
-        transcript="[#1] 相手: こんにちは",
+        transcript="[#1] Aさん: こんにちは\n[#2] Bさん: こんにちは",
         partner_speaker_id=None,
         current_states=[],
     )
     assert created == []
+    # モデルも呼ばない。決められないと分かっている場合に問い合わせない。
+    assert not any("いまの状態" in call[-1].content for call in fake_llm.calls)

@@ -335,6 +335,12 @@ class CharacterState(Base):
 
     # 根拠になった記憶。訂正・削除されたら再評価が要る（ISSUE-016）。
     basis_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
+    # 上の根拠が「暫定」かどうか。採用のときに、その会話から採用済みの記憶を
+    # 自動で並べたものは暫定になる。後から採用された記憶が抜けているため、
+    # 完全に特定した根拠として扱わない（フェーズ3再々レビューの指摘1）。
+    basis_is_provisional: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     # 根拠が変わった。開発者が確認するまで印を残す。自動では消さない。
     needs_review: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0", nullable=False

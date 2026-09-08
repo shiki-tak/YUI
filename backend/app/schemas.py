@@ -300,6 +300,8 @@ class CharacterStateOut(ORMModel):
     topic: str | None
     content: str
     basis_memory_ids: list[int] | None
+    # 自動で並べた暫定の根拠かどうか。完全に特定した根拠と区別する。
+    basis_is_provisional: bool
     needs_review: bool
     review_reason: str | None
     status: str
@@ -321,8 +323,24 @@ class CharacterStateCreate(BaseModel):
     # 根拠にした記憶。ここに挙げた記憶が訂正・削除されると、再評価の印が付く。
     basis_memory_ids: list[int] = Field(default_factory=list)
     visibility: Visibility = Visibility.PRIVATE
+    # 参照範囲。記憶と同じく、既定で全員に渡さない（ISSUE-010 と同じ考え方）。
     visible_to_speaker_id: int | None = None
+    visible_to_all: bool = False
     reason: str | None = None
+
+    @model_validator(mode="after")
+    def _check_scope(self) -> CharacterStateCreate:
+        if self.visible_to_all and self.visible_to_speaker_id is not None:
+            raise ValueError(
+                "visible_to_speaker_id と visible_to_all は同時に指定できません。"
+            )
+        if not self.visible_to_all and self.visible_to_speaker_id is None:
+            raise ValueError(
+                "参照範囲を指定してください。"
+                "特定の相手との会話に限る場合は visible_to_speaker_id、"
+                "限定しない場合は visible_to_all=true。"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_target(self) -> CharacterStateCreate:

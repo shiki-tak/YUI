@@ -176,7 +176,10 @@ async def correct_memory(
     # この記憶を根拠にした関心・関係性へ、再評価の印を付ける（ISSUE-016）。
     # 自動では直さない。訂正が派生先にも及ぶかは開発者が判断する。
     await mark_for_review(
-        session, memory_id=memory.id, reason=f"根拠にした記憶 #{memory.id} が訂正された"
+        session,
+        memory_id=memory.id,
+        reason=f"根拠にした記憶 #{memory.id} が訂正された",
+        source_conversation_id=memory.source_conversation_id,
     )
     return memory
 
@@ -201,7 +204,10 @@ async def delete_memory(
         session, memory, action="deleted", before=before, reason=reason or "誤りのため削除"
     )
     await mark_for_review(
-        session, memory_id=memory.id, reason=f"根拠にした記憶 #{memory.id} が削除された"
+        session,
+        memory_id=memory.id,
+        reason=f"根拠にした記憶 #{memory.id} が削除された",
+        source_conversation_id=memory.source_conversation_id,
     )
     return memory
 
@@ -240,6 +246,13 @@ async def restore_memory(
         action="restored",
         before=before,
         reason=f"変更履歴 {revision.id} の状態へ復元",
+    )
+    # 復元も根拠の変更。訂正に合わせて再評価した状態を、そのままにしない。
+    await mark_for_review(
+        session,
+        memory_id=memory.id,
+        reason=f"根拠にした記憶 #{memory.id} が復元された",
+        source_conversation_id=memory.source_conversation_id,
     )
     return memory
 

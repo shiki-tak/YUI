@@ -36,6 +36,7 @@ def snapshot(state: CharacterState) -> dict:
         "topic": state.topic,
         "content": state.content,
         "basis_memory_ids": list(state.basis_memory_ids or []),
+        "basis_is_provisional": state.basis_is_provisional,
         "needs_review": state.needs_review,
         "review_reason": state.review_reason,
         "status": state.status,
@@ -145,20 +146,46 @@ async def active_states(
 
 
 async def mark_for_review(
-    session: AsyncSession, *, memory_id: int, reason: str
+    session: AsyncSession,
+    *,
+    memory_id: int,
+    reason: str,
+    source_conversation_id: int | None = None,
 ) -> list[CharacterState]:
     """根拠にした記憶が変わった状態へ、再評価の印を付ける（ISSUE-016）。
 
     自動では消さない。訂正が正しいのか、そこから作った状態も直すべきなのかは
     開発者が判断する。印が付いている間は会話に渡さない。
+
+    根拠を記憶IDで持つ状態だけでなく、**同じ会話から作られた状態**にも印を
+    付ける。振り返りが作った状態は、候補の時点では記憶がまだ採用されておらず、
+    記憶IDを持てない。会話単位は粗いが、印は会話に渡さなくするだけで、
+    開発者が確認すれば戻せる。届かないまま古い内容を話すほうが重い
+    （フェーズ3再レビューの指摘1）。
     """
     stmt = select(CharacterState).where(
-        CharacterState.status.in_([StateStatus.ACTIVE.value, StateStatus.PENDING.value]),
-        CharacterState.basis_memory_ids.isnot(None),
+        # 撤回中のものも対象にする。撤回している間に根拠が変わり、そのまま
+        # 有効へ戻すと、古い内容が印なしで会話へ渡る（再々レビューの指摘2）。
+        CharacterState.status.in_(
+            [
+                StateStatus.ACTIVE.value,
+                StateStatus.PENDING.value,
+                StateStatus.WITHDRAWN.value,
+            ]
+        ),
     )
     affected: list[CharacterState] = []
     for state in (await session.execute(stmt)).scalars():
-        if memory_id not in (state.basis_memory_ids or []):
+        by_memory = memory_id in (state.basis_memory_ids or [])
+        # 根拠を持たない状態と、自動で並べた暫定の根拠しか持たない状態は、
+        # 会話単位で拾う。暫定の根拠は、後から採用された記憶が抜けているため、
+        # 完全に特定した根拠として扱えない（再々レビューの指摘1）。
+        by_conversation = (
+            (not state.basis_memory_ids or state.basis_is_provisional)
+            and source_conversation_id is not None
+            and state.source_conversation_id == source_conversation_id
+        )
+        if not (by_memory or by_conversation):
             continue
         before = snapshot(state)
         state.needs_review = True

@@ -15,11 +15,9 @@ import json
 import re
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.character_state import create_state
 from app.llm.base import ChatMessage, LLMClient
-from app.models import CharacterState, Conversation, StateKind, StateStatus
+from app.models import CharacterState, StateKind
 
 _JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
 
@@ -124,16 +122,22 @@ def format_current_states(states: list[CharacterState]) -> str:
     return "\n".join(lines)
 
 
-async def extract_state_candidates(
-    session: AsyncSession,
+async def propose_state_candidates(
     *,
     llm: LLMClient,
-    conversation: Conversation,
     transcript: str,
     partner_speaker_id: int | None,
     current_states: list[CharacterState],
-) -> list[CharacterState]:
-    """会話から関心・関係性の更新候補を作り、pending として保存する。"""
+) -> list[StatePayload]:
+    """会話から関心・関係性の更新候補を作り、pending として保存する。
+
+    相手を決められない会話（複数の相手がいる、相手の発言が無い）では作らない。
+    非公開の会話から作った状態にも参照範囲を引き継ぐ必要があり、誰に限るかを
+    決められないまま作ると、別の相手へ渡る（設計書 2.1、ISSUE-010）。
+    """
+    if partner_speaker_id is None:
+        return []
+
     response = await llm.chat(
         [
             ChatMessage(role="system", content=_INSTRUCTION),
@@ -146,25 +150,4 @@ async def extract_state_candidates(
         options={"temperature": 0.2},
     )
 
-    created: list[CharacterState] = []
-    for payload in _parse(response.text):
-        is_relationship = payload.kind == StateKind.RELATIONSHIP.value
-        if is_relationship and partner_speaker_id is None:
-            # 誰との関係か決められないものは作らない。相手を特定できないまま
-            # 関係性を残すと、別の相手との会話へ持ち出される（ISSUE-010）。
-            continue
-        created.append(
-            await create_state(
-                session,
-                kind=payload.kind,
-                content=payload.content,
-                topic=None if is_relationship else payload.topic,
-                subject_speaker_id=partner_speaker_id if is_relationship else None,
-                # 非公開の会話から作った状態は、その相手との会話に限る。
-                visible_to_speaker_id=partner_speaker_id,
-                source_conversation_id=conversation.id,
-                status=StateStatus.PENDING.value,
-                reason=payload.reason or "会話の振り返りから",
-            )
-        )
-    return created
+    return _parse(response.text)

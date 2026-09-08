@@ -67,8 +67,10 @@ async def test_today_is_given_to_the_model(client: AsyncClient, fake_llm: FakeLL
         call for call in fake_llm.calls if "occurred_on" in call[0].content
     )
     sent = memory_call[-1].content
-    assert "今日の日付:" in sent
+    assert "振り返りを行っている日:" in sent
     assert datetime.now(LOCAL_TZ).date().isoformat() in sent
+    # 相対的な日付の基準は、発言の日付。会話ログにも日付が入っている。
+    assert "／" in sent and "] 開発者:" in sent
 
 
 async def test_candidate_keeps_the_event_date(client: AsyncClient, fake_llm: FakeLLM) -> None:

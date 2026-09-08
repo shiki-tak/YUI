@@ -17,7 +17,14 @@ from app.agent.character_state import (
     snapshot,
 )
 from app.db import get_session
-from app.models import CharacterState, CharacterStateRevision, StateStatus
+from app.models import (
+    CharacterState,
+    CharacterStateRevision,
+    Memory,
+    MemoryStatus,
+    StateStatus,
+    Visibility,
+)
 from app.schemas import (
     CharacterStateCreate,
     CharacterStateDecision,
@@ -27,6 +34,50 @@ from app.schemas import (
 )
 
 router = APIRouter(tags=["states"])
+
+
+async def _check_scope_against_basis(
+    session: AsyncSession, payload: CharacterStateCreate
+) -> None:
+    """根拠の記憶より広い参照範囲を許さない。"""
+    stmt = select(Memory).where(Memory.id.in_(payload.basis_memory_ids))
+    memories = list((await session.execute(stmt)).scalars())
+    found = {memory.id for memory in memories}
+    missing = [mid for mid in payload.basis_memory_ids if mid not in found]
+    if missing:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"根拠にした記憶が見つかりません: {'、'.join(str(m) for m in missing)}",
+        )
+
+    for memory in memories:
+        if memory.visibility == Visibility.PRIVATE.value and (
+            payload.visibility == Visibility.PUBLIC
+        ):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"記憶 #{memory.id} は非公開です。そこから作る状態を公開にはできません。",
+            )
+        limited_to = memory.visible_to_speaker_id
+        if limited_to is not None and payload.visible_to_speaker_id != limited_to:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"記憶 #{memory.id} は相手を限定しています。"
+                f"そこから作る状態も、その相手に限定してください"
+                f"（visible_to_speaker_id={limited_to}）。",
+            )
+
+
+async def _dead_basis(session: AsyncSession, state: CharacterState) -> list[int]:
+    """根拠のうち、もう有効でない記憶。"""
+    if not state.basis_memory_ids:
+        return []
+    stmt = select(Memory).where(
+        Memory.id.in_(state.basis_memory_ids),
+        Memory.status == MemoryStatus.ACTIVE.value,
+    )
+    alive = {memory.id for memory in (await session.execute(stmt)).scalars()}
+    return [mid for mid in state.basis_memory_ids if mid not in alive]
 
 
 async def _get(session: AsyncSession, state_id: int) -> CharacterState:
@@ -54,7 +105,13 @@ async def read_states(
 async def add_state(
     payload: CharacterStateCreate, session: AsyncSession = Depends(get_session)
 ) -> CharacterState:
-    """状態を候補として追加する。採用するまで会話には使わない。"""
+    """状態を候補として追加する。採用するまで会話には使わない。
+
+    根拠にした記憶より広い範囲では作れない。記憶側で相手を限定していても、
+    そこから作った状態が別の相手へ渡ると、限定した意味が無くなる。
+    """
+    if payload.basis_memory_ids:
+        await _check_scope_against_basis(session, payload)
     return await create_state(
         session,
         kind=payload.kind,
@@ -81,6 +138,19 @@ async def decide_state(
     if payload.decision == "accept":
         if payload.content:
             state.content = payload.content
+        # 根拠が会話単位しかない状態に、その会話から採用された記憶を結び付ける。
+        # 候補の時点では記憶がまだ採用されておらず、記憶IDを持てないため
+        # （フェーズ3再レビューの指摘1）。
+        if not state.basis_memory_ids and state.source_conversation_id is not None:
+            stmt = select(Memory).where(
+                Memory.source_conversation_id == state.source_conversation_id,
+                Memory.status == MemoryStatus.ACTIVE.value,
+            )
+            basis = [memory.id for memory in (await session.execute(stmt)).scalars()]
+            state.basis_memory_ids = basis or None
+            # 自動で並べた根拠は暫定。後から採用される記憶が入らないため、
+            # 訂正の波及では会話単位でも拾う（再々レビューの指摘1）。
+            state.basis_is_provisional = True
         state.status = StateStatus.ACTIVE.value
         action = "accepted"
     else:
@@ -110,6 +180,16 @@ async def update_state(
         # 確認したので印を下ろす。何を根拠に下ろしたかは履歴に残る。
         state.needs_review = False
         state.review_reason = None
+    if payload.status == StateStatus.ACTIVE.value and not payload.reviewed:
+        # 有効へ戻すときは、根拠がまだ生きているかを見る。撤回している間に
+        # 根拠が消えていることがある（再々レビューの指摘2）。
+        gone = await _dead_basis(session, state)
+        if gone:
+            state.needs_review = True
+            state.review_reason = (
+                f"根拠にした記憶 {'、'.join(f'#{mid}' for mid in gone)} が"
+                "有効でなくなっている"
+            )
     await session.flush()
     record_revision(session, state, action="corrected", before=before, reason=payload.reason)
     return state

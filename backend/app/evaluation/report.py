@@ -52,21 +52,34 @@ def build_markdown(
         "",
     ]
 
-    total = sum(r.total for r in results)
-    passed = sum(r.passed for r in results)
+    machine = [r for r in results if not r.human_only]
+    human_only = [r for r in results if r.human_only]
+    total = sum(r.total for r in machine)
+    passed = sum(r.passed for r in machine)
     lines += [
         "## まとめ",
         "",
-        f"自動判定を通った試行：**{passed} / {total}**",
+        f"自動判定を通った試行：**{passed} / {total}**"
+        f"（機械で判定した {len(machine)} シナリオ）",
         "",
-        "| シナリオ | 観点 | 通った回数 |",
+        f"人が読んで判断するシナリオ：**{len(human_only)}**。"
+        "機械の判定項目を書いていないため、上の数には含めない。読んで判断する"
+        "まで、通ったとも通らなかったとも言えない。",
+        "",
+        f"実行できなかった試行：**{sum(r.failed_to_run for r in results)}**"
+        "（モデルの呼び出しや出力の読み取りに失敗したもの）。",
+        "",
+        "| シナリオ | 観点 | 判定 |",
         "| --- | --- | --- |",
     ]
     for result in results:
         aspect = ASPECTS.get(result.scenario.aspect, result.scenario.aspect).split("：")[0]
-        lines.append(
-            f"| {result.scenario.id} | {aspect} | {result.passed} / {result.total} |"
+        verdict = (
+            "人手（未判定）"
+            if result.human_only
+            else f"{result.passed} / {result.total}"
         )
+        lines.append(f"| {result.scenario.id} | {aspect} | {verdict} |")
     lines.append("")
 
     for result in results:
@@ -81,7 +94,12 @@ def build_markdown(
             lines += [scenario.description, ""]
 
         for index, attempt in enumerate(result.attempts, start=1):
-            mark = "通過" if attempt.ok else "不通過"
+            # 人手だけのシナリオは、機械では判定していない。「通過」と書かない。
+            mark = (
+                "未判定（人が読む）"
+                if result.human_only
+                else ("通過" if attempt.ok else "不通過")
+            )
             lines += [f"### {index} 回目（{mark}）", ""]
             for turn in attempt.turns:
                 lines.append(f"- 入力：{turn.text}")
@@ -111,6 +129,10 @@ def build_markdown(
                         lines.append(
                             f"  - {'○' if check.ok else '×'} {check.name}："
                             f"{_escape(check.detail)}"
+                        )
+                    if attempt.reflection.human_check:
+                        lines.append(
+                            f"  - 人が見る点：{attempt.reflection.human_check} → "
                         )
             lines.append("")
 

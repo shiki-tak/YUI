@@ -13,9 +13,10 @@ from datetime import UTC, date, datetime, time
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.agent.memory_store import find_similar_memories
-from app.config import LOCAL_TZ
+from app.config import LOCAL_TZ, to_local
 from app.llm.base import ChatMessage, LLMClient
 from app.models import (
     CandidateStatus,
@@ -83,8 +84,15 @@ _PICKUP_INSTRUCTION = """あなたは会話ログから、後で話題にでき�
   "source_message_id": 根拠になった発言の番号（会話の [#番号] から選ぶ）
 }
 
+例:
+[
+  {"content": "開発者は先週 高尾山に登った", "source_message_id": 1},
+  {"content": "開発者は次にシューズの話をしたいと言っている", "source_message_id": 3}
+]
+
 規則:
 - **迷ったら挙げてください。**ここで挙がらなかったものは、この先で拾い直せません。
+- 配列は1つだけ出す。内容ごとに配列を分けない。
 - 会話の中で実際に言われたことだけを挙げる。書かれていないことを補わない。
 - あいさつそのもの（「こんにちは」など）は挙げない。
 - source_message_id は、会話に出てくる [#番号] のいずれかを1つだけ選ぶ。
@@ -135,9 +143,10 @@ _INSTRUCTION = """あなたは、拾い出された内容から、長期的に�
 - あいさつ、天気の話のようなその場限りのやり取り、既に一般常識であることは出さない。
   ただし、上の promise と、相手が話した出来事はこれに当たらない。
 - occurred_on：会話に「先週」「昨日」「3日前」「今朝」のような、いつのことかを
-  示す言い方があれば、**必ず**日付へ直して入れる。会話の冒頭にある今日の日付を
-  もとに数える。手がかりが無い内容（好み、性格など、いつのことか決まらないもの）
-  だけ null にする。推測で日付を作らない。未来の日付は書かない。
+  示す言い方があれば、**必ず**日付へ直して入れる。**その言い方が出てきた発言の
+  日付**（会話ログの [#番号／日付]）を基準に数える。振り返りを実行した日では
+  ない。手がかりが無い内容（好み、性格など、いつのことか決まらないもの）だけ
+  null にする。推測で日付を作らない。未来の日付は書かない。
 - source_message_id には、その内容の根拠になった発言の番号を1つだけ選ぶ。
   会話に出てくる [#番号] のいずれかで、推測して番号を作らない。
 - 該当が無ければ [] とだけ出力する。
@@ -157,6 +166,19 @@ class PickupPayload(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+def _message_id(rest: list) -> int | None:
+    """["内容", "#1"] の2つ目から発言の番号を読む。読めなければ None。"""
+    if not rest:
+        return None
+    value = rest[0]
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        digits = re.sub(r"[^0-9]", "", value)
+        return int(digits) if digits else None
+    return None
+
+
 def _parse_pickups(text: str) -> list[PickupPayload]:
     """拾い出しの結果を読み取る。
 
@@ -170,16 +192,29 @@ def _parse_pickups(text: str) -> list[PickupPayload]:
         )
     try:
         raw = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise ReflectionParseError(
-            f"拾い出しの出力をJSONとして読み取れませんでした: {_excerpt(text)}"
-        ) from exc
+    except json.JSONDecodeError:
+        # 配列を分けて並べてくることがある。1つずつ読めれば拾い直す。
+        raw = []
+        for piece in re.findall(r"\[[^\[\]]*\]", text):
+            try:
+                parsed = json.loads(piece)
+            except json.JSONDecodeError:
+                continue
+            raw.append(parsed) if not isinstance(parsed, list) else raw.extend([parsed])
+        if not raw:
+            raise ReflectionParseError(
+                f"拾い出しの出力をJSONとして読み取れませんでした: {_excerpt(text)}"
+            ) from None
     if not isinstance(raw, list):
         raise ReflectionParseError("拾い出しの出力が配列ではありませんでした。")
 
     results: list[PickupPayload] = []
     problems: list[str] = []
     for index, item in enumerate(raw, start=1):
+        # ["内容", "#1"] の形で返ることがある。拾い出しは形式の作業なので、
+        # 読み取れる形は受け入れる。内容が失われるわけではない。
+        if isinstance(item, list) and 1 <= len(item) <= 2:
+            item = {"content": item[0], "source_message_id": _message_id(item[1:])}
         if not isinstance(item, dict):
             problems.append(f"{index}件目: 要素がオブジェクトではありません")
             continue
@@ -287,16 +322,27 @@ def _parse_candidates(text: str) -> list[CandidatePayload]:
     return results
 
 
-def format_transcript(messages: list[Message], partner_name: str, character_name: str) -> str:
-    """発言IDを付けて並べる。候補ごとに根拠の発言を指せるようにするため。"""
+def format_transcript(messages: list[Message], character_name: str) -> str:
+    """発言IDと発言者と日付を付けて並べる。
+
+    相手の発言をすべて同じ名前で並べると、複数の相手がいる会話で、Aさんの話が
+    Bさんのものとして抽出される。通常の返答では発言者を付けるようにしたが
+    （ISSUE-020）、振り返りの経路には届いていなかった。
+    """
     lines = []
     for message in messages:
-        who = (
-            character_name
-            if message.speaker_kind == SpeakerKind.CHARACTER.value
-            else partner_name
-        )
-        lines.append(f"[#{message.id}] {who}: {message.content}")
+        if message.speaker_kind == SpeakerKind.CHARACTER.value:
+            who = character_name
+        elif message.speaker is not None:
+            who = message.speaker.display_name
+        else:
+            who = "相手"
+        # 発言の日付も付ける。「昨日」がいつを指すかは、振り返りを実行した日
+        # ではなく、その発言をした日から決まる。日をまたいで振り返ると、
+        # 実行日を基準にした誤った日付になる（全体レビューの指摘7）。
+        when = message.created_at
+        stamp = to_local(when).strftime("%Y-%m-%d") if when else "日付不明"
+        lines.append(f"[#{message.id}／{stamp}] {who}: {message.content}")
     return "\n".join(lines)
 
 
@@ -305,13 +351,20 @@ async def extract_candidates(
     *,
     llm: LLMClient,
     conversation: Conversation,
-    partner_speaker_id: int | None,
-    partner_name: str,
     character_name: str,
 ) -> list[MemoryCandidate]:
-    """会話から記憶の候補を抽出し、pending として保存する。"""
+    """会話から記憶の候補を作る。**セッションへは入れない。**
+
+    モデルを2回呼ぶ間、書き込みのトランザクションを開いたままにしない。
+    SQLite は書き込みロックを1つしか持てないため、開いたまま待つと別の会話や
+    記憶の訂正が「database is locked」で失敗する。また、途中で失敗したときに
+    一部だけ保存された状態を残さないためでもある（フェーズ3全体レビューの
+    指摘4・5）。保存は呼び出し側が、すべて成功してからまとめて行う。
+    """
     stmt = (
         select(Message)
+        # 誰の発言かを会話ログに書くため、話者を一緒に読む。
+        .options(selectinload(Message.speaker))
         .where(Message.conversation_id == conversation.id)
         .order_by(Message.id)
     )
@@ -319,7 +372,18 @@ async def extract_candidates(
     if not messages:
         return []
 
-    transcript = format_transcript(messages, partner_name, character_name)
+    # 発言ID → その発言をした相手。候補の帰属を、最後の話者ではなく
+    # 根拠の発言から決めるために使う。
+    speaker_of: dict[int, int] = {
+        message.id: message.speaker_id
+        for message in messages
+        if message.speaker_kind != SpeakerKind.CHARACTER.value and message.speaker_id is not None
+    }
+    participants = set(speaker_of.values())
+    # 相手がひとりの会話なら、根拠の発言が分からなくてもその人と決められる。
+    sole_participant = next(iter(participants)) if len(participants) == 1 else None
+
+    transcript = format_transcript(messages, character_name)
     # 「先週」「昨日」を日付へ直すには、今日が何日かが要る。
     today = utcnow().astimezone(LOCAL_TZ).date()
 
@@ -343,8 +407,9 @@ async def extract_candidates(
             ChatMessage(
                 role="user",
                 content=(
-                    f"今日の日付: {today.isoformat()}\n\n"
-                    f"{format_pickups(pickups)}\n\n会話:\n{transcript}"
+                    f"振り返りを行っている日: {today.isoformat()}"
+                    "（相対的な日付は、その言い方が出てきた発言の日付から数える）"
+                    f"\n\n{format_pickups(pickups)}\n\n会話:\n{transcript}"
                 ),
             ),
         ],
@@ -362,6 +427,12 @@ async def extract_candidates(
             # 番号を作られた場合は根拠未確認として残す。直近の発言へ寄せると、
             # 無関係な発言を確かな根拠として保存してしまうため。
             source_message_id = None
+        # 誰の話かは、根拠になった発言をした人から決める。最後に話した人へ
+        # 寄せると、複数の相手がいる会話で別人の情報になる。
+        source_speaker_id = speaker_of.get(source_message_id) if source_message_id else None
+        if source_speaker_id is None:
+            source_speaker_id = sole_participant
+
         # 伝聞は、話している相手についての情報ではない。「AさんがBさんの好みを
         # 話した」を A さんの好みとして保存すると、次の会話で A さんの好みとして
         # 使われる。モデルの about_partner を、伝聞のときは採らない。
@@ -372,7 +443,7 @@ async def extract_candidates(
             session,
             content=payload.content,
             keywords=payload.keywords,
-            speaker_id=partner_speaker_id,
+            speaker_id=source_speaker_id,
             mode=conversation.mode,
         )
         candidate = MemoryCandidate(
@@ -380,9 +451,11 @@ async def extract_candidates(
             kind=payload.kind,
             content=payload.content.strip(),
             provenance=payload.provenance,
-            subject_speaker_id=partner_speaker_id if about_partner else None,
+            subject_speaker_id=source_speaker_id if about_partner else None,
             # 非公開の記憶は、この会話の相手との会話でだけ参照する。
-            visible_to_speaker_id=partner_speaker_id,
+            # 誰との会話で参照してよいか。決められない場合は空にし、採用の
+            # ときに開発者へ決めさせる（既定で全員へ渡さない、ISSUE-010）。
+            visible_to_speaker_id=source_speaker_id,
             certainty=payload.certainty,
             visibility=Visibility.PRIVATE.value,
             keywords=payload.keywords.strip(),
@@ -391,7 +464,5 @@ async def extract_candidates(
             similar_memory_ids=[item.memory.id for item in similar] or None,
             status=CandidateStatus.PENDING.value,
         )
-        session.add(candidate)
         candidates.append(candidate)
-    await session.flush()
     return candidates

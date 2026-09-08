@@ -50,6 +50,12 @@ class FakeLLM(LLMClient):
         # 生成中の状態を再現するための門。gate を待たせると応答待ちになる。
         self.entered = asyncio.Event()
         self.gate: asyncio.Event | None = None
+        # 特定の呼び出しだけを止めたいとき、その指示文を入れる。振り返りは
+        # 3回呼ぶため、何回目で止めるかを選べないと、止めたい経路を測れない。
+        self.gate_on: str | None = None
+        # 実際に門で止まったことを知らせる。entered は呼び出しごとに立つため、
+        # 何回目で止まったかを待ち分けられない。
+        self.held = asyncio.Event()
 
     def push(self, text: str) -> None:
         self.scripted.append(text)
@@ -71,7 +77,9 @@ class FakeLLM(LLMClient):
     ) -> LLMResponse:
         self.calls.append(messages)
         self.entered.set()
-        if self.gate is not None:
+        system = messages[0].content if messages else ""
+        if self.gate is not None and (self.gate_on is None or self.gate_on == system):
+            self.held.set()
             await self.gate.wait()
         if messages and messages[0].content == STATE_INSTRUCTION:
             text = self.state_scripted.pop(0) if self.state_scripted else self.state_default

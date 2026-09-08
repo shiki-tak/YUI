@@ -10,11 +10,11 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.agent.character_state import active_states
+from app.agent.character_state import active_states, create_state
 from app.agent.delivery import apply_delivery_state
 from app.agent.memory_store import create_memory
 from app.agent.reflection import ReflectionParseError, extract_candidates, format_transcript
-from app.agent.state_reflection import StateReflectionError, extract_state_candidates
+from app.agent.state_reflection import StateReflectionError, propose_state_candidates
 from app.agent.turn_lock import conversation_locks
 from app.config import Settings, get_settings
 from app.db import get_session
@@ -31,6 +31,8 @@ from app.models import (
     Speaker,
     SpeakerKind,
     SpeechRun,
+    StateKind,
+    StateStatus,
     utcnow,
 )
 from app.persona import load_persona
@@ -102,7 +104,22 @@ async def get_conversation(
     return conversation
 
 
-async def _last_partner(session: AsyncSession, conversation_id: int) -> Speaker | None:
+async def _conversation_messages(session: AsyncSession, conversation_id: int) -> list[Message]:
+    stmt = (
+        select(Message)
+        .options(selectinload(Message.speaker))
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.id)
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
+async def _sole_partner(session: AsyncSession, conversation_id: int) -> Speaker | None:
+    """その会話にひとりだけいる相手。複数いれば None を返す。
+
+    「最後に話した人」を相手として扱うと、複数の相手がいる会話で、別人の
+    情報をその人のものとして保存する（フェーズ3全体レビューの指摘1）。
+    """
     stmt = (
         select(Speaker)
         .join(Message, Message.speaker_id == Speaker.id)
@@ -110,19 +127,11 @@ async def _last_partner(session: AsyncSession, conversation_id: int) -> Speaker 
             Message.conversation_id == conversation_id,
             Message.speaker_kind == SpeakerKind.USER.value,
         )
-        .order_by(Message.id.desc())
-        .limit(1)
+        .distinct()
+        .limit(2)
     )
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
-async def _conversation_messages(session: AsyncSession, conversation_id: int) -> list[Message]:
-    stmt = (
-        select(Message)
-        .where(Message.conversation_id == conversation_id)
-        .order_by(Message.id)
-    )
-    return list((await session.execute(stmt)).scalars())
+    found = list((await session.execute(stmt)).scalars())
+    return found[0] if len(found) == 1 else None
 
 
 @router.post("/{conversation_id}/end", response_model=list[MemoryCandidateOut])
@@ -176,42 +185,62 @@ async def end_conversation(
                 "この会話の振り返りは実行中です。しばらく待って再試行してください。",
             )
 
-        partner = await _last_partner(session, conversation_id)
+        sole_partner = await _sole_partner(session, conversation_id)
         # 生成に入る前に DB の書き込みロックを手放す（会話 API と同じ理由）。
         await session.commit()
 
+        # 相手がひとりの会話でだけ、関係性の候補を作る。複数いる会話で
+        # 「その相手との関係」を最後の話者へ寄せると、別人の関係になる。
+        partner_id = sole_partner.id if sole_partner else None
+        messages = await _conversation_messages(session, conversation_id)
+        current_states = await active_states(
+            session, speaker_id=partner_id, mode=conversation.mode
+        )
+
         try:
+            # モデルを呼んでいる間は、書き込みのトランザクションを開かない。
+            # 開いたまま待つと、別の会話の書き込みが「database is locked」で
+            # 失敗する。抽出はここでは保存せず、すべて成功してからまとめて
+            # 保存する（フェーズ3全体レビューの指摘4・5）。
             candidates = await extract_candidates(
                 session,
                 llm=llm,
                 conversation=conversation,
-                partner_speaker_id=partner.id if partner else None,
-                partner_name=partner.display_name if partner else "相手",
                 character_name=character_name,
             )
             # 関心・関係性の更新候補は、別の呼び出しで作る。同じ指示文へ項目を
             # 足すと記憶の抽出が落ちるため（ISSUE-017 で実測）。
-            await extract_state_candidates(
-                session,
+            state_payloads = await propose_state_candidates(
                 llm=llm,
-                conversation=conversation,
-                transcript=format_transcript(
-                    await _conversation_messages(session, conversation_id),
-                    partner.display_name if partner else "相手",
-                    character_name,
-                ),
-                partner_speaker_id=partner.id if partner else None,
-                current_states=await active_states(
-                    session,
-                    speaker_id=partner.id if partner else None,
-                    mode=conversation.mode,
-                ),
+                transcript=format_transcript(messages, character_name),
+                partner_speaker_id=partner_id,
+                current_states=current_states,
             )
         except (LLMError, ReflectionParseError, StateReflectionError) as exc:
             # 抽出できなかった会話を処理中・終了済みのまま残すと、やり直せない。
             # 特に出力の解析失敗は「候補なしの成功」と区別する必要がある。
+            # 途中まで作ったものは捨てる。残すと、再試行で二重に保存される。
+            await session.rollback()
             await _release_reflection(session, conversation_id)
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+        # ここから保存。すべて成功したものだけを、1つのトランザクションで書く。
+        session.add_all(candidates)
+        for payload in state_payloads:
+            is_relationship = payload.kind == StateKind.RELATIONSHIP.value
+            await create_state(
+                session,
+                kind=payload.kind,
+                content=payload.content,
+                topic=None if is_relationship else payload.topic,
+                subject_speaker_id=partner_id if is_relationship else None,
+                # 非公開の会話から作った状態は、その相手との会話に限る。
+                visible_to_speaker_id=partner_id,
+                source_conversation_id=conversation.id,
+                status=StateStatus.PENDING.value,
+                reason=payload.reason or "会話の振り返りから",
+            )
+        await session.flush()
 
         completed = utcnow()
         await session.execute(

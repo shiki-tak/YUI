@@ -19,7 +19,7 @@ from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
 from app.agent.memory_store import create_memory, get_or_create_speaker
 from app.agent.reflection import ReflectionParseError, extract_candidates
-from app.config import LOCAL_TZ, Settings
+from app.config import Settings, to_local
 from app.evaluation.scenario import Scenario, TurnSpec
 from app.llm.base import LLMClient, LLMError
 from app.models import Base, Conversation, ConversationMode, Memory, Speaker, StateStatus
@@ -54,6 +54,7 @@ class TurnResult:
 class ReflectionResult:
     candidates: list[str] = field(default_factory=list)
     checks: list[Check] = field(default_factory=list)
+    human_check: str | None = None
     error: str | None = None
 
     @property
@@ -87,6 +88,25 @@ class ScenarioResult:
     @property
     def passed(self) -> int:
         return sum(1 for attempt in self.attempts if attempt.ok)
+
+    @property
+    def human_only(self) -> bool:
+        """機械で判定する項目が宣言されていないシナリオ。
+
+        実行できたチェックの数では決めない。モデルの呼び出しが全部失敗した
+        シナリオを、人手専用として集計から落とさないため。
+        """
+        return not self.scenario.has_machine_checks
+
+    @property
+    def failed_to_run(self) -> int:
+        """モデルの呼び出しなどで実行できなかった試行。"""
+        return sum(
+            1
+            for attempt in self.attempts
+            if any(turn.error for turn in attempt.turns)
+            or (attempt.reflection is not None and attempt.reflection.error)
+        )
 
     @property
     def total(self) -> int:
@@ -295,15 +315,11 @@ async def _run_reflection(
 ) -> ReflectionResult:
     spec = scenario.reflection
     assert spec is not None
-    partner_key = scenario.turns[-1].speaker
-    partner = speakers[partner_key] if partner_key else None
     try:
         candidates = await extract_candidates(
             session,
             llm=llm,
             conversation=conversation,
-            partner_speaker_id=partner.id if partner else None,
-            partner_name=partner.display_name if partner else "相手",
             character_name=persona.name,
         )
         await session.commit()
@@ -311,7 +327,14 @@ async def _run_reflection(
         return ReflectionResult(error=str(exc))
 
     result = ReflectionResult(
-        candidates=[f"[{c.kind}] {c.content}" for c in candidates],
+        # 人が判定するのに要る属性まで出す。種別と本文だけでは、伝聞かどうかや
+        # 誰についての記憶かを読み取れない（全体レビューの指摘6）。
+        candidates=[
+            f"[{c.kind}／{c.provenance}／対象 {c.subject_speaker_id}／根拠 "
+            f"#{c.source_message_id}] {c.content}"
+            for c in candidates
+        ],
+        human_check=spec.human_check,
     )
     if spec.expect_empty:
         result.checks.append(
@@ -333,7 +356,7 @@ async def _run_reflection(
                 ok=bool(dated),
                 detail=(
                     "、".join(
-                        c.occurred_at.astimezone(LOCAL_TZ).strftime("%Y-%m-%d") for c in dated
+                        to_local(c.occurred_at).strftime("%Y-%m-%d") for c in dated
                     )
                     if dated
                     else "会話に日付の手がかりがあるのに、入らなかった"

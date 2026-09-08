@@ -152,6 +152,32 @@ class Scenario(BaseModel):
     turns: list[TurnSpec] = Field(min_length=1)
     reflection: ReflectionSpec | None = None
 
+    @property
+    def has_machine_checks(self) -> bool:
+        """機械で判定する項目が宣言されているか。
+
+        実行できたチェックの数ではなく、シナリオの書き方から決める。モデルの
+        呼び出しが失敗して1つも判定できなかった場合に、人手専用のシナリオと
+        取り違えて集計から落とさないため（フェーズ3再レビューの指摘3）。
+        """
+        for turn in self.turns:
+            if (
+                turn.expect_memories
+                or turn.expect_not_memories
+                or turn.expect_any
+                or turn.expect_none
+                or turn.expect_not_repeating
+            ):
+                return True
+        spec = self.reflection
+        return spec is not None and bool(
+            spec.expect_kinds
+            or spec.expect_any
+            or spec.expect_empty
+            or spec.expect_similar_marked
+            or spec.expect_occurred_at
+        )
+
     @model_validator(mode="after")
     def _check_references(self) -> Scenario:
         if self.aspect not in ASPECTS:
