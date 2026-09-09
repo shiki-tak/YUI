@@ -1018,10 +1018,12 @@ def _check_reflection(
         ],
         human_check=step.human_check,
     )
-    if outcome.accepted:
-        result.candidates.append(
-            f"（採用した記憶 {len(outcome.accepted)} 件）"
-        )
+    # **採用した記憶は1件ずつ出す**（PR12）。件数だけだと、自動採用と手動採用を
+    # 区別できず、何が確認を経ずに入ったのかを読めない。状態と目標は個別に
+    # 「自動採用」と出しているのに、記憶だけ件数だった。
+    for memory in outcome.accepted:
+        mark = "自動採用" if memory.auto_adopted else "採用"
+        result.candidates.append(f"[記憶／{memory.kind}／{mark}] {memory.content}")
     for state in outcome.states:
         mark = _adoption_mark(state, state in outcome.accepted_states)
         result.candidates.append(f"[状態／{state.kind}／{mark}] {state.content}")
@@ -1134,6 +1136,28 @@ def _check_reflection(
                 ),
             )
         )
+    if getattr(step, "expect_provenance", None):
+        # **入手経路そのものを見る**（ISSUE-023）。本文に語が含まれるかだけでは、
+        # 伝聞と本人の発言の取り違えが落ちない。取り違えると、次の会話で本人の
+        # 発言が「人づてに聞いた」として渡る。
+        for word, expected in step.expect_provenance.items():
+            hit = [c for c in candidates if word in c.content]
+            actual = sorted({c.provenance for c in hit})
+            result.checks.append(
+                Check(
+                    name=f"入手経路（{word}）",
+                    ok=bool(hit) and actual == [expected],
+                    detail=(
+                        f"期待どおり: {expected}"
+                        if bool(hit) and actual == [expected]
+                        else (
+                            f"{expected} ではなく {'、'.join(actual)}"
+                            if hit
+                            else f"「{word}」を含む候補がありません"
+                        )
+                    ),
+                )
+            )
     if step.expect_occurred_at:
         dated = [c for c in candidates if c.occurred_at is not None]
         result.checks.append(

@@ -179,6 +179,23 @@ def fake_speech() -> FakeSpeech:
     return FakeSpeech()
 
 
+@pytest.fixture(autouse=True)
+def _manual_adoption(monkeypatch: pytest.MonkeyPatch) -> None:
+    """テストは既定で自動採用を切る。**設定を明示しないテストの意味を変えない。**
+
+    出荷時の既定は `promise,goal` を自動採用する（2026-09-09 の測定で根拠を
+    得た）。それをテスト全体の前提にすると、手動採用の経路を測っているテストが
+    黙って別のものを測る。有効にしたいテストは自分で差し替える。
+
+    出荷時の既定そのものは `test_the_shipped_default_matches_the_measurement`
+    で固定する。
+    """
+    from app.config import Settings, get_settings
+
+    settings = Settings(auto_adopt="", database_url=get_settings().database_url)
+    monkeypatch.setattr("app.agent.reflection_job.get_settings", lambda: settings)
+
+
 @pytest_asyncio.fixture
 async def session_factory(tmp_path) -> AsyncIterator[async_sessionmaker]:
     """テスト用の一時DB。通常利用の会話・記憶は変更しない。"""

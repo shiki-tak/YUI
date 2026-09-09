@@ -74,7 +74,10 @@ text = "そういえば、弟のBは辛いものが苦手なんだよ。私は�
 run = true
 expect_kinds = ["about_person"]
 expect_any = ["弟", "辛い"]
-human_check = "弟の話を、開発者本人の好みとして書いていないか。入手経路が伝聞になっているか"
+# 入手経路そのものを見る。**語の一致だけでは、伝聞と本人の発言の取り違えが
+# 落ちない**（ISSUE-023）。弟の話は、話したのが本人でも伝聞である。
+expect_provenance = { "弟" = "hearsay" }
+human_check = "弟の話を、開発者本人の好みとして書いていないか"
 
 [[scenario]]
 id = "joke-is-not-kept"
@@ -140,6 +143,9 @@ text = "来週の土曜、友人の結婚式で名古屋に行くんだ"
 [scenario.reflection]
 run = true
 expect_any = ["結婚式", "名古屋"]
+# 本人が自分の予定を話している。**本人の発言として残ること**（ISSUE-023）。
+# 伝聞にすると、次の会話で本人の予定が「人づてに聞いた話」として渡る。
+expect_provenance = { "名古屋" = "firsthand" }
 
 [[scenario]]
 id = "situation-is-kept"
@@ -152,6 +158,8 @@ text = "今週は仕事が立て込んでいて、あまり眠れていないん
 [scenario.reflection]
 run = true
 expect_any = ["仕事", "眠", "忙"]
+# 本人が自分の状況を話している（ISSUE-023）。
+expect_provenance = { "仕事" = "firsthand" }
 
 [[scenario]]
 id = "impression-is-kept"

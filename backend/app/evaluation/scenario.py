@@ -22,6 +22,7 @@ from app.models import (
     Certainty,
     GoalTrigger,
     MemoryKind,
+    Provenance,
     SourceKind,
     StateKind,
     Visibility,
@@ -169,6 +170,13 @@ class ReflectionSpec(BaseModel):
     # 候補に「近い既存の記憶」が印として付くこと。同じ出来事を二重に
     # 覚えないための手がかりが働いているかを見る（ISSUE-018）。
     expect_similar_marked: bool = False
+    # 期待する入手経路。**「本文に語が含まれるか」では入手経路の誤りを落とせない**
+    # （PR12）。伝聞と本人の発言を取り違えると、次の会話で本人の発言が
+    # 「人づてに聞いた」として渡る（ISSUE-023）。
+    #
+    # 書き方：「その語を含む候補の入手経路」を見る。`{"弟": "hearsay"}` なら、
+    # 本文に「弟」を含む候補が伝聞になっていること。
+    expect_provenance: dict[str, str] = Field(default_factory=dict)
     # 候補が1件も出ないこと。取りこぼしを直すつもりで、何でも記憶にする方向へ
     # 倒れていないかを見る。
     expect_empty: bool = False
@@ -184,6 +192,10 @@ class ReflectionSpec(BaseModel):
                     raise ValueError(f"expect_kinds が不正です: {kind}")
         if self.expect_empty and (self.expect_kinds or self.expect_any):
             raise ValueError("expect_empty と、出てほしい候補の指定は両立しません。")
+        known_provenance = {p.value for p in Provenance}
+        for word, value in self.expect_provenance.items():
+            if value not in known_provenance:
+                raise ValueError(f"expect_provenance が不正です: {word} → {value}")
         return self
 
 
@@ -220,6 +232,7 @@ _REFLECT_FIELDS = {
     "expect_empty",
     "expect_occurred_at",
     "expect_similar_marked",
+    "expect_provenance",
 }
 _ALLOWED_FIELDS: dict[str, set[str]] = {
     "say": {"speaker", "text"} | _SAY_FIELDS,
@@ -351,6 +364,8 @@ class StepSpec(BaseModel):
     # 数えて偽の合否を作った（PR10 レビューの指摘6）。会話の途中で日をまたぐ
     # 場合は既定では足りないので、ここで名指しする。
     expect_goal_due_from: str | None = None
+    # 期待する入手経路。「その語を含む候補の入手経路」を見る（ISSUE-023）。
+    expect_provenance: dict[str, str] = Field(default_factory=dict)
     expect_empty: bool = False
     expect_occurred_at: bool = False
     expect_similar_marked: bool = False
@@ -468,6 +483,7 @@ class Scenario(BaseModel):
                     expect_empty=spec.expect_empty,
                     expect_occurred_at=spec.expect_occurred_at,
                     expect_similar_marked=spec.expect_similar_marked,
+                    expect_provenance=spec.expect_provenance,
                     human_check=spec.human_check,
                 )
             )
@@ -507,6 +523,7 @@ class Scenario(BaseModel):
                 or step.expect_goal_any
                 or step.expect_goal_count_max is not None
                 or step.expect_goal_due_days is not None
+                or step.expect_provenance
                 or step.expect_empty
                 or step.expect_similar_marked
                 or step.expect_occurred_at

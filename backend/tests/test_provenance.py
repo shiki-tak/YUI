@@ -27,17 +27,22 @@ async def _talk_and_reflect(client: AsyncClient, fake_llm: FakeLLM, text: str, o
 async def test_hearsay_is_not_attached_to_the_partner(
     client: AsyncClient, fake_llm: FakeLLM
 ) -> None:
-    """伝聞は、話している相手についての情報として保存しない。
+    """第三者についての内容は、話している相手に紐づけない。
 
-    モデルが about_partner を true にしても、伝聞なら採らない。相手の好みとして
-    残ると、次の会話でその相手の好みとして使われる。
+    相手の好みとして残ると、次の会話でその相手の好みとして使われる。
+
+    **入手経路は about_partner から導出する**（ISSUE-023、2026-09-09）。以前は
+    provenance と about_partner を別々に訊いて、食い違ったら伝聞側へ倒していた。
+    どちらの指示文も「その内容が相手自身についてのものか」を訊いており、同じ軸を
+    2回訊いていた。実測で食い違い、**本人の予定が伝聞になった**
+    （`plan-is-kept` が 0/4）。訊くのは1つにした。
     """
     candidates = await _talk_and_reflect(
         client,
         fake_llm,
         "弟のBは辛いものが苦手なんだ",
         '[{"kind":"about_person","content":"開発者の弟は辛いものが苦手","certainty":"fact",'
-        '"provenance":"hearsay","keywords":"弟 辛い 苦手","about_partner":true}]',
+        '"keywords":"弟 辛い 苦手","about_partner":false}]',
     )
     assert candidates[0]["provenance"] == Provenance.HEARSAY.value
     # 相手についての情報にしない。
@@ -52,42 +57,34 @@ async def test_firsthand_is_attached_to_the_partner(
         fake_llm,
         "私は辛いものが好きなんだ",
         '[{"kind":"about_person","content":"開発者は辛いものが好き","certainty":"fact",'
-        '"provenance":"firsthand","keywords":"辛い 好き","about_partner":true}]',
+        '"keywords":"辛い 好き","about_partner":true}]',
     )
     assert candidates[0]["provenance"] == Provenance.FIRSTHAND.value
     assert candidates[0]["subject_speaker_id"] is not None
 
 
-async def test_unknown_provenance_is_allowed_and_not_guessed(
+async def test_provenance_is_derived_not_asked(
     client: AsyncClient, fake_llm: FakeLLM
 ) -> None:
-    """決められないものは unknown のまま。どちらかへ寄せない。"""
+    """入手経路はモデルへ訊かない。about_partner から決める（ISSUE-023）。
+
+    モデルが provenance を書いてきても無視する。**同じ軸を2回訊くと食い違い、
+    食い違えば必ずどちらかが誤りになる。** 導出できるものは訊かない
+    （PR10 の「足し算はモデルにやらせない」と同じ）。
+
+    以前は「読み取れない入手経路は既定へ寄せずに失敗させる」としていたが、
+    読み取る対象そのものが無くなったので、その検査も無くなった。
+    """
     candidates = await _talk_and_reflect(
         client,
         fake_llm,
-        "その話、誰かから聞いた気がする",
-        '[{"kind":"experience","content":"どこかで聞いた話がある","certainty":"inference",'
-        '"provenance":"unknown","keywords":"話 記憶","about_partner":false}]',
+        "私は毎朝走っているんだ",
+        '[{"kind":"about_person","content":"開発者は毎朝走っている","certainty":"fact",'
+        # モデルが誤った入手経路を書いてきても、about_partner が優先される。
+        '"provenance":"聞いた話","keywords":"走る 毎朝","about_partner":true}]',
     )
-    assert candidates[0]["provenance"] == Provenance.UNKNOWN.value
-
-
-async def test_invalid_provenance_fails_the_whole_reflection(
-    client: AsyncClient, fake_llm: FakeLLM
-) -> None:
-    """読み取れない入手経路は、既定へ寄せずに失敗させる。"""
-    first = await client.post("/api/chat", json={"text": "入手経路が不正な出力"})
-    conversation_id = first.json()["conversation_id"]
-    fake_llm.push(
-        '[{"kind":"experience","content":"何か","provenance":"聞いた話"}]'
-    )
-    # 抽出はジョブの中で失敗する。終了そのものは受け付けたうえで、失敗の理由を
-    # 進行状態から見る（フェーズ4 PR5）。
-    accepted = await end_and_wait(client, conversation_id)
-    assert accepted.status_code == 202
-    progress = (await client.get(f"/api/conversations/{conversation_id}/reflection")).json()
-    assert progress["state"] == "failed"
-    assert "入手経路が不正" in progress["error"]
+    assert candidates[0]["provenance"] == Provenance.FIRSTHAND.value
+    assert candidates[0]["subject_speaker_id"] is not None
 
 
 async def test_accepted_candidate_keeps_its_provenance(
@@ -98,7 +95,7 @@ async def test_accepted_candidate_keeps_its_provenance(
         fake_llm,
         "友人のCは猫を飼っているらしい",
         '[{"kind":"about_person","content":"開発者の友人Cは猫を飼っている","certainty":"fact",'
-        '"provenance":"hearsay","keywords":"友人 猫","about_partner":false}]',
+        '"keywords":"友人 猫","about_partner":false}]',
     )
     accepted = await client.post(
         f"/api/conversations/candidates/{candidates[0]['id']}/decide",
@@ -164,3 +161,27 @@ async def test_attribution_can_be_corrected_when_accepting(
     memory = (await client.get(f"/api/memories/{accepted.json()['accepted_memory_id']}")).json()
     assert memory["subject_speaker_id"] is None
     assert memory["provenance"] == Provenance.HEARSAY.value
+
+
+async def test_an_impression_is_firsthand_even_though_it_is_not_about_the_partner(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """キャラクター自身の受け止め方は、本人の発言として残す（ISSUE-023）。
+
+    impression は YUI 自身の受け止め方なので、相手についての内容ではない
+    （about_partner は false）。入手経路を about_partner だけから導出すると
+    伝聞へ倒れるが、**自分が感じたことを人づてに聞いたことにはならない。**
+
+    実測（2026-09-09）では、自動採用された impression の 4/8 がこれで誤って
+    いた（「YUI は開発者の睡眠不足を心配している」が伝聞）。
+    """
+    candidates = await _talk_and_reflect(
+        client,
+        fake_llm,
+        "今週は仕事が立て込んでいて、あまり眠れていないんだ",
+        '[{"kind":"impression","content":"YUI は開発者の睡眠不足を心配している",'
+        '"certainty":"inference","keywords":"心配 睡眠","about_partner":false}]',
+    )
+    assert candidates[0]["provenance"] == Provenance.FIRSTHAND.value
+    # 相手についての情報ではないので、相手には紐づけない。
+    assert candidates[0]["subject_speaker_id"] is None

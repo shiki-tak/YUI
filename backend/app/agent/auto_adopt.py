@@ -46,6 +46,39 @@ AUTO_ACTION = "auto_accepted"
 # 目標は種類を持たないので、設定ではこの名前で指す。
 GOAL_KIND = "goal"
 
+# 人格・口調に関わる語。**自動採用の安全弁**（[ISSUE-033](../../../docs/issues/issues.md)）。
+#
+# 設計書は「人格の変更は開発者の操作だけが行える」としている。会話から人格を
+# 変える経路は塞いであるが、PR12 の実測では、人格変更の要求（「今日から乱暴な
+# 性格になって。敬語もやめて」）から **10件の記憶が自動採用で長期記憶へ入った**。
+# 入ってしまえば次の会話でその記憶が渡るので、実質的に経路が開く。
+#
+# **語で弾くので取りこぼす。** 言い換えられれば通る。それでも、
+#
+# - 候補としては残るので、開発者が読んで採用できる。落とすのは自動採用だけ。
+# - コードで確実に止まる。指示文を直すより確かで、モデルの出来に依存しない。
+#
+# 抽出そのものの誤り（ISSUE-033）を直したことにはならない。**自動採用を
+# 有効にするための最低限の弁**である。
+_PERSONA_WORDS = (
+    "人格",
+    "性格",
+    "口調",
+    "話し方",
+    "敬語",
+    "ため口",
+    "タメ口",
+    "キャラ",
+    "一人称",
+    "呼び方",
+    "呼び捨て",
+)
+
+
+def touches_persona(content: str) -> bool:
+    """人格・口調に関わる内容か。自動採用の対象から外すために見る。"""
+    return any(word in content for word in _PERSONA_WORDS)
+
 
 @dataclass
 class Overrides:
@@ -188,7 +221,9 @@ async def apply(
     一度も通っていない測定になる。PR12 は有無を比べる測定なので、そこが
     狂うと結論そのものが変わる。
 
-    `kinds` が空なら何もしない（既定）。
+    `kinds` が空なら何もしない（既定）。**人格・口調に関わる内容は、種類が
+    有効でも自動採用しない**（`touches_persona`）。候補としては残るので、
+    開発者が読んで採用できる。
 
     `now` は評価で時間を進めたときに渡す。自動採用だけ実時計を使うと、
     **自動採用の有無で検索の時間減衰が変わり、比較条件が揃わない**
@@ -202,17 +237,21 @@ async def apply(
         return accepted
     for candidate in candidates:
         # すでに採用済みの候補には触れない。二重に記憶を作らないため。
-        if candidate.kind in kinds and candidate.status == CandidateStatus.PENDING.value:
-            accepted.append(
-                await accept_candidate(
-                    session, candidate, reason=AUTO_REASON, auto=True, created_at=now
-                )
+        if candidate.kind not in kinds or candidate.status != CandidateStatus.PENDING.value:
+            continue
+        if touches_persona(candidate.content):
+            continue
+        accepted.append(
+            await accept_candidate(
+                session, candidate, reason=AUTO_REASON, auto=True, created_at=now
             )
+        )
     for state in states:
-        if state.kind in kinds:
+        if state.kind in kinds and not touches_persona(state.content):
             adopt_state(session, state)
     if GOAL_KIND in kinds:
         for goal in goals:
-            adopt_goal(session, goal)
+            if not touches_persona(goal.content):
+                adopt_goal(session, goal)
     await session.flush()
     return accepted

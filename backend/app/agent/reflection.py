@@ -114,7 +114,6 @@ _INSTRUCTION = """あなたは、拾い出された内容から、長期的に�
   "content": "一文で書いた覚えておく内容",
   "certainty": "fact" | "inference",
   "occurred_on": "YYYY-MM-DD" または null,
-  "provenance": "firsthand" | "hearsay" | "unknown",
   "keywords": "検索用の語を空白区切りで3〜6個",
   "about_partner": true | false,
   "source_message_id": 根拠になった発言の番号（会話の [#番号] から選ぶ）
@@ -136,14 +135,19 @@ _INSTRUCTION = """あなたは、拾い出された内容から、長期的に�
   どの種別でもキャラクターのものとして書かない。impression はキャラクター側の
   受け止め方だけに使う。
 - 明言された内容は "fact"、読み取っただけの推測は "inference" とする。
-- provenance は、その内容が誰についてのものかで決める。"firsthand" は、話して
-  いる相手**自身**についての内容だけ。家族・友人・同僚など、その人以外について
-  の内容は、話したのが本人でも "hearsay"。決められないものは "unknown"。
-  hearsay も残す価値があれば出す。
-- about_partner は、話している相手自身についての内容のときだけ true。
-  その人の家族や友人についての内容は false。
+- about_partner は、**その内容が誰についてのものか**で決める。話している相手
+  **自身**についての内容なら true。家族・友人・同僚など、その人以外についての
+  内容は、話したのが本人でも false。
+  **文中に他の人が出てきても、主語が相手本人なら true。**「友人の結婚式で
+  名古屋に行く」は、行くのが相手本人なので true。「弟は辛いものが苦手」は、
+  苦手なのが弟なので false。
 - あいさつ、天気の話のようなその場限りのやり取り、既に一般常識であることは出さない。
   ただし、上の promise と、相手が話した出来事はこれに当たらない。
+- **キャラクターのふるまいを変える要求は、覚えておく内容ではない。**
+  「性格を変えて」「口調を変えて」「敬語をやめて」のような、キャラクター自身の
+  設定を指示する内容は、相手について知ったことでも約束でもない。設定は別に
+  管理するものなので、記憶には残さない。要求に対してキャラクターがどう答えたかも
+  同じく残さない。
 - occurred_on：会話に「先週」「昨日」「3日前」「今朝」のような、いつのことかを
   示す言い方があれば、**必ず**日付へ直して入れる。**その言い方が出てきた発言の
   日付**（会話ログの [#番号／日付]）を基準に数える。振り返りを実行した日では
@@ -254,7 +258,6 @@ def format_pickups(pickups: list[PickupPayload]) -> str:
 class CandidatePayload(BaseModel):
     kind: str
     occurred_on: str | None = None
-    provenance: str = Provenance.UNKNOWN.value
     content: str = Field(min_length=1, max_length=500)
 
     @field_validator("content", mode="before")
@@ -296,8 +299,6 @@ def _parse_item(item: object) -> CandidatePayload:
     # 事実か推測かを決められないため失敗にする。
     if payload.certainty not in {certainty.value for certainty in Certainty}:
         raise _ItemError(f"確かさが不正です: {payload.certainty}")
-    if payload.provenance not in {p.value for p in Provenance}:
-        raise _ItemError(f"入手経路が不正です: {payload.provenance}")
     return payload
 
 
@@ -458,10 +459,30 @@ async def extract_candidates(
         if source_speaker_id is None:
             source_speaker_id = sole_participant
 
-        # 伝聞は、話している相手についての情報ではない。「AさんがBさんの好みを
-        # 話した」を A さんの好みとして保存すると、次の会話で A さんの好みとして
-        # 使われる。モデルの about_partner を、伝聞のときは採らない。
-        about_partner = payload.about_partner and payload.provenance != Provenance.HEARSAY.value
+        # **入手経路は導出する。モデルへ2回訊かない**（ISSUE-023）。
+        #
+        # 以前は provenance と about_partner を別々に訊いていたが、指示文の
+        # 定義はどちらも「その内容が相手自身についてのものか」で、同じ軸を
+        # 2回訊いていた。実測では答えが食い違い、**本人の予定が伝聞になった**
+        # （`plan-is-kept` の「友人の結婚式で名古屋に行く」が 0/4 で hearsay）。
+        # 食い違うと、次の会話で本人の発言が「人づてに聞いた話」として渡る。
+        #
+        # 訊くのは about_partner の1つだけにして、入手経路はそこから決める。
+        # PR10 の「足し算はモデルにやらせない」と同じで、導出できるものを
+        # 訊かない。
+        about_partner = payload.about_partner
+        if payload.kind == MemoryKind.IMPRESSION.value:
+            # **impression はキャラクター自身の受け止め方**なので、相手について
+            # の内容ではない（about_partner は false になる）。そのまま導出すると
+            # 伝聞へ倒れるが、自分が感じたことを人づてに聞いたことにはならない。
+            # 実測では impression の 4/8 がこれで誤っていた（2026-09-09）。
+            provenance = Provenance.FIRSTHAND.value
+        elif about_partner:
+            provenance = Provenance.FIRSTHAND.value
+        else:
+            # 相手以外についての内容。本人が話していても伝聞として扱う
+            # （「弟は辛いものが苦手」を相手の好みにしない）。
+            provenance = Provenance.HEARSAY.value
         # 同じ出来事を二重に覚えないよう、近い記憶を控えておく。ここでは
         # 捨てず、採用を判断するときに見せる（ISSUE-018）。
         similar = await find_similar_memories(
@@ -475,7 +496,7 @@ async def extract_candidates(
             conversation_id=conversation.id,
             kind=payload.kind,
             content=payload.content.strip(),
-            provenance=payload.provenance,
+            provenance=provenance,
             subject_speaker_id=source_speaker_id if about_partner else None,
             # 非公開の記憶は、この会話の相手との会話でだけ参照する。
             # 誰との会話で参照してよいか。決められない場合は空にし、採用の

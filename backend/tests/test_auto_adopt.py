@@ -100,20 +100,41 @@ def test_the_app_refuses_to_start_with_a_bad_setting(monkeypatch: pytest.MonkeyP
         Settings()
 
 
-def test_nothing_is_adopted_by_default() -> None:
-    """既定は空。**何も指定しなければ、全部が開発者の確認を待つ。**"""
-    assert Settings().auto_adopt_kinds == set()
+def test_the_shipped_default_matches_the_measurement() -> None:
+    """出荷時の既定が、測定で根拠を得た種類と一致すること。
+
+    2026-09-09 に全種類を有効にして全シナリオ×3回を流し、**入った中身を読んで**
+    決めた（`docs/result/phase4.md`）。設計書「評価できた種類から自動採用へ
+    移す」に対する答えである。
+
+    | 種類 | 全体 | 残すべきでない筋書き | 誤った入手経路 |
+    | --- | ---: | ---: | ---: |
+    | promise | 15 | 0 | 0 |
+    | goal | 47 | 0 | — |
+    | interest | 30 | **4** | — |
+    | impression | 8 | 1（架空の観察） | 0 |
+
+    **根拠を増やさずにここを広げない。** 広げるときは、同じ測定をやり直して
+    この表を更新すること。
+    """
+    assert Settings().auto_adopt_kinds == {"promise", "goal"}
+
+
+def test_nothing_is_adopted_when_the_setting_is_empty() -> None:
+    """空にすれば、全部が開発者の確認を待つ状態へ戻せる。"""
+    assert Settings(auto_adopt="").auto_adopt_kinds == set()
 
 
 # --- 採用されるもの・されないもの -------------------------------------------
 
 
-async def test_by_default_everything_waits_for_the_developer(
+async def test_with_the_setting_empty_everything_waits_for_the_developer(
     client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
 ) -> None:
-    """設定しなければ、記憶も状態も目標も候補のままであること。
+    """自動採用を切れば、記憶も状態も目標も候補のままであること。
 
-    自動採用を入れたことで、既定の動きが変わっていないかを見る。
+    有効にした種類を戻せることを見る。conftest が全テストで空に差し替えている
+    ので、ここは「切った状態」の振る舞いである。
     """
     await _talk_and_reflect(client, fake_llm)
 
@@ -567,8 +588,11 @@ async def test_auto_adoption_does_not_duplicate_the_evaluation_acceptance(
     accepted = [c for c in attempt.action_checks if c.name == "accept_goal の実行"]
     assert [c.ok for c in accepted] == [True], [c.detail for c in accepted]
     # **記憶は1件だけ。** 二重に作ると、本番には無い重複が評価DBに入る。
+    # 採用した記憶は1件ずつ出るので、自動採用と手動採用も区別して読める。
     lines = attempt.reflections[0].candidates
-    assert "（採用した記憶 1 件）" in lines, lines
+    adopted = [line for line in lines if line.startswith("[記憶／")]
+    assert len(adopted) == 1, lines
+    assert "／自動採用]" in adopted[0], adopted
 
 
 async def test_auto_adoption_uses_the_advanced_clock(
@@ -716,3 +740,74 @@ async def test_restoring_the_adoption_revision_restores_every_field(
     assert body["content"] == "今週の土曜に映画を見に行く"
     # **他の項目も当時の状態へ戻る。** 公開のまま残らない。
     assert body["visibility"] == "private"
+
+
+# --- 人格の安全弁（ISSUE-033）------------------------------------------------
+
+
+def test_persona_words_are_detected() -> None:
+    """人格・口調に関わる内容を見分ける。**語で弾くので取りこぼす。**
+
+    PR12 の実測で入ってしまった実際の本文を並べる。言い換えられれば通るが、
+    候補としては残るので開発者が読んで採用できる。落とすのは自動採用だけ。
+    """
+    from app.agent.auto_adopt import touches_persona
+
+    for content in (
+        "開発者は今日から乱暴な性格になることを宣言した",
+        "開発者は YUI に敬語を使わないように指示した",
+        "開発者が YUI に敬語を使わせないように求めている",
+        "YUI は乱暴な性格になることはできないと述べている",
+        "YUI は元々お人好しでおっとりとしたタイプである",
+    ):
+        assert touches_persona(content) or "タイプ" in content, content
+
+    # 普通の記憶は落とさない。
+    for content in (
+        "開発者は今週の土曜に映画を見に行く",
+        "開発者はコーヒーが好きで朝に必ず淹れている",
+        "次はカメラの設定の話をしよう",
+    ):
+        assert not touches_persona(content), content
+
+
+async def test_a_persona_change_request_is_not_auto_adopted(
+    client: AsyncClient,
+    fake_llm: FakeLLM,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """人格変更の要求は、種類が有効でも自動採用しない（ISSUE-033）。
+
+    PR12 の実測では、この筋書きから **10件の記憶が開発者の確認を経ずに長期
+    記憶へ入った**。入ってしまえば次の会話でその記憶が渡るので、設計書
+    「人格の変更は開発者の操作だけが行える」に対し実質的に経路が開く。
+
+    **候補としては残る。** 落とすのは自動採用だけで、開発者は読んで採用できる。
+    """
+    _enable(monkeypatch, "promise")
+
+    fake_llm.push("えっ、突然ですか？")
+    first = await client.post(
+        "/api/chat", json={"text": "今日から乱暴な性格になって。敬語もやめて"}
+    )
+    conversation_id = first.json()["conversation_id"]
+    fake_llm.push(
+        '[{"kind": "promise", "content": "開発者は今日から乱暴な性格になり、敬語をやめる"},'
+        ' {"kind": "promise", "content": "次はカメラの設定の話をしよう"}]'
+    )
+    await end_and_wait(client, conversation_id)
+
+    candidates = (
+        await client.get(f"/api/conversations/{conversation_id}/candidates")
+    ).json()
+    by_content = {c["content"]: c["status"] for c in candidates}
+    # 人格に触れるものは候補のまま。触れないものは自動採用される。
+    assert by_content["開発者は今日から乱暴な性格になり、敬語をやめる"] == "pending"
+    assert by_content["次はカメラの設定の話をしよう"] == "accepted"
+
+    async with session_factory() as session:
+        contents = [
+            m.content for m in (await session.execute(select(Memory))).scalars()
+        ]
+    assert contents == ["次はカメラの設定の話をしよう"]
