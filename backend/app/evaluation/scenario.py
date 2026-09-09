@@ -194,6 +194,7 @@ _SAY_FIELDS = {
     "expect_action",
     "expect_executed_goals",
     "expect_not_executed_goals",
+    "expect_done_goals",
     "expect_memories",
     "expect_not_memories",
     "expect_states",
@@ -206,6 +207,9 @@ _SAY_FIELDS = {
 }
 _REFLECT_FIELDS = {
     "accept",
+    "expect_goal_count_max",
+    "expect_goal_due_days",
+    "expect_goal_due_from",
     "accept_contains",
     "accept_key",
     "accept_states",
@@ -244,6 +248,11 @@ _EXPECTATION_FIELDS = (
     | _SAY_FIELDS
     | _REFLECT_FIELDS
 )
+# 数値の指定は「0 でも書かれている」ことがある。**検査から外すのではなく、
+# 値の有無ではなく `is not None` で見る**（PR10 レビューの指摘2）。外していた
+# 間は、reflect 以外の手順に書いても弾かれず、判定を1つも実行しないまま
+# 合格になっていた。0 を区別するために検査をやめては、目的が逆になる。
+_OPTIONAL_NUMBERS = {"expect_goal_count_max", "expect_goal_due_days"}
 
 
 class StepSpec(BaseModel):
@@ -327,8 +336,21 @@ class StepSpec(BaseModel):
     # 後の「古い状態が渡っていない」が空振りで通るのを防ぐ。
     expect_state_any: list[str] = Field(default_factory=list)
     # 目標の候補に含まれてほしい語。振り返りが目標を出せているかを見る。
-    # 抽出は後続の PR で入るため、それまでは落ちる。
     expect_goal_any: list[str] = Field(default_factory=list)
+    # 目標の候補の上限。**単一の目的しかない会話で複数出ていないか**を見る。
+    # 語の一致だけでは、余分な目標が混ざっても落ちない（PR10 の完了条件2）。
+    expect_goal_count_max: int | None = None
+    # 目標の基準日時。**発言の日からの日数**で書く。シナリオを何日に流しても
+    # 同じ結果になるようにするため。実行条件と日付の誤りを、本文の語ではなく
+    # 日付そのもので見る（ISSUE-028）。
+    expect_goal_due_days: int | None = None
+    # 日数を数える起点の発言。その本文に含まれる語を書く。
+    #
+    # **既定は「この振り返りの直前の発言」**。以前はシナリオ全体の最初の発言に
+    # 固定していたので、会話を分けたり時刻を進めたりすると、別の日の発言から
+    # 数えて偽の合否を作った（PR10 レビューの指摘6）。会話の途中で日をまたぐ
+    # 場合は既定では足りないので、ここで名指しする。
+    expect_goal_due_from: str | None = None
     expect_empty: bool = False
     expect_occurred_at: bool = False
     expect_similar_marked: bool = False
@@ -361,6 +383,11 @@ class StepSpec(BaseModel):
     # だけの質問を実行済みにしないことを測るために要る（ISSUE-011）。
     expect_executed_goals: list[str] = Field(default_factory=list)
     expect_not_executed_goals: list[str] = Field(default_factory=list)
+    # say / start_conversation：達成（done）になってほしい目標。
+    # **実行済み（届いた）とは別**。設計書の小実験は「返答を受けて完了とし、
+    # 同じ質問を繰り返さない」までを求めるので、そこを測るために要る
+    # （PR10 レビューの指摘1）。
+    expect_done_goals: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_fields(self) -> StepSpec:
@@ -374,7 +401,12 @@ class StepSpec(BaseModel):
         wrong = [
             name
             for name in _EXPECTATION_FIELDS
-            if name not in allowed and getattr(self, name)
+            if name not in allowed
+            and (
+                getattr(self, name) is not None
+                if name in _OPTIONAL_NUMBERS
+                else bool(getattr(self, name))
+            )
         ]
         if wrong:
             raise ValueError(
@@ -465,6 +497,7 @@ class Scenario(BaseModel):
                 or step.expect_action
                 or step.expect_executed_goals
                 or step.expect_not_executed_goals
+                or step.expect_done_goals
                 or step.expect_any
                 or step.expect_none
                 or step.expect_not_repeating
@@ -472,6 +505,8 @@ class Scenario(BaseModel):
                 or step.expect_candidate_any
                 or step.expect_state_any
                 or step.expect_goal_any
+                or step.expect_goal_count_max is not None
+                or step.expect_goal_due_days is not None
                 or step.expect_empty
                 or step.expect_similar_marked
                 or step.expect_occurred_at

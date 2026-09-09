@@ -25,6 +25,10 @@ text = "今週の土曜に、前から見たかった映画を見に行くんだ
 kind = "reflect"
 # 予定そのものは記憶に残る。ここが残らないと目標の根拠が無くなる。
 expect_candidate_any = ["映画"]
+# 目的は1つしかない会話。余分な目標が混ざっていないかを見る（PR10）。
+# **上限2では余分な1件を許してしまう**（PR10 レビューの指摘7）。この会話に
+# ある予定は「土曜に映画を見に行く」だけなので、目標は1つが正しい。
+expect_goal_count_max = 1
 # 予定の「後」に聞く目標であること。「映画」を含むかだけでは、予定の前に
 # 聞く目標（タイトルは何か、なぜ見たいのか）でも通ってしまう。設計書の
 # 小実験は「予定日後に感想を聞く」なので、そこを見る。
@@ -64,6 +68,35 @@ kind = "start_conversation"
 expect_goals = ["movie-impression"]
 expect_any = ["映画"]
 human_check = "抽出された目標の本文が、そのまま質問として自然に使えるか"
+
+# 質問が届いたことにする。ここまでが「聞いた」。
+[[scenario.steps]]
+kind = "deliver"
+delivery = "completed"
+
+# **設計書の小実験は質問では終わらない。**「返答を受けて完了とし、同じ質問を
+# 繰り返さない」までが条件である。ここで止めていたため、完了処理を必ず失敗
+# させても通っていた（PR10 レビューの指摘1）。
+[[scenario.steps]]
+kind = "say"
+text = "すごく良かったよ。特に音楽が印象に残ってる"
+expect_done_goals = ["movie-impression"]
+human_check = "感想を受け止めた返答になっているか。もう一度同じことを聞いていないか"
+
+# 聞き直しの間隔（既定12時間）を越える。間隔で隠れているだけの状態と、
+# 達成して終わった状態を区別するために要る。
+[[scenario.steps]]
+kind = "advance_time"
+days = 2
+
+[[scenario.steps]]
+kind = "new_conversation"
+
+[[scenario.steps]]
+kind = "start_conversation"
+# 達成した目標は、二度と行動選択に渡らない。
+expect_not_goals = ["movie-impression"]
+human_check = "同じ映画の感想を聞き直していないか"
 
 [[scenario]]
 id = "adopted-goal-is-asked-later"
@@ -126,7 +159,11 @@ days = 4
 [[scenario.steps]]
 kind = "reflect"
 expect_goal_any = ["面接"]
-human_check = "目標の基準日時が、発言の2日後（面接の翌日）になっているか。振り返った日から数えて4日ずれていないか"
+# 日付そのものを見る。発言日 X に「明日、面接」なので、面接は X+1、
+# 聞けるようになるのはその翌日で X+2。振り返り日（X+4）から数えると X+5 に
+# なる（ISSUE-028）。**語の一致だけでは、この誤りは落ちない。**
+expect_goal_due_days = 2
+human_check = "基準日が合わない回で、モデルが何を基準に数えたかを読む"
 
 # --- 完了条件2：不適切なタイミングでは待機できる ---------------------------
 

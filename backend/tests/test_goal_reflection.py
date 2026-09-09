@@ -50,10 +50,15 @@ class _Stub:
         )
 
 
-async def test_a_plan_becomes_a_goal_with_a_date() -> None:
-    """予定を話したら、その日以降に聞く目標として読み取る。"""
+async def test_a_plan_becomes_a_goal_asked_from_the_day_after_the_event() -> None:
+    """予定を話したら、**その翌日**から聞く目標として読み取る。
+
+    モデルが答えるのは予定の日そのもの（土曜 = 9/13）で、+1 日はコードが足す。
+    以前はモデルに翌日を書かせていたが、+1 だけを落とす誤りが実測で 3 回とも
+    出た（ISSUE-028）。
+    """
     llm = _Stub(
-        '[{"content": "土曜に見た映画の感想を聞く", "after_date": "2026-09-14",'
+        '[{"content": "土曜に見た映画の感想を聞く", "event_date": "2026-09-13",'
         ' "reason": "土曜に映画を見に行くと話した"}]'
     )
     payloads = await propose_goal_candidates(
@@ -73,7 +78,7 @@ async def test_a_plan_becomes_a_goal_with_a_date() -> None:
 async def test_a_goal_without_a_date_waits_for_the_next_conversation() -> None:
     """日付が無い目標は「次の会話」で実行してよい。"""
     for value in ('""', "null"):
-        llm = _Stub(f'[{{"content": "カメラの設定の話をする", "after_date": {value}}}]')
+        llm = _Stub(f'[{{"content": "カメラの設定の話をする", "event_date": {value}}}]')
         payloads = await propose_goal_candidates(
             llm=llm,  # type: ignore[arg-type]
             transcript="開発者: 次はカメラの設定の話をしよう",
@@ -91,9 +96,12 @@ async def test_an_unreadable_date_is_a_failure_not_a_looser_condition() -> None:
     occurred_at は欠けても意味が変わらないが、**実行条件は欠けると意味が
     変わる**。制限が緩む方向へ黙ってずらさない。
     """
-    for value in ("来週くらい", "2026-13-45", "9/14"):
+    # 9999-12-31 は ISO として正しいが、翌日にすると date の範囲を超える。
+    # 解析だけを検証して足し算を後回しにすると、素の OverflowError が測定の
+    # 外まで飛ぶ（PR10 レビューの指摘8）。
+    for value in ("来週くらい", "2026-13-45", "9/14", "9999-12-31"):
         llm = _Stub(
-            f'[{{"content": "映画の感想を聞く", "after_date": "{value}"}}]'
+            f'[{{"content": "映画の感想を聞く", "event_date": "{value}"}}]'
         )
         with pytest.raises(GoalReflectionError) as exc:
             await propose_goal_candidates(
@@ -103,7 +111,7 @@ async def test_an_unreadable_date_is_a_failure_not_a_looser_condition() -> None:
                 current_goals=[],
                 today=date(2026, 9, 8),
             )
-        assert "実行の基準日" in str(exc.value)
+        assert "予定の日" in str(exc.value)
 
 
 async def test_unreadable_output_is_an_error_not_an_empty_result() -> None:
@@ -123,7 +131,7 @@ async def test_unreadable_output_is_an_error_not_an_empty_result() -> None:
         )
 
     # 配列は読めても、要素が読み取れなければ失敗として扱う。
-    llm = _Stub('[{"after_date": "2026-09-14"}]')
+    llm = _Stub('[{"event_date": "2026-09-13"}]')
     with pytest.raises(GoalReflectionError):
         await propose_goal_candidates(
             llm=llm,  # type: ignore[arg-type]
@@ -188,7 +196,7 @@ async def test_extraction_is_a_separate_call_from_memories_and_states(
     )
     fake_llm.push_state('[{"kind":"interest","topic":"映画","content":"映画の話に興味がある"}]')
     fake_llm.push_goal(
-        '[{"content": "土曜に見た映画の感想を聞く", "after_date": "2026-09-14",'
+        '[{"content": "土曜に見た映画の感想を聞く", "event_date": "2026-09-13",'
         ' "reason": "土曜に映画を見に行くと話した"}]'
     )
 

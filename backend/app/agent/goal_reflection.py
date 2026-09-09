@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -39,16 +39,17 @@ _INSTRUCTION = """あなたは会話ログから、キャラクターが「次�
 出力は JSON 配列です。各要素の形式:
 {
   "content": "一文で書いた目的。誰に何を聞くか・話すかが分かるように書く",
-  "after_date": "YYYY-MM-DD。その日以降に聞けるようになるなら書く。次に話す
-                 ときに聞いてよいなら空文字",
+  "event_date": "YYYY-MM-DD。その予定が行われる日。次に話すときに聞いて
+                 よいなら空文字",
   "reason": "会話のどこからそう考えたか"
 }
 
 出すもの:
 - 相手がこれからの予定を話したこと。その予定が終わったあとに、どうだったかを
   聞く。例：「今週の土曜に映画を見に行く」→「土曜に見た映画の感想を聞く」。
-  after_date には予定の翌日を書く。**「明日」「今週の土曜」のような言い方は、
-  その言い方が出てきた発言の日付から数える。**
+  event_date には**予定そのものの日**を書く。聞けるのがその翌日からである
+  ことは、こちらで数える。**「明日」「今週の土曜」のような言い方は、その
+  言い方が出てきた発言の日付から数える。**
 - 続きを話すと言ったこと。例：「次はカメラの設定の話をしよう」。
 - 相手が気にかけていたことで、次に会ったときに触れたいこと。
   例：「面接が来週ある」→「面接がどうだったかを聞く」。
@@ -69,10 +70,10 @@ class GoalPayload(BaseModel):
     """抽出した目標の候補。保存する形にはここで直さない。"""
 
     content: str = Field(min_length=1, max_length=500)
-    after_date: str | None = Field(default=None, max_length=40)
+    event_date: str | None = Field(default=None, max_length=40)
     reason: str | None = Field(default=None, max_length=500)
 
-    @field_validator("content", "after_date", "reason", mode="before")
+    @field_validator("content", "event_date", "reason", mode="before")
     @classmethod
     def _normalize(cls, value: object) -> object:
         # 空白だけの本文を、最小長の検証より前に落とす（ISSUE-001 と同じ）。
@@ -84,7 +85,8 @@ class GoalPayload(BaseModel):
     def schedule(self) -> tuple[str, datetime | None]:
         """実行条件と、その基準日時。
 
-        空欄なら「次の会話」。日付が書いてあれば「その日以降」。
+        空欄なら「次の会話」。予定の日が書いてあれば「その**翌日**以降」。
+        翌日にする足し算は _parse_event_date が行う（モデルはやらない）。
 
         **書いてあるのに読めない日付は、ここへは来ない**（読み取りの段階で
         失敗として扱う）。黙って「次の会話」へ落とすと、予定より前に聞いて
@@ -92,16 +94,22 @@ class GoalPayload(BaseModel):
         欠けても意味が変わらないが、実行条件は欠けると意味が変わる
         （第1回レビューの指摘3）。
         """
-        if not self.after_date:
+        if not self.event_date:
             return GoalTrigger.NEXT_CONVERSATION.value, None
-        parsed = _parse_after_date(self.after_date)
+        parsed = _parse_event_date(self.event_date)
         if parsed is None:  # pragma: no cover - _parse で弾いている
-            raise GoalReflectionError(f"実行の基準日を読み取れません: {self.after_date}")
+            raise GoalReflectionError(f"予定の日を読み取れません: {self.event_date}")
         return GoalTrigger.AFTER_DATE.value, parsed
 
 
-def _parse_after_date(value: str | None) -> datetime | None:
-    """「その日以降」の基準日時を読み取る。
+def _parse_event_date(value: str | None) -> datetime | None:
+    """予定の日を読み取り、**その翌日**を実行の基準日時にする。
+
+    **翌日にするのはここ（コード）の仕事にする。** 以前はモデルに「予定の翌日
+    を書く」と指示していたが、実測では曜日から日付を出すところまでは当たるのに
+    +1 日だけを落とし、`relative-date-is-counted-from-the-utterance` が 3 回とも
+    予定の日そのものを返した（ISSUE-028）。日付の足し算は必ず同じ答えになるので、
+    モデルにやらせる理由が無い。
 
     日付だけを扱い、地域時刻のその日の始まりを UTC に直す。SQLite は timezone を
     落とすため、他の日時と同じく UTC で保存しないとずれる（ISSUE-003）。
@@ -111,11 +119,16 @@ def _parse_after_date(value: str | None) -> datetime | None:
     """
     if not value:
         return None
+    # 解析だけでなく、**翌日にする足し算と UTC への変換まで**ここで通す。
+    # date.max（9999-12-31）に1日足すと OverflowError になり、抽出の失敗
+    # （GoalReflectionError）ではなく素の例外が測定の外まで飛ぶ
+    # （PR10 レビューの指摘8）。読み取れない日付として扱う。
     try:
         parsed = date.fromisoformat(value.strip())
-    except ValueError:
+        asked_from = parsed + timedelta(days=1)
+        return datetime.combine(asked_from, time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
+    except (ValueError, OverflowError, OSError):
         return None
-    return datetime.combine(parsed, time.min, tzinfo=LOCAL_TZ).astimezone(UTC)
 
 
 def _parse(text: str) -> list[GoalPayload]:
@@ -145,10 +158,8 @@ def _parse(text: str) -> list[GoalPayload]:
         # 書いてあるのに読めない日付は、失敗として扱う。空欄（次の会話）と
         # 区別する。読み取れない実行条件を黙って落とすと、予定より前に聞いて
         # よい目標になる（第1回レビューの指摘3）。
-        if payload.after_date and _parse_after_date(payload.after_date) is None:
-            problems.append(
-                f"{index}件目: 実行の基準日を読み取れません: {payload.after_date}"
-            )
+        if payload.event_date and _parse_event_date(payload.event_date) is None:
+            problems.append(f"{index}件目: 予定の日を読み取れません: {payload.event_date}")
             continue
         results.append(payload)
 

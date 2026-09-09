@@ -190,6 +190,53 @@ async def test_an_answer_completes_even_without_a_delivery_notice(
         assert goal.last_executed_at is not None
 
 
+async def test_an_answer_after_an_aborted_question_still_completes(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
+) -> None:
+    """音が鳴らずに止めた質問でも、相手が答えたなら達成にする。
+
+    **再生の状態で達成を止めない**（PR10 レビューの指摘4）。一度は「aborted で
+    開始時刻が無いものは届いていない」として `_raised_goal_ids` から除いたが、
+    次の2つの理由で戻した。
+
+    - `playing` の通知だけが落ちて `aborted` が届くと、鳴っていても開始時刻は
+      NULL になる（ISSUE-013）。**開始時刻が無いことは未到達の証拠ではない。**
+    - ローカルの会話では文字が画面に出ている。音が鳴らなくても相手は読める。
+
+    除いた状態では、この具体的な返答を達成にできなかった。
+    上の `test_an_answer_completes_even_without_a_delivery_notice` と対で読むこと。
+    """
+    conversation_id, goal_id = await _setup(client, session_factory)
+
+    # 質問はしたが、鳴り始める前に止めた（playing を送らずに aborted）。
+    fake_llm.push_action('{"action": "ask", "goal": 1, "reason": "聞ける"}')
+    fake_llm.push("土曜の映画、どうでしたか？")
+    opened = await client.post(f"/api/conversations/{conversation_id}/open")
+    message_id = opened.json()["message"]["id"]
+    await client.post(
+        f"/api/conversations/messages/{message_id}/delivery", json={"state": "aborted"}
+    )
+
+    # 音は鳴らなかったが、相手は画面で読んで具体的に答えている。
+    fake_llm.push_action(
+        '{"action": "answer", "goal": null, "reason": "感想をもらった",'
+        ' "answered": [1], "cancelled": []}'
+    )
+    fake_llm.push("それは良かったですね。")
+    await client.post(
+        "/api/chat",
+        json={
+            "text": "質問は画面で読んだよ。映画は面白かった。音楽が特に良かった",
+            "conversation_id": conversation_id,
+        },
+    )
+
+    async with session_factory() as session:
+        goal = await session.get(Goal, goal_id)
+        assert goal.status == GoalStatus.DONE.value
+        assert goal.completed_at is not None
+
+
 async def test_a_goal_that_was_never_asked_is_not_completed(
     client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
 ) -> None:

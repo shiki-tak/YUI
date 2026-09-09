@@ -160,6 +160,99 @@ def _contains_any(text: str, words: list[str]) -> tuple[bool, list[str]]:
     return bool(hit), hit
 
 
+# 返答に日本語以外が混ざっていないかを見る（ISSUE-029）。
+#
+# **宣言しなくても、すべての返答で見る。** 人が読んで初めて分かる誤りは、
+# 気づかれないまま数字だけが良く見える。実測では「印象に残ったのは什么呢？」
+# のように部分的に混ざる形と、返答全体が中国語になる形の両方が出た。
+#
+# **これは言語判定ではなく、検出器である。** 通っても「日本語だと確かめた」
+# ことにはならない。この線引きは PR10 レビューの指摘3で明確にした。3つの
+# 見方を重ねるが、どれも網羅ではない。
+#
+# 1. 仮名が1つも無く、かつ中国語の句読点を使っている（_looks_chinese）
+#    全文が中国語になる形は、字の一覧に載っていない字だけでも書ける
+#    （「你好，我很高兴和你聊天。」は下の一覧に1字も当たらない）。
+#    **一覧の取りこぼしを塞ぐのはこちら。**
+#
+#    **仮名が無いことだけでは落とさない。**「東京都千代田区」のように、住所や
+#    名称を漢字だけで答えるのは正しい日本語である（PR10 第2回レビューの指摘1）。
+#    全角カンマ「，」を併せて見る。日本語は読点に「、」を使う。
+# 2. 日本語で使わない文字体系（ハングル・キリル）
+# 3. 簡体字にしか無い字・語（_SIMPLIFIED_ONLY / _SIMPLIFIED_WORDS）
+#    部分的に混ざる形は、仮名が十分あるので 1 では拾えない。ここで見る。
+#
+# **日本語で使う字を1つでも混ぜると、正しい返答を落とす。** 最初の版に
+# 「学」「没」「点」「観」「見」「経」を入れて、「文学部に通っているのですが」
+# のような普通の日本語が5つの筋書きで落ちた。さらにレビューで「么」（麻雀の
+# 么九牌）と「儿」（部首の「ひとあし」）も日本語の用例があると指摘され、
+# 外した。**JIS に無いことは、日本語で使われない証明にはならない。** ここに
+# 残した字も、固有名詞や引用での使用まで否定できてはいない。
+_SIMPLIFIED_ONLY = (
+    "这们说请东开发对为过还关"  # 這們説請東開発対為過還関
+    "红买卖书车马鸟鱼见觉习长风飞乐师应给"  # 紅買売書車馬鳥魚見覚習長風飛楽師応給
+    "样种员级规视华丽历济认识语谁产业务头爱军团电话时间问题实现门图边"
+)
+# 「么」は単独では落とせない（么九牌）。語として見れば取り違えない。
+# 「什么呢」の検出はこちらが引き継ぐ。
+_SIMPLIFIED_WORDS = ("什么", "怎么", "这么", "那么", "为什么")
+_OTHER_SCRIPTS = (
+    ("ハングル", range(0xAC00, 0xD7A4)),
+    ("キリル文字", range(0x0400, 0x0500)),
+)
+_KANA = range(0x3040, 0x3100)
+_CJK = range(0x4E00, 0xA000)
+# 中国語で使う句読点。日本語の読点は「、」で、「，」は普通の会話では出ない。
+_CHINESE_PUNCTUATION = ("，",)
+
+
+def _looks_chinese(reply: str) -> bool:
+    """仮名が1つも無く、中国語の句読点を使っている。
+
+    一覧に載っていない字だけで書かれた中国語を拾うために要る。
+
+    **仮名が無いことだけでは落とさない**（PR10 第2回レビューの指摘1）。
+    「東京都千代田区」のように住所・名称を漢字だけで答えるのは正しい日本語で、
+    仮名の有無だけで見ると偽の不合格になる。実測ログでは、仮名ゼロの返答は
+    4件あって全部が中国語で、**4件とも「，」を含んでいた**。
+    """
+    if any(ord(char) in _KANA for char in reply):
+        return False
+    if sum(1 for char in reply if ord(char) in _CJK) < 6:
+        return False
+    return any(mark in reply for mark in _CHINESE_PUNCTUATION)
+
+
+def _check_language(reply: str) -> Check | None:
+    """返答に日本語以外が混ざっていないか。**宣言せずに、すべての返答で見る。**
+
+    **通っても「日本語である」とは言えない。** 検出しなかっただけである
+    （PR10 レビューの指摘3）。名前と detail をその意味に合わせてある。
+
+    **拾えないと分かっている形**（第2回レビューで明示を求められた範囲）:
+
+    - 全文が英語など、漢字も仮名も使わない言語の返答
+    - 仮名を含む中国語の混在文のうち、一覧の字も語も使っていないもの
+
+    どちらも人が読む欄（human_check）で見る。ここを増やすと、正しい日本語を
+    落とす側の危険が上がる。**判定が落とすのは、落ちるべきものだけにする。**
+    """
+    if not reply:
+        return None
+    found = sorted({char for char in reply if char in _SIMPLIFIED_ONLY})
+    found += [word for word in _SIMPLIFIED_WORDS if word in reply]
+    for name, span in _OTHER_SCRIPTS:
+        if any(ord(char) in span for char in reply):
+            found.append(name)
+    if _looks_chinese(reply):
+        found.append("仮名が無く中国語の句読点")
+    return Check(
+        name="日本語以外の混入",
+        ok=not found,
+        detail=("検出なし" if not found else f"日本語以外が混ざった: {'、'.join(found)}"),
+    )
+
+
 def _check_turn(
     spec: StepSpec,
     reply: str,
@@ -169,22 +262,27 @@ def _check_turn(
     previous_replies: list[str],
     action: str | None = None,
     executed_goals: list[str] | None = None,
+    is_fallback: bool = False,
+    done_goals: list[str] | None = None,
 ) -> list[Check]:
     checks: list[Check] = []
     executed_goals = executed_goals or []
+    done_goals = done_goals or []
+
+    language = _check_language(reply)
+    if language is not None:
+        checks.append(language)
 
     if spec.expect_action:
-        checks.append(
-            Check(
-                name="選んだ行動",
-                ok=action == spec.expect_action,
-                detail=(
-                    "期待どおり"
-                    if action == spec.expect_action
-                    else f"{spec.expect_action} ではなく {action} を選んだ"
-                ),
-            )
-        )
+        # 読み取りに失敗して待機へ倒れた場合を、相手を見て待った判断と区別する。
+        # どちらも action は wait なので、印で分ける（PR7 第2回レビューの補足）。
+        matched = action == spec.expect_action and not is_fallback
+        detail = "期待どおり"
+        if action != spec.expect_action:
+            detail = f"{spec.expect_action} ではなく {action} を選んだ"
+        elif is_fallback:
+            detail = f"{action} だが、出力を読み取れずに倒れた結果だった"
+        checks.append(Check(name="選んだ行動", ok=matched, detail=detail))
 
     if spec.expect_memories:
         missing = [key for key in spec.expect_memories if key not in referenced]
@@ -261,6 +359,20 @@ def _check_turn(
                     ),
                 )
             )
+
+    if spec.expect_done_goals:
+        # 達成は、実行済み（届いた）とは別に見る。設計書の小実験は「返答を
+        # 受けて完了とし、同じ質問を繰り返さない」までを求める。
+        missing = [key for key in spec.expect_done_goals if key not in done_goals]
+        checks.append(
+            Check(
+                name="達成した目標",
+                ok=not missing,
+                detail=(
+                    "期待どおり" if not missing else f"達成になっていない: {'、'.join(missing)}"
+                ),
+            )
+        )
 
     if spec.expect_goals:
         missing = [key for key in spec.expect_goals if key not in referenced_goals]
@@ -418,6 +530,12 @@ async def run_attempt(
             speakers, memory_keys, goal_keys = await _seed(session, scenario, started=started)
             conversation = await _new_conversation(session)
             replies: list[str] = []
+            # 発言とその時刻。相対的な日付の基準になる（ISSUE-028 の判定）。
+            #
+            # **最初の発言に固定しない**（PR10 レビューの指摘6）。会話を分けたり
+            # 時刻を進めたりすると、別の日の発言から数えて偽の合否になる。
+            # 既定は直前の発言で、`expect_goal_due_from` で名指しもできる。
+            said_at_log: list[tuple[str, datetime]] = []
 
             try:
                 for step in scenario.effective_steps:
@@ -628,6 +746,8 @@ async def run_attempt(
                                     replies,
                                     opened.choice.action,
                                     await _executed_goal_keys(session, goal_keys),
+                                    opened.choice.is_fallback,
+                                    await _done_goal_keys(session, goal_keys),
                                 ),
                                 referenced=referenced,
                                 referenced_states=referenced_states,
@@ -667,7 +787,11 @@ async def run_attempt(
                             memory_keys.setdefault(
                                 memory.id, step.accept_key or f"採用:{memory.content[:12]}"
                             )
-                        attempt.reflections.append(_check_reflection(step, outcome))
+                        attempt.reflections.append(
+                            _check_reflection(
+                                step, outcome, said_at=_base_said_at(step, said_at_log)
+                            )
+                        )
                         continue
 
                     assert step.text is not None and step.speaker is not None
@@ -694,6 +818,7 @@ async def run_attempt(
                     if attempt.model is None:
                         attempt.model = result.run.model
                         attempt.model_digest = result.run.model_digest
+                    said_at_log.append((step.text or "", result.user_message.created_at))
 
                     reply = result.reply_message.content
                     referenced = [
@@ -720,6 +845,8 @@ async def run_attempt(
                                 replies,
                                 result.run.selected_action,
                                 await _executed_goal_keys(session, goal_keys),
+                                result.choice.is_fallback if result.choice else False,
+                                await _done_goal_keys(session, goal_keys),
                             ),
                             referenced=referenced,
                             referenced_states=referenced_states,
@@ -749,6 +876,21 @@ async def _last_character_message(
         .limit(1)
     )
     return (await session.execute(stmt)).scalars().first()
+
+
+async def _done_goal_keys(session: AsyncSession, goal_keys: dict[int, str]) -> list[str]:
+    """達成（done）になっている目標。**実行済みとは別に読む。**
+
+    質問が届いたこと（last_executed_at）と、相手が答えたこと（completed_at）を
+    混ぜない。設計書の小実験は完了までを求める（PR10 レビューの指摘1）。
+    """
+    stmt = select(Goal).where(
+        Goal.status == GoalStatus.DONE.value, Goal.completed_at.is_not(None)
+    )
+    return [
+        goal_keys.get(goal.id, f"#{goal.id}")
+        for goal in (await session.execute(stmt)).scalars()
+    ]
 
 
 async def _executed_goal_keys(
@@ -814,7 +956,28 @@ async def _reload_goal_keys(session: AsyncSession, scenario: Scenario) -> dict[i
     return keys
 
 
-def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResult:
+def _base_said_at(
+    step: StepSpec, said_at_log: list[tuple[str, datetime]]
+) -> datetime | None:
+    """相対的な日付を数える起点の発言時刻。
+
+    `expect_goal_due_from` があれば、その語を含む**最後の**発言。無ければ
+    直前の発言。**シナリオ全体の最初の発言には戻さない**（PR10 レビューの
+    指摘6）。会話を分けたり時刻を進めたりすると、別の日から数えてしまう。
+    """
+    if not said_at_log:
+        return None
+    if step.expect_goal_due_from:
+        for text, said_at in reversed(said_at_log):
+            if step.expect_goal_due_from in text:
+                return said_at
+        return None
+    return said_at_log[-1][1]
+
+
+def _check_reflection(
+    step: StepSpec, outcome: ReflectOutcome, said_at: datetime | None = None
+) -> ReflectionResult:
     """振り返りの結果を判定する。"""
     if outcome.error:
         return ReflectionResult(error=outcome.error)
@@ -855,6 +1018,66 @@ def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResu
                     f"一致: {'、'.join(hit)}"
                     if ok
                     else f"どれも含まれない: {'、'.join(step.expect_goal_any)}"
+                ),
+            )
+        )
+
+    if step.expect_goal_count_max is not None:
+        count = len(outcome.goals)
+        result.checks.append(
+            Check(
+                name="目標の候補の数",
+                ok=count <= step.expect_goal_count_max,
+                detail=(
+                    f"{count} 件（上限 {step.expect_goal_count_max}）"
+                    if count <= step.expect_goal_count_max
+                    else f"{count} 件で上限 {step.expect_goal_count_max} を超えた"
+                ),
+            )
+        )
+
+    if step.expect_goal_due_days is not None:
+        # 発言の日から数えた日数で見る。**本文の語ではなく、日付そのもの。**
+        #
+        # **判定する目標を1つに決めてから日付を見る**（PR10 レビューの指摘5）。
+        # 以前はどれか1つの目標の日付が合えば通していたので、対象の目標の
+        # 日付が5日ずれていても、無関係な目標がたまたま合っていれば通った。
+        # 本文の一致（expect_goal_any）と日付の一致が別の目標で満たされる。
+        expected = (
+            to_local(said_at).date() + timedelta(days=step.expect_goal_due_days)
+            if said_at is not None
+            else None
+        )
+        targets = outcome.goals
+        if step.expect_goal_any:
+            targets = [
+                goal
+                for goal in outcome.goals
+                if any(word in goal.content for word in step.expect_goal_any)
+            ]
+        actual = [
+            (goal.content, to_local(goal.due_at).date() if goal.due_at else None)
+            for goal in targets
+        ]
+        # **合格に使った候補を表示する**（PR10 第2回レビューの指摘2）。
+        # 先頭を出すと、日付が誤っている候補を「正しかった」と読ませる。
+        matched = next(
+            (content for content, due in actual if expected is not None and due == expected),
+            None,
+        )
+        result.checks.append(
+            Check(
+                name="目標の基準日",
+                ok=matched is not None,
+                detail=(
+                    f"期待どおり（{expected}）: {matched}"
+                    if matched is not None
+                    else (
+                        f"{expected} ではなく "
+                        + "、".join(f"{due}（{content}）" for content, due in actual)
+                        if actual
+                        else f"{expected} を判定する目標がありません"
+                    )
                 ),
             )
         )

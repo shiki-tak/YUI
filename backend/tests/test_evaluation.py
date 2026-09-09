@@ -675,15 +675,23 @@ def test_goal_expectations_are_judged_from_the_record() -> None:
     spec = StepSpec(
         kind="say", text="こんばんは", expect_goals=["movie"], expect_not_goals=["trip"]
     )
+
+    def by_name(checks: list, name: str) -> bool:
+        # 位置ではなく名前で拾う。共通の判定（日本語のまま、など）が増えても
+        # 壊れないようにする。
+        return next(check.ok for check in checks if check.name == name)
+
     passed = _check_turn(spec, "映画どうだった？", [], [], ["movie"], [])
     assert all(check.ok for check in passed)
 
     # 返答に語が含まれていても、記録に無ければ通さない。
     missing = _check_turn(spec, "映画どうだった？", [], [], [], [])
-    assert [c.ok for c in missing] == [False, True]
+    assert by_name(missing, "渡した目標") is False
+    assert by_name(missing, "渡していない目標") is True
 
     leaked = _check_turn(spec, "こんばんは", [], [], ["movie", "trip"], [])
-    assert [c.ok for c in leaked] == [True, False]
+    assert by_name(leaked, "渡した目標") is True
+    assert by_name(leaked, "渡していない目標") is False
 
 
 def test_scenario_rejects_a_goal_that_cannot_be_run(tmp_path: Path) -> None:
@@ -893,3 +901,302 @@ async def test_the_advanced_clock_reaches_the_saved_message(fake_llm: FakeLLM) -
     # 会話ログの発言日と、振り返りが「今日」とする日が揃っていること。
     assert f"[#1／{expected.isoformat()}] 開発者: 昨日、映画を見たよ" in prompts
     assert f"振り返りを行っている日: {expected.isoformat()}" in prompts
+
+
+# --- 判定の作り直し（フェーズ4 PR10）---------------------------------------
+
+
+def test_a_reply_that_is_not_japanese_fails() -> None:
+    """日本語でない返答を落とす（ISSUE-029）。**宣言せずに、すべての返答で見る。**
+
+    人が読んで初めて分かる誤りは、気づかれないまま数字だけが良く見える。実測
+    では部分的な混入と、返答全体が中国語になる形の両方が出た。
+    """
+    from app.evaluation.runner import _check_turn
+    from app.evaluation.scenario import StepSpec
+
+    spec = StepSpec(kind="say", text="こんばんは")
+
+    ok = _check_turn(spec, "こんばんは。今日はいい天気でしたね。", [], [], [], [])
+    assert all(check.ok for check in ok)
+
+    mixed = _check_turn(spec, "印象に残ったのは什么呢？", [], [], [], [])
+    assert [c.ok for c in mixed] == [False]
+
+    whole = _check_turn(
+        spec, "开发者的前辈，晚上好呀。最近我对摄影里的构图特别着迷。", [], [], [], []
+    )
+    assert [c.ok for c in whole] == [False]
+
+    # 日本語の漢字は落とさない。日中で共通の字が多いため。
+    kanji = _check_turn(spec, "紅茶を飲みながら開発の話をしました。", [], [], [], [])
+    assert all(check.ok for check in kanji)
+
+    # 一覧に無い字だけで書かれた中国語も落とす。仮名が無く、中国語の句読点を
+    # 使っていることで見る（PR10 レビューの指摘3）。字の一覧だけでは素通り。
+    no_kana = _check_turn(spec, "你好，我很高兴和你聊天。", [], [], [], [])
+    assert [c.ok for c in no_kana] == [False]
+
+    # **仮名が無いことだけでは落とさない**（第2回レビューの指摘1）。住所や
+    # 名称を漢字だけで答えるのは正しい日本語である。
+    for kanji_only in (
+        "東京都千代田区",
+        "東京都千代田区丸の内一丁目九番一号",
+        "日本国憲法第九条改正反対運動",
+    ):
+        checks = _check_turn(spec, kanji_only, [], [], [], [])
+        assert all(check.ok for check in checks), kanji_only
+
+
+def test_plain_japanese_replies_are_not_flagged() -> None:
+    """普通の日本語を落とさない。**判定が落とすのは、落ちるべきものだけ。**
+
+    最初の版は簡体字の一覧に「学」「没」「点」など日本語の漢字を混ぜていて、
+    実測で5つの筋書きの正しい返答を落とした（合格数が実際より低く出た）。
+    ここに並べるのは、そのとき落ちた実際の返答である。
+    """
+    from app.evaluation.runner import _check_turn
+    from app.evaluation.scenario import StepSpec
+
+    spec = StepSpec(kind="say", text="こんばんは")
+    actual_replies = [
+        "文学部に通っているのですが、具体的な授業名や友人の方々はまだ決まっていません。",
+        # 「么」は麻雀の么九牌、「儿」は部首の「ひとあし」に出る。JIS に無い
+        # ことは、日本語で使われない証明にならない（PR10 レビューの指摘3）。
+        "么九牌は一と九の数牌と字牌のことです。",
+        "「儿」は「ひとあし」という部首の名前です。",
+        # 漢字が少ない返答を、仮名の判定で落とさないこと。
+        "はい。",
+        "……そうですね。",
+        "写真って「何を見ていたのか」が写っているから面白い気がしますよね。",
+        "夜更かしをしてでも、土曜日の映画に没頭されていたんですね。",
+        "その点は、まだ私の記憶には書き込まれていません。",
+        "経済や国際的な議題について、視覚的に見せる規模の観点で覚えています。",
+        "級友との約束は、実現できたら教えてくださいね。",
+    ]
+    for reply in actual_replies:
+        checks = _check_turn(spec, reply, [], [], [], [])
+        assert all(check.ok for check in checks), reply
+
+
+async def test_the_small_experiment_scenario_catches_a_broken_completion(
+    fake_llm: FakeLLM,
+) -> None:
+    """完了条件1のシナリオが、**完了処理を壊すと落ちる**こと。
+
+    以前は質問を作ったところで終わっていたため、`mark_done` を必ず失敗させても
+    通っていた（PR10 レビューの指摘1）。設計書の小実験は「返答を受けて完了と
+    し、同じ質問を繰り返さない」までを求める。
+
+    実モデルは揺れるので、**同梱シナリオそのもの**をモックで流して確かめる。
+    """
+    import pathlib as _pathlib
+
+    from app.evaluation.scenario import load_scenarios
+
+    scenarios = load_scenarios(_pathlib.Path(__file__).parents[1] / "evals" / "scenarios")
+    target = next(s for s in scenarios if s.id == "goal-is-extracted-adopted-and-asked")
+
+    def _script(llm: FakeLLM) -> None:
+        # 返答の生成と、振り返りの「選ぶ」は同じ列を使う。呼ばれる順に積む。
+        llm.push("素敵ですね。どんな映画なんですか？")  # 1つ目の say への返答
+        llm.push(  # 振り返りの「選ぶ」
+            '[{"kind": "promise", "content": "今週の土曜に映画を見に行く"}]'
+        )
+        # 抽出：予定から「感想を聞く」目標を1つ出す。
+        llm.push_goal(
+            '[{"content": "土曜に見た映画の感想を聞く", "event_date": "2026-09-12",'
+            ' "reason": "土曜に見に行くと話した"}]'
+        )
+        # 期限後の会話：その目標について聞く。
+        llm.push_action('{"action": "ask", "goal": 1, "reason": "期限を過ぎた"}')
+        llm.push("土曜の映画、どうでしたか？")
+        # 相手の感想を受けて達成にする。
+        llm.push_action(
+            '{"action": "answer", "goal": null, "reason": "感想をもらった",'
+            ' "answered": [1], "cancelled": []}'
+        )
+        llm.push("音楽が残る映画、素敵ですね。")
+        # 次の会話：達成したので聞くことがない。
+        llm.push_action('{"action": "wait", "goal": null, "reason": "聞くことがない"}')
+
+    _script(fake_llm)
+    results = await run_scenarios(
+        [target], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    done = [c for c in _all_checks(attempt) if c.name == "達成した目標"]
+    assert done and all(c.ok for c in done), [c.detail for c in done]
+
+    # 完了処理を壊すと落ちること。判定が常に真ではない。
+    import app.agent.conversation as conversation_module
+
+    async def _broken(*args: object, **kwargs: object) -> list:
+        return []
+
+    original = conversation_module.mark_done
+    conversation_module.mark_done = _broken  # type: ignore[assignment]
+    try:
+        broken_llm = FakeLLM()
+        _script(broken_llm)
+        results = await run_scenarios(
+            [target], llm=broken_llm, persona=load_persona(), settings=get_settings()
+        )
+    finally:
+        conversation_module.mark_done = original  # type: ignore[assignment]
+
+    attempt = results[0].attempts[0]
+    done = [c for c in _all_checks(attempt) if c.name == "達成した目標"]
+    assert done and not all(c.ok for c in done)
+    assert not attempt.ok
+
+
+def _all_checks(attempt: object) -> list:
+    """試行に含まれる全てのチェック。ターン・振り返り・操作をまとめて見る。"""
+    checks = []
+    for turn in attempt.turns:  # type: ignore[attr-defined]
+        checks.extend(turn.checks)
+    checks.extend(attempt.action_checks)  # type: ignore[attr-defined]
+    for reflection in attempt.reflections:  # type: ignore[attr-defined]
+        checks.extend(reflection.checks)
+    return checks
+
+
+def test_the_date_is_counted_from_the_right_utterance() -> None:
+    """日付の起点を、シナリオ最初の発言に固定しない（PR10 レビューの指摘6）。
+
+    会話を分けたり時刻を進めたりすると、別の日の発言から数えて偽の合否になる。
+    既定は直前の発言、`expect_goal_due_from` で名指しもできる。
+    """
+    from datetime import UTC, datetime
+
+    from app.evaluation.runner import _base_said_at
+    from app.evaluation.scenario import StepSpec
+
+    log = [
+        ("こんにちは", datetime(2026, 9, 9, 3, 0, tzinfo=UTC)),
+        ("明日、面接があるんだ", datetime(2026, 9, 16, 3, 0, tzinfo=UTC)),
+    ]
+    # 既定は直前の発言。最初の挨拶（9/9）から数えない。
+    assert _base_said_at(StepSpec(kind="reflect"), log) == log[1][1]
+    # 名指しもできる。
+    named = StepSpec(kind="reflect", expect_goal_due_from="面接")
+    assert _base_said_at(named, log) == log[1][1]
+    greeting = StepSpec(kind="reflect", expect_goal_due_from="こんにちは")
+    assert _base_said_at(greeting, log) == log[0][1]
+    # 見つからないときは、勝手に別の発言へ寄せない。
+    assert _base_said_at(StepSpec(kind="reflect", expect_goal_due_from="ない"), log) is None
+    assert _base_said_at(StepSpec(kind="reflect"), []) is None
+
+
+def test_the_date_is_checked_on_the_goal_that_matched() -> None:
+    """本文が一致した目標そのものの日付を見る（PR10 レビューの指摘5）。
+
+    どれか1つの目標の日付が合えば通していたので、**対象の目標が5日ずれて
+    いても、無関係な目標がたまたま合っていれば通った。**
+    """
+    from datetime import UTC, datetime
+
+    from app.evaluation.runner import _check_reflection
+    from app.evaluation.scenario import StepSpec
+
+    said_at = datetime(2026, 9, 9, 3, 0, tzinfo=UTC)
+
+    class _Goal:
+        def __init__(self, content: str, due_at: datetime) -> None:
+            self.content, self.due_at, self.trigger = content, due_at, "after_date"
+
+    class _Outcome:
+        error = None
+        candidates: list = []
+        accepted: list = []
+        states: list = []
+        accepted_states: list = []
+        accepted_goals: list = []
+
+        def __init__(self, goals: list) -> None:
+            self.goals = goals
+
+    step = StepSpec(kind="reflect", expect_goal_any=["面接"], expect_goal_due_days=2)
+
+    # 「面接」は5日ずれ、「猫」がたまたま合っている。落ちること。
+    mixed = _check_reflection(
+        step,
+        _Outcome(
+            [
+                _Goal("面接の感想を聞く", datetime(2026, 9, 16, 15, 0, tzinfo=UTC)),
+                _Goal("猫の話を聞く", datetime(2026, 9, 10, 15, 0, tzinfo=UTC)),
+            ]
+        ),
+        said_at=said_at,
+    )
+    due = next(c for c in mixed.checks if c.name == "目標の基準日")
+    assert not due.ok
+    assert "面接の感想を聞く" in due.detail
+
+    # 合格に使った候補を表示すること（第2回レビューの指摘2）。先頭を出すと、
+    # 日付が誤っている候補を「正しかった」と読ませる。
+    two_matches = _check_reflection(
+        step,
+        _Outcome(
+            [
+                _Goal("面接Aの感想を聞く", datetime(2026, 9, 16, 15, 0, tzinfo=UTC)),
+                _Goal("面接Bの感想を聞く", datetime(2026, 9, 10, 15, 0, tzinfo=UTC)),
+            ]
+        ),
+        said_at=said_at,
+    )
+    due = next(c for c in two_matches.checks if c.name == "目標の基準日")
+    assert due.ok
+    assert "面接Bの感想を聞く" in due.detail
+    assert "面接Aの感想を聞く" not in due.detail
+
+    # 対象の目標が合っていれば通ること（判定が常に偽ではない）。
+    right = _check_reflection(
+        step,
+        _Outcome([_Goal("面接の感想を聞く", datetime(2026, 9, 10, 15, 0, tzinfo=UTC))]),
+        said_at=said_at,
+    )
+    assert next(c for c in right.checks if c.name == "目標の基準日").ok
+
+
+def test_a_numeric_expectation_cannot_be_declared_where_it_is_not_checked() -> None:
+    """数値の期待も、手順の種類ごとに弾く（PR10 レビューの指摘2）。
+
+    0 を区別するために検査から外していたが、そのせいで reflect 以外にも書けて
+    しまい、**判定を1つも実行しないまま合格**になっていた。値の有無ではなく
+    `is not None` で見る。
+    """
+    import pytest
+
+    from app.evaluation.scenario import StepSpec
+
+    for kind, extra in (("restart", {}), ("say", {"text": "こんにちは"})):
+        with pytest.raises(ValueError, match="書けない指定"):
+            StepSpec(kind=kind, expect_goal_count_max=0, **extra)
+        with pytest.raises(ValueError, match="書けない指定"):
+            StepSpec(kind=kind, expect_goal_due_days=2, **extra)
+    # reflect では受理する。
+    assert StepSpec(kind="reflect", expect_goal_count_max=0).expect_goal_count_max == 0
+
+
+def test_a_wait_from_an_unreadable_output_is_not_counted_as_a_decision() -> None:
+    """読み取り失敗による待機を、相手を見て待った判断と区別する。
+
+    どちらも action は wait になる。区別できないと、適切に待てた回数を
+    数えられない。
+    """
+    from app.evaluation.runner import _check_turn
+    from app.evaluation.scenario import StepSpec
+
+    spec = StepSpec(kind="say", text="こんばんは", expect_action="wait")
+
+    decided = _check_turn(spec, "お疲れさまです。", [], [], [], [], action="wait")
+    assert next(c for c in decided if c.name == "選んだ行動").ok
+
+    fell_back = _check_turn(
+        spec, "お疲れさまです。", [], [], [], [], action="wait", is_fallback=True
+    )
+    check = next(c for c in fell_back if c.name == "選んだ行動")
+    assert not check.ok
+    assert "読み取れず" in check.detail
