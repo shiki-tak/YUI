@@ -329,6 +329,13 @@ class Memory(Base):
     )
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default=MemoryStatus.ACTIVE, nullable=False)
+    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。
+    # **手動の採用と区別できないと、まとめて戻せない。** 設計書は「更新前後を
+    # 比較し、評価できた種類から自動採用へ移す」としており、移した結果が悪け
+    # れば戻せることが前提になる。画面でも区別して見せる。
+    auto_adopted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     # 記憶検索のキーワード。いまは語の一致で検索する。意味検索は、検索漏れが
     # 具体的に確認された段階で足す（ISSUE-008）。
     keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -430,6 +437,13 @@ class CharacterState(Base):
     review_reason: Mapped[str | None] = mapped_column(Text)
 
     status: Mapped[str] = mapped_column(String(16), default=StateStatus.PENDING, nullable=False)
+    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。
+    # **手動の採用と区別できないと、まとめて戻せない。** 設計書は「更新前後を
+    # 比較し、評価できた種類から自動採用へ移す」としており、移した結果が悪け
+    # れば戻せることが前提になる。画面でも区別して見せる。
+    auto_adopted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     # 参照範囲。記憶と同じ考え方で、非公開のものを配信で使わない。
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
@@ -503,6 +517,13 @@ class Goal(Base):
     review_reason: Mapped[str | None] = mapped_column(Text)
 
     status: Mapped[str] = mapped_column(String(16), default=GoalStatus.PENDING, nullable=False)
+    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。
+    # **手動の採用と区別できないと、まとめて戻せない。** 設計書は「更新前後を
+    # 比較し、評価できた種類から自動採用へ移す」としており、移した結果が悪け
+    # れば戻せることが前提になる。画面でも区別して見せる。
+    auto_adopted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
     # 参照範囲。記憶・状態と同じ考え方で、非公開のものを配信で使わない。
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))

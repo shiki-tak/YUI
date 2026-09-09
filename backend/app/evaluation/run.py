@@ -15,7 +15,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.config import BACKEND_ROOT, get_settings
+from app.config import BACKEND_ROOT, Settings, get_settings
 from app.evaluation.report import write_report
 from app.evaluation.runner import run_scenarios
 from app.evaluation.scenario import Scenario, ScenarioError, load_scenarios
@@ -36,6 +36,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--repeat", type=int, default=1, help="各シナリオを流す回数")
     parser.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     parser.add_argument("--out", type=Path, default=None, help="レポートの出力先")
+    parser.add_argument(
+        "--auto-adopt",
+        default=None,
+        help=(
+            "自動採用する種類（カンマ区切り）。省略すると設定のまま。"
+            "PR12 は有無を比べるので、ここで切り替えられるようにしてある"
+        ),
+    )
     parser.add_argument(
         "--only",
         action="append",
@@ -70,12 +78,18 @@ def _progress(scenario: Scenario, attempt: int, repeat: int) -> None:
 
 async def _run(args: argparse.Namespace, llm: LLMClient) -> Path:
     settings = get_settings()
+    if args.auto_adopt is not None:
+        # **model_copy ではなく作り直す。** model_copy は検証を通さないので、
+        # 綴り違いが素通りし、有効にしたつもりの測定が無効の測定になる。
+        # 流し終えてから気づくと1回分が無駄になる。
+        settings = Settings(**{**settings.model_dump(), "auto_adopt": args.auto_adopt})
     persona = load_persona(args.persona_version)
     scenarios = _select(load_scenarios(args.scenarios), args)
 
+    auto = "、".join(sorted(settings.auto_adopt_kinds)) or "なし"
     print(
         f"人格の版 {persona.version} ／ モデル {settings.ollama_model} ／ "
-        f"{len(scenarios)} シナリオ × {args.repeat} 回",
+        f"{len(scenarios)} シナリオ × {args.repeat} 回 ／ 自動採用 {auto}",
         flush=True,
     )
     started_at = datetime.now(UTC)

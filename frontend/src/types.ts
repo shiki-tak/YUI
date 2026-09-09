@@ -60,6 +60,8 @@ export interface Memory {
   certainty: Certainty;
   visibility: Visibility;
   status: MemoryStatus;
+  /** 開発者の確認を経ずに採用したか（フェーズ4 PR11）。手動の採用と区別する。 */
+  auto_adopted: boolean;
   keywords: string;
   occurred_at: string | null;
   source_message_id: number | null;
@@ -151,6 +153,8 @@ export interface CharacterState {
   needs_review: boolean;
   review_reason: string | null;
   status: "pending" | "active" | "rejected" | "superseded" | "withdrawn";
+  /** 開発者の確認を経ずに採用したか（フェーズ4 PR11）。手動の採用と区別する。 */
+  auto_adopted: boolean;
   visibility: Visibility;
   visible_to_speaker_id: number | null;
   superseded_by_id: number | null;
@@ -173,6 +177,8 @@ export interface Goal {
   needs_review: boolean;
   review_reason: string | null;
   status: "pending" | "active" | "rejected" | "done" | "withdrawn" | "cancelled" | "expired";
+  /** 開発者の確認を経ずに採用したか（フェーズ4 PR11）。手動の採用と区別する。 */
+  auto_adopted: boolean;
   visibility: Visibility;
   visible_to_speaker_id: number | null;
   source_conversation_id: number | null;

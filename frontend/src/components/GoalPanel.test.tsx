@@ -28,6 +28,7 @@ function goal(overrides: Partial<Goal> = {}): Goal {
     needs_review: false,
     review_reason: null,
     status: "active",
+    auto_adopted: false,
     visibility: "private",
     visible_to_speaker_id: null,
     source_conversation_id: null,
@@ -228,5 +229,20 @@ describe("GoalPanel の遷移の網羅（第2回レビュー）", () => {
       sent.push(String(update.mock.calls[0][1].status));
     }
     expect(sent.sort()).toEqual([...ALLOWED.active].sort());
+  });
+  it("自動採用したものを、開発者が採用したものと区別して見せる", async () => {
+    // 区別が付かないと、確認を経ていないものを経たものとして読む。まとめて
+    // 戻す判断もできない（フェーズ4 PR11）。
+    vi.spyOn(api, "goals").mockResolvedValue([
+      goal({ id: 1, content: "土曜に見た映画の感想を聞く", auto_adopted: true }),
+      goal({ id: 2, content: "カメラの設定の話をする", auto_adopted: false }),
+    ]);
+    render(<GoalPanel refreshKey={0} />);
+
+    const auto = await screen.findByText("土曜に見た映画の感想を聞く");
+    expect(auto.closest(".memory")).toHaveTextContent("自動採用");
+
+    const manual = screen.getByText("カメラの設定の話をする");
+    expect(manual.closest(".memory")).not.toHaveTextContent("自動採用");
   });
 });

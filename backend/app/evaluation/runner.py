@@ -768,6 +768,7 @@ async def run_attempt(
                                 character_name=persona.name,
                                 step=step,
                                 now=started + clock,
+                                auto_adopt_kinds=settings.auto_adopt_kinds,
                             )
                         except (
                             LLMError,
@@ -783,9 +784,21 @@ async def run_attempt(
                         # 採用した記憶も、シナリオの鍵で読めるようにしておく。
                         # accept_key を書けば、後の say の expect_memories から
                         # 「振り返りで作った記憶が渡ったか」を指せる。
+                        #
+                        # **鍵を付けるのは、シナリオが名指しした記憶だけ。**
+                        # 自動採用は accept_contains と関係なく入るので、全件に
+                        # 同じ鍵を付けると、無関係な記憶が期待した記憶として通る
+                        # （第2回レビューの指摘1：コーヒーの記憶に「天体観測」の
+                        # 鍵が付き、参照の判定が誤って合格した）。選別の条件は
+                        # steps.py の採用と同じにする。
                         for memory in outcome.accepted:
+                            named = step.accept_key and (
+                                not step.accept_contains
+                                or any(word in memory.content for word in step.accept_contains)
+                            )
                             memory_keys.setdefault(
-                                memory.id, step.accept_key or f"採用:{memory.content[:12]}"
+                                memory.id,
+                                step.accept_key if named else f"採用:{memory.content[:12]}",
                             )
                         attempt.reflections.append(
                             _check_reflection(
@@ -975,6 +988,18 @@ def _base_said_at(
     return said_at_log[-1][1]
 
 
+def _adoption_mark(item, accepted_in_step: bool) -> str:
+    """候補・採用・自動採用のどれかを示す。
+
+    **自動採用を「候補」と書かない**（フェーズ4 PR11）。読み手が、開発者の
+    確認を経たものと経ていないものを取り違える。手順の accept で採用したもの
+    と、設定によって自動で入ったものも区別する。
+    """
+    if getattr(item, "auto_adopted", False):
+        return "自動採用"
+    return "採用" if accepted_in_step else "候補"
+
+
 def _check_reflection(
     step: StepSpec, outcome: ReflectOutcome, said_at: datetime | None = None
 ) -> ReflectionResult:
@@ -998,10 +1023,10 @@ def _check_reflection(
             f"（採用した記憶 {len(outcome.accepted)} 件）"
         )
     for state in outcome.states:
-        mark = "採用" if state in outcome.accepted_states else "候補"
+        mark = _adoption_mark(state, state in outcome.accepted_states)
         result.candidates.append(f"[状態／{state.kind}／{mark}] {state.content}")
     for goal in outcome.goals:
-        mark = "採用" if goal in outcome.accepted_goals else "候補"
+        mark = _adoption_mark(goal, goal in outcome.accepted_goals)
         # 基準日時も出す。本文だけでは、いつから聞ける目標なのかを読み手が
         # 確かめられない（第1回レビュー）。表示は地域時刻に直す。
         due = f"／{to_local(goal.due_at).strftime('%Y-%m-%d %H:%M')}" if goal.due_at else ""

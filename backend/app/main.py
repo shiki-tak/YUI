@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.agent import reflection_job
-from app.api import chat, conversations, goals, memories, states
+from app.api import auto_adopt, chat, conversations, goals, memories, states
 from app.config import get_settings
 from app.db import SessionLocal
 from app.llm import get_llm_client
@@ -81,6 +81,7 @@ app.include_router(conversations.router, prefix="/api")
 app.include_router(memories.router, prefix="/api")
 app.include_router(states.router, prefix="/api")
 app.include_router(goals.router, prefix="/api")
+app.include_router(auto_adopt.router, prefix="/api")
 
 
 @app.get("/api/health", tags=["system"])

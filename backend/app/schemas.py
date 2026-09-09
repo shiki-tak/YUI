@@ -58,6 +58,8 @@ class MemoryOut(ORMModel):
     certainty: str
     visibility: str
     status: str
+    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。画面で区別して見せる。
+    auto_adopted: bool = False
     keywords: str
     occurred_at: UtcDatetime | None
     source_message_id: int | None
@@ -309,6 +311,8 @@ class CharacterStateOut(ORMModel):
     needs_review: bool
     review_reason: str | None
     status: str
+    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。画面で区別して見せる。
+    auto_adopted: bool = False
     visibility: str
     visible_to_speaker_id: int | None
     superseded_by_id: int | None
@@ -400,6 +404,8 @@ class GoalOut(ORMModel):
     needs_review: bool
     review_reason: str | None
     status: str
+    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。画面で区別して見せる。
+    auto_adopted: bool = False
     visibility: str
     visible_to_speaker_id: int | None
     source_conversation_id: int | None
@@ -518,3 +524,41 @@ class ReflectionProgress(BaseModel):
 class MemorySearchResult(BaseModel):
     query: str
     results: list[RetrievedMemoryOut]
+
+
+# --- 自動採用（フェーズ4 PR11）---------------------------------------------
+
+
+class AutoAdoptedOut(BaseModel):
+    """自動採用したもの。記憶・状態・目標をまとめて1つの形で返す。
+
+    3つの表にまたがるので、どの表のどの行かが分かるようにする。戻す前に
+    何が入ったのかを読むためのもので、詳細は各表の API で見る。
+    """
+
+    # "memory" / "state" / "goal"
+    table: str
+    id: int
+    kind: str
+    content: str
+    status: str
+    # 既存の UTC 補完型を使う。SQLite は timezone を落として返すため、素の
+    # datetime で出すとオフセットの無い値になる（レビューの指摘4）。
+    created_at: UtcDatetime
+
+
+class RollbackSkipped(BaseModel):
+    """戻せなかったもの。**理由を必ず添える。**
+
+    黙って取りこぼすと、戻したつもりで残る。達成した目標や、すでに持ち出した
+    目標は、取り下げても聞いた事実が消えないので触れない。
+    """
+
+    table: str
+    id: int
+    reason: str
+
+
+class RollbackResult(BaseModel):
+    reverted: list[AutoAdoptedOut]
+    skipped: list[RollbackSkipped]

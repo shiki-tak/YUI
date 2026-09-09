@@ -11,9 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from app.agent import get_agent, reflection_job
+from app.agent.auto_adopt import Overrides, accept_candidate
 from app.agent.conversation import ConversationAgent
 from app.agent.delivery import apply_delivery_state
-from app.agent.memory_store import create_memory, get_or_create_speaker
+from app.agent.memory_store import get_or_create_speaker
 from app.agent.turn_lock import conversation_locks
 from app.config import Settings, get_settings
 from app.db import get_session, get_session_factory
@@ -365,30 +366,26 @@ async def decide_candidate(
             status.HTTP_400_BAD_REQUEST,
             "subject_speaker_id と subject_to_none は同時に指定できません。",
         )
-    if payload.subject_to_none:
-        subject_speaker_id = None
-    elif payload.subject_speaker_id is not None:
-        subject_speaker_id = payload.subject_speaker_id
-    else:
-        subject_speaker_id = candidate.subject_speaker_id
-
-    memory = await create_memory(
+    # 開発者が直した内容は、**候補を書き換えずに**渡す（PR11 レビューの指摘6）。
+    # 書き換えると、モデルが抽出した内容と開発者が直した内容を区別して追えなく
+    # なる。設計書は「更新前後を比較し」て自動採用へ移すとしており、比較する元が
+    # 消える。採用の手順そのものは自動採用と同じ関数を通す。
+    await accept_candidate(
         session,
-        kind=(payload.kind.value if payload.kind else candidate.kind),
-        content=(payload.content or candidate.content),
-        subject_speaker_id=subject_speaker_id,
-        visible_to_speaker_id=candidate.visible_to_speaker_id,
-        certainty=(payload.certainty.value if payload.certainty else candidate.certainty),
-        provenance=(payload.provenance.value if payload.provenance else candidate.provenance),
-        visibility=(payload.visibility.value if payload.visibility else candidate.visibility),
-        keywords=(payload.keywords if payload.keywords is not None else candidate.keywords),
-        occurred_at=candidate.occurred_at,
-        source_message_id=candidate.source_message_id,
-        source_conversation_id=candidate.conversation_id,
+        candidate,
         reason=payload.reason or "会話の振り返りから採用",
+        auto=False,
+        overrides=Overrides(
+            kind=payload.kind.value if payload.kind else None,
+            content=payload.content,
+            certainty=payload.certainty.value if payload.certainty else None,
+            provenance=payload.provenance.value if payload.provenance else None,
+            visibility=payload.visibility.value if payload.visibility else None,
+            keywords=payload.keywords,
+            subject_speaker_id=payload.subject_speaker_id,
+            subject_to_none=payload.subject_to_none,
+        ),
     )
-    candidate.status = CandidateStatus.ACCEPTED.value
-    candidate.accepted_memory_id = memory.id
     return candidate
 
 

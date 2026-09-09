@@ -213,6 +213,9 @@ export function GoalPanel({ refreshKey }: { refreshKey: number }) {
         <div key={goal.id} className="memory">
           <div className="memory-head">
             <span className="tag">{schedule(goal)}</span>
+            {/* 開発者の確認を経ていないものを、経たものと並べて見せない
+                （フェーズ4 PR11）。区別が付かないと、戻す判断ができない。 */}
+            {goal.auto_adopted && <span className="tag warn">自動採用</span>}
             {goal.last_executed_at && (
               <span className="tag subtle">
                 実行済み {formatDate(goal.last_executed_at)}

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agent import auto_adopt
 from app.agent.character_state import active_states, create_state
 from app.agent.character_state import record_revision as state_revision
 from app.agent.character_state import snapshot as state_snapshot
@@ -92,6 +93,7 @@ async def run_reflection(
     character_name: str,
     step: StepSpec,
     now: datetime | None = None,
+    auto_adopt_kinds: set[str] | None = None,
 ) -> ReflectOutcome:
     """会話を振り返り、必要なら候補を採用する。
 
@@ -171,7 +173,24 @@ async def run_reflection(
         )
     await session.flush()
 
+    # 自動採用（フェーズ4 PR11）。**本番の振り返りと同じ関数を通す。**
+    # 評価が別経路を持つと、自動採用を有効にして測ったつもりが、一度も通って
+    # いない測定になる。PR12 は有無を比べる測定なので、そこが狂うと結論が変わる。
+    auto_accepted = await auto_adopt.apply(
+        session,
+        kinds=auto_adopt_kinds or set(),
+        candidates=candidates,
+        states=states,
+        goals=goals,
+        # 時間を進めた評価では、進めた側の時刻で記憶を作る。自動採用だけ実時計
+        # だと、検索の時間減衰が採用の有無で変わる（レビューの指摘5）。
+        now=now,
+    )
+
     outcome = ReflectOutcome(candidates=candidates, states=states, goals=goals)
+    # **自動で採用したものも「採用した記憶」として扱う**（レビューの指摘2）。
+    # 入れないと、後続の手順が使う鍵とレポートの表示が揃わない。
+    outcome.accepted.extend(auto_accepted)
     if not step.accept:
         await session.commit()
         return outcome
@@ -180,6 +199,11 @@ async def run_reflection(
         if step.accept_contains and not any(
             word in candidate.content for word in step.accept_contains
         ):
+            continue
+        if candidate.status != CandidateStatus.PENDING.value:
+            # すでに自動採用されている。もう一度作ると、**本番には無い重複の
+            # 記憶が評価DBに入る**（レビューの指摘2）。採用済みという結果は
+            # 同じなので、この手順は満たされている。
             continue
         memory = await create_memory(
             session,
@@ -300,16 +324,27 @@ async def delete_memory(session: AsyncSession, *, match: str) -> MemoryChange | 
 async def accept_goal(session: AsyncSession, *, match: str) -> list[Goal]:
     """開発者が目標を採用する。API と同じく、状態を変えて履歴を残す。
 
+    **これは「使う対象が採用済みになったか」の確認である**（PR11 第2回レビュー）。
+    自動採用に限らず、すでに active の目標も通す。合格を「開発者が採用した証拠」
+    と読んではいけない。手動採用の経路そのものは、自動採用なしの設定で別に測る。
+
     候補のまま置いた目標を、行動選択へ渡る状態にする。採用の経路を通さずに
     最初から採用済みで置くと、「候補 → 採用 → 参照」の経路を測れない。
     フェーズ3で、記憶を事前に入れる評価が抽出と採用を通っていなかったのと
     同じ穴になる。
     """
     stmt = select(Goal).where(
-        Goal.status == GoalStatus.PENDING.value, Goal.content.contains(match)
+        Goal.status.in_([GoalStatus.PENDING.value, GoalStatus.ACTIVE.value]),
+        Goal.content.contains(match),
     )
     goals = list((await session.execute(stmt)).scalars())
     for goal in goals:
+        if goal.status == GoalStatus.ACTIVE.value:
+            # **すでに自動採用されている**（PR11 レビューの指摘2）。採用済み
+            # という結果は同じなので、この手順は満たされている。候補だけを
+            # 探すと「『感想』に当たる目標が無かった」と不合格になり、
+            # **自動採用に成功しただけで失敗が増える。**
+            continue
         before = goal_snapshot(goal)
         goal.status = GoalStatus.ACTIVE.value
         await session.flush()

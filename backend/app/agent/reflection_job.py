@@ -23,6 +23,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from app.agent import auto_adopt
 from app.agent.character_state import active_states, create_state
 from app.agent.goal import create_goal, list_goals
 from app.agent.goal_reflection import GoalReflectionError, propose_goal_candidates
@@ -32,7 +33,7 @@ from app.agent.reflection import (
     format_transcript,
 )
 from app.agent.state_reflection import StateReflectionError, propose_state_candidates
-from app.config import LOCAL_TZ
+from app.config import LOCAL_TZ, get_settings
 from app.llm.base import LLMClient, LLMError
 from app.models import (
     Conversation,
@@ -247,12 +248,25 @@ async def _save(
     goal_payloads: list,
     partner_id: int | None,
 ) -> None:
-    """抽出がすべて成功したものを、1つのトランザクションで書く。"""
+    """抽出がすべて成功したものを、1つのトランザクションで書く。
+
+    設定で自動採用を有効にした種類は、**候補で止めずにその場で採用する**
+    （フェーズ4 PR11）。既定は空なので、何も指定しなければ従来どおり全部が
+    候補のまま開発者の確認を待つ。
+
+    採用まで同じトランザクションで確定する。候補だけ書いて採用が落ちると、
+    「有効にしたのに候補のまま」という中途半端な状態が残る。
+    """
+    auto_kinds = get_settings().auto_adopt_kinds
     async with factory() as session:
         session.add_all(candidates)
+        # 候補に id を振ってから採用する。採用は accepted_memory_id を書く。
+        await session.flush()
+        states = []
+        goals = []
         for payload in state_payloads:
             is_relationship = payload.kind == StateKind.RELATIONSHIP.value
-            await create_state(
+            state = await create_state(
                 session,
                 kind=payload.kind,
                 content=payload.content,
@@ -264,9 +278,10 @@ async def _save(
                 status=StateStatus.PENDING.value,
                 reason=payload.reason or "会話の振り返りから",
             )
+            states.append(state)
         for goal_payload in goal_payloads:
             trigger, due_at = goal_payload.schedule()
-            await create_goal(
+            goal = await create_goal(
                 session,
                 content=goal_payload.content,
                 subject_speaker_id=partner_id,
@@ -278,6 +293,11 @@ async def _save(
                 status=GoalStatus.PENDING.value,
                 reason=goal_payload.reason or "会話の振り返りから",
             )
+            goals.append(goal)
+        # 自動採用は、評価と同じ関数を通す（フェーズ4 PR11）。
+        await auto_adopt.apply(
+            session, kinds=auto_kinds, candidates=candidates, states=states, goals=goals
+        )
         completed = utcnow()
         await session.execute(
             update(Conversation)

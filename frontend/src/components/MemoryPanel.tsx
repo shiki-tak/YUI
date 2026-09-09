@@ -134,6 +134,8 @@ function MemoryRow({
         <span className="tag subtle">{CERTAINTY_LABEL[memory.certainty]}</span>
         <span className="tag subtle">{VISIBILITY_LABEL[memory.visibility]}</span>
         {memory.status !== "active" && <span className="tag warn">{memory.status}</span>}
+        {/* 開発者の確認を経ていないもの（フェーズ4 PR11）。 */}
+        {memory.auto_adopted && <span className="tag warn">自動採用</span>}
         <span className="muted small">#{memory.id}</span>
       </div>
 

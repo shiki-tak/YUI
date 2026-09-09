@@ -156,6 +156,8 @@ export function StatePanel({ refreshKey }: { refreshKey: number }) {
           <div className="memory-head">
             <span className="tag">{KIND_LABEL[state.kind]}</span>
             {state.topic && <span className="tag subtle">{state.topic}</span>}
+            {/* 開発者の確認を経ていないもの（フェーズ4 PR11）。 */}
+            {state.auto_adopted && <span className="tag warn">自動採用</span>}
           </div>
           <p>{state.content}</p>
           {state.basis_memory_ids && state.basis_memory_ids.length > 0 && (

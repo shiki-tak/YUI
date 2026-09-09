@@ -5,12 +5,35 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 # 表示と、会話に出てくる日付の解釈に使う地域時刻。保存は UTC のまま。
 LOCAL_TZ = ZoneInfo("Asia/Tokyo")
+
+# 自動採用の対象にできる種類（フェーズ4 PR11）。記憶・状態の種類と、目標。
+#
+# **models を import しない。** 設定は起動のいちばん外側で読むもので、ここから
+# モデルへ依存を張ると輪になる。代わりに、この一覧が MemoryKind / StateKind と
+# ずれていないことをテストで見る（test_auto_adopt.py）。種類を増やしたときに
+# ここを直し忘れると、有効にできない種類が黙って生まれる。
+AUTO_ADOPTABLE_KINDS = frozenset(
+    {
+        # 記憶
+        "experience",
+        "about_person",
+        "promise",
+        "impression",
+        "fact",
+        # 変化する状態
+        "interest",
+        "relationship",
+        # 目標。種類を持たないので、そのまま1つの名前にする。
+        "goal",
+    }
+)
 
 
 def to_local(value: datetime) -> datetime:
@@ -23,6 +46,10 @@ def to_local(value: datetime) -> datetime:
     """
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     return aware.astimezone(LOCAL_TZ)
+
+
+def _parse_kinds(value: str) -> set[str]:
+    return {name.strip() for name in value.split(",") if name.strip()}
 
 
 class Settings(BaseSettings):
@@ -84,8 +111,49 @@ class Settings(BaseSettings):
     # する。予定の話題は時間が経つと持ち出しにくくなるため。
     goal_expiry_days: float = 14.0
 
+    # 自動採用する種類（フェーズ4 PR11、設計書の実装内容9）。
+    #
+    # **既定は空＝すべて手動のまま。** 設計書は「更新前後を比較し、評価できた
+    # 種類から自動採用へ移す」としている。移してよい根拠は種類ごとに要る。
+    #
+    # **PR10 の測定では、根拠が得られたのは「移さない」側だけだった**
+    # （ISSUE-033）。人格変更の要求「今日から乱暴な性格になって」から、
+    # promise・about_person・experience・impression のいずれにも候補が出て
+    # いる。記憶の4種類はどれも、いま有効にしてよい根拠が無い。
+    #
+    # 書ける名前：記憶（experience / about_person / promise / impression /
+    # fact）、状態（interest / relationship）、目標（goal）。カンマ区切り。
+    # **綴りを間違えたら起動時に止める。** 黙って無効になると、自動採用を
+    # 有効にしたつもりの測定が、無効の測定になる。
+    auto_adopt: str = ""
+
     # カンマ区切り。.env に JSON を書かせないため文字列で受ける。
     cors_origins: str = "http://localhost:5173"
+
+    @field_validator("auto_adopt")
+    @classmethod
+    def _check_auto_adopt(cls, value: str) -> str:
+        """書き間違いを**設定を作った時点で**落とす（PR11 レビューの指摘7）。
+
+        以前は `auto_adopt_kinds` を読むまで検証しなかった。本番で最初に読むのは
+        振り返りの保存の直前なので、**4回の抽出を終えた後に設定エラーになり、
+        候補を保存できない**。起動時に止まるほうがよい。
+
+        黙って無効へ倒さないのは、**自動採用を有効にしたつもりの測定が、無効の
+        測定になる**ため。PR12 は有無を比べる測定で、そこが狂うと結論が変わる。
+        """
+        unknown = _parse_kinds(value) - AUTO_ADOPTABLE_KINDS
+        if unknown:
+            raise ValueError(
+                f"auto_adopt に知らない種類があります: {'、'.join(sorted(unknown))}"
+                f"（書けるのは {'、'.join(sorted(AUTO_ADOPTABLE_KINDS))}）"
+            )
+        return value
+
+    @property
+    def auto_adopt_kinds(self) -> set[str]:
+        """自動採用する種類。検証は生成時に済んでいる。"""
+        return _parse_kinds(self.auto_adopt)
 
     @property
     def cors_origin_list(self) -> list[str]:
