@@ -46,9 +46,25 @@ _PARTIAL_WEIGHT = 0.3
 # 語の重要度を頻度から決める方式は、FTS5 か意味検索を入れる段階で扱う
 # （ISSUE-008）。
 _STOP_TOKENS = {
-    "です", "ます", "した", "して", "ない",
-    "ある", "いる", "こと", "もの", "これ", "それ",
-    "話", "人", "事", "時", "今", "何", "方", "中",
+    "です",
+    "ます",
+    "した",
+    "して",
+    "ない",
+    "ある",
+    "いる",
+    "こと",
+    "もの",
+    "これ",
+    "それ",
+    "話",
+    "人",
+    "事",
+    "時",
+    "今",
+    "何",
+    "方",
+    "中",
 }
 
 # 記憶の種別。検索語にも使えるよう、日本語の呼び名を検索対象に含める。
@@ -353,7 +369,6 @@ async def create_memory(
     source_message_id: int | None = None,
     source_conversation_id: int | None = None,
     reason: str | None = None,
-    created_at: datetime | None = None,
 ) -> Memory:
     memory = Memory(
         kind=kind,
@@ -367,9 +382,6 @@ async def create_memory(
         occurred_at=occurred_at,
         source_message_id=source_message_id,
         source_conversation_id=source_conversation_id,
-        # 既定は保存した時刻。差し替えられるのは、評価で時間を進めたときに
-        # 検索の減衰を進めた側の時刻で計算するため。
-        **({"created_at": created_at} if created_at is not None else {}),
     )
     session.add(memory)
     await session.flush()

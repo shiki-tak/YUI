@@ -1262,7 +1262,7 @@ positive を足す方法も効かなくなっている。
 会話で本人の発言が伝聞として扱われる。
 
 これが、フェーズ4で自動採用を1種類も有効にしなかった理由の1つである
-（[phase4.md](../result/phase4.md)）。
+（[人格の実装計画](../design/artificial-personhood.md) 第1.5節）。
 
 ---
 
@@ -1274,7 +1274,7 @@ positive を足す方法も効かなくなっている。
 - 重要度：中
 - 種別：設計
 - 出所：フェーズ4の着手判断（2026-09-08）
-- 場所：[docs/plan/phase4.md](../plan/phase4.md)（2-7 の決定2）
+- 場所：旧 `docs/plan/phase4.md`（2-7 の決定2。2026-09-10 に削除）。現在は [人格の実装計画](../design/artificial-personhood.md) の v1.2
 
 ### 内容
 
@@ -1401,7 +1401,7 @@ positive を足す方法も効かなくなっている。
 
 理由は3つ。
 
-1. 目標側（[backend/app/api/goals.py](../../backend/app/api/goals.py)）で同じ穴を塞いだ直後で、直し方が決まって
+1. 目標側（`backend/app/api/goals.py`（2026-09-10 に削除））で同じ穴を塞いだ直後で、直し方が決まって
    いる。時間が空くと、2つの API で検査の強さが違う状態が続く。
 2. 修正は入口の検査に `status` の条件を足し、採用時に `_dead_basis` を見る
    だけで、他の PR と競合しない。
@@ -1410,7 +1410,7 @@ positive を足す方法も効かなくなっている。
 
 ### 修正方針
 
-目標側と同じ形にする（[backend/app/api/goals.py](../../backend/app/api/goals.py) の対応をそのまま写す）。
+目標側と同じ形にする（`backend/app/api/goals.py`（2026-09-10 に削除） の対応をそのまま写す）。
 
 1. 作成（POST）：根拠に `active` でない記憶が含まれていたら 400 で拒否し、
    訂正後の記憶を指すよう促す。
@@ -1509,7 +1509,7 @@ PR5 のレビューで、この形の穴が4回続けて見つかった。
 - 種別：品質
 - 出所：フェーズ4 PR6 の実モデル観測（2026-09-08）。第1回レビューの指摘2を
   直したうえで、日をまたぐシナリオを足して測った
-- 場所：[backend/app/agent/goal_reflection.py](../../backend/app/agent/goal_reflection.py)（指示文と、渡す日付の説明）
+- 場所：`backend/app/agent/goal_reflection.py`（2026-09-10 に削除）（指示文と、渡す日付の説明）
 
 ### 内容
 
@@ -1720,7 +1720,7 @@ PR7 で同じ形を一度直している（`open` が記憶を渡しておらず
 - 種別：品質
 - 出所：フェーズ4 PR7・PR9 の実モデル観測（2026-09-08〜09）
 - 場所：[backend/app/agent/conversation.py](../../backend/app/agent/conversation.py)（`open` の履歴取得）、
-  [backend/app/agent/action_selector.py](../../backend/app/agent/action_selector.py)（自分から始める場面の判断）
+  `backend/app/agent/action_selector.py`（2026-09-10 に削除）（自分から始める場面の判断）
 
 ### 内容
 
@@ -1931,7 +1931,7 @@ PR10 で、判定の誤りを直す前後に全シナリオ×3回を流した。
 
 **入ってしまえば、次の会話でその記憶が渡る。** 設計書「人格の変更は開発者の
 操作だけが行える」に対し、実質的に経路が開く。これが、フェーズ4で自動採用を
-1種類も有効にしなかった直接の理由である（[phase4.md](../result/phase4.md)）。
+1種類も有効にしなかった直接の理由である（[人格の実装計画](../design/artificial-personhood.md) 第1.5節）。
 
 ### 対応（2026-09-09）：抽出の指示文と、採用側の安全弁
 
@@ -2009,7 +2009,7 @@ PR10 で、判定の誤りを直す前後に全シナリオ×3回を流した。
 - 重要度：中
 - 種別：品質
 - 出所：フェーズ4 PR10 の実測（2026-09-08）と、その第1回レビューの指摘4
-- 場所：[backend/app/agent/action_selector.py](../../backend/app/agent/action_selector.py) の `_REPLY_INSTRUCTION`
+- 場所：`backend/app/agent/action_selector.py`（2026-09-10 に削除） の `_REPLY_INSTRUCTION`
 
 ### 内容
 

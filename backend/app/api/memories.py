@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.derived import mark_derived_for_review
+from app.agent.character_state import mark_for_review
 from app.agent.memory_store import (
     create_memory,
     record_revision,
@@ -101,9 +101,7 @@ async def search(
 
 
 @router.get("/memories/{memory_id}", response_model=MemoryOut)
-async def get_memory(
-    memory_id: int, session: AsyncSession = Depends(get_session)
-) -> Memory:
+async def get_memory(memory_id: int, session: AsyncSession = Depends(get_session)) -> Memory:
     """記憶を1件取得する。過去の返答が参照した記憶を、IDから辿るために使う。
 
     訂正・削除済みでも返す。当時どの記憶を渡したかを確認するためで、
@@ -116,9 +114,7 @@ async def get_memory(
 
 
 @router.post("/memories", response_model=MemoryOut, status_code=status.HTTP_201_CREATED)
-async def add_memory(
-    payload: MemoryCreate, session: AsyncSession = Depends(get_session)
-) -> Memory:
+async def add_memory(payload: MemoryCreate, session: AsyncSession = Depends(get_session)) -> Memory:
     return await create_memory(
         session,
         kind=payload.kind.value,
@@ -173,9 +169,9 @@ async def correct_memory(
     record_revision(
         session, memory, action="corrected", before=before, reason=payload.reason or "訂正"
     )
-    # この記憶を根拠にした関心・関係性・目標へ、再評価の印を付ける（ISSUE-016）。
+    # この記憶を根拠にした関心・関係性へ、再評価の印を付ける（ISSUE-016）。
     # 自動では直さない。訂正が派生先にも及ぶかは開発者が判断する。
-    await mark_derived_for_review(
+    await mark_for_review(
         session,
         memory_id=memory.id,
         reason=f"根拠にした記憶 #{memory.id} が訂正された",
@@ -203,7 +199,7 @@ async def delete_memory(
     record_revision(
         session, memory, action="deleted", before=before, reason=reason or "誤りのため削除"
     )
-    await mark_derived_for_review(
+    await mark_for_review(
         session,
         memory_id=memory.id,
         reason=f"根拠にした記憶 #{memory.id} が削除された",
@@ -247,8 +243,8 @@ async def restore_memory(
         before=before,
         reason=f"変更履歴 {revision.id} の状態へ復元",
     )
-    # 復元も根拠の変更。訂正に合わせて再評価した派生物を、そのままにしない。
-    await mark_derived_for_review(
+    # 復元も根拠の変更。訂正に合わせて再評価した状態を、そのままにしない。
+    await mark_for_review(
         session,
         memory_id=memory.id,
         reason=f"根拠にした記憶 #{memory.id} が復元された",

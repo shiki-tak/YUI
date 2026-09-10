@@ -5,7 +5,6 @@ import type {
   ConversationState,
   Memory,
   Message,
-  ReflectionProgress,
   RetrievedMemory,
   RunRecord,
   SpeakerRef,
@@ -45,22 +44,8 @@ interface Props {
   onEntry: (entry: ChatResponse, view: number) => boolean;
   /** 終了して振り返った直後。候補の取り直しと、読み取り専用への切り替えに使う。 */
   onEnded: (view: number) => void;
-  /** 振り返りが失敗したとき。会話は終わっていないので、続けられる状態へ戻す。 */
-  onReflectionFailed: (view: number) => void;
   onNewConversation: () => void;
 }
-
-/** 振り返りの段階。待ち時間の大半は「選ぶ」にある（実測16.5秒）。 */
-const REFLECTION_STEP_LABEL: Record<
-  NonNullable<ReflectionProgress["step"]>,
-  string
-> = {
-  picking: "話に出たことを拾っています",
-  selecting: "覚えておくものを選んでいます",
-  states: "関心と関係を見直しています",
-  goals: "次に話したいことを考えています",
-  saving: "保存しています",
-};
 
 export function ChatPanel({
   conversationId,
@@ -76,7 +61,6 @@ export function ChatPanel({
   view,
   onEntry,
   onEnded,
-  onReflectionFailed,
   onNewConversation,
 }: Props) {
   const [text, setText] = useState("");
@@ -85,17 +69,6 @@ export function ChatPanel({
   const [notice, setNotice] = useState<string | null>(null);
   // 送信から返答が返るまで。待ち時間の内訳を見るために測る。
   const [chatMs, setChatMs] = useState<Record<number, number>>({});
-  // 振り返りの進み具合。終了は待たずに返るので、ここを見て待つ。
-  const [reflection, setReflection] = useState<ReflectionProgress | null>(null);
-  // 終了を押した直後。会話の状態が「振り返り中」に変わる前から監視する。
-  const [watching, setWatching] = useState(false);
-  // 世代。監視の結果を反映してよいかの判定に使う（送信と同じ考え方）。
-  const viewRef = useRef(view);
-  viewRef.current = view;
-  const onEndedRef = useRef(onEnded);
-  onEndedRef.current = onEnded;
-  const onFailedRef = useRef(onReflectionFailed);
-  onFailedRef.current = onReflectionFailed;
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // 終了済み・振り返り中の会話は読み取り専用で開く。送っても 409 になる。
@@ -104,69 +77,6 @@ export function ChatPanel({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, busy]);
-
-  // 別の会話を開いたら、前の会話の進行を残さない。
-  //
-  // busy もここで解く。終了の応答を待っている間に会話を切り替えると、応答が
-  // 返ってきても世代が違うため後始末をしない。そのままだと、切り替え先の会話で
-  // 送信も終了もできなくなる（第3回レビューの指摘1）。**世代が変わった直後は
-  // まだ新しい要求が始まっていない**ので、ここで解いても新しい要求の busy を
-  // 消すことはない。
-  useEffect(() => {
-    setReflection(null);
-    setWatching(false);
-    setBusy(false);
-  }, [view]);
-
-  // 振り返りの監視。**終了ボタンの中ではなく、ここで回す。**
-  //
-  // 理由は2つある。1つは、会話を切り替えてもループが止まらず、別の会話に
-  // 前の会話の進行が出てしまうこと。もう1つは、振り返り中の会話を履歴から
-  // 開き直したときに監視が始まらず、終わっても画面が変わらないこと
-  // （第1回レビューの指摘2・3）。
-  useEffect(() => {
-    if (conversationId === null) return;
-    if (!watching && state !== "reflecting") return;
-
-    let stopped = false;
-    const watchedView = view;
-
-    async function follow() {
-      while (!stopped) {
-        let progress: ReflectionProgress;
-        try {
-          progress = await api.reflection(conversationId as number);
-        } catch (e) {
-          if (stopped || watchedView !== viewRef.current) return;
-          setError(e instanceof Error ? e.message : String(e));
-          setWatching(false);
-          return;
-        }
-        // 返ってきた時点で別の会話を見ていたら、結果を捨てる。
-        if (stopped || watchedView !== viewRef.current) return;
-        setReflection(progress);
-        if (progress.state !== "running") {
-          setWatching(false);
-          if (progress.state === "failed") {
-            // 失敗はやり直せる。終了済みへは切り替えず、**続けられる状態へ
-            // 戻す**。振り返り中として開いた会話は読み取り専用のままなので、
-            // 親へ伝えないとその場でやり直せない（第2回レビューの指摘1）。
-            setError(progress.error ?? "振り返りに失敗しました。もう一度お試しください。");
-            onFailedRef.current(watchedView);
-          } else if (progress.state === "completed") {
-            onEndedRef.current(watchedView);
-          }
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-    }
-
-    void follow();
-    return () => {
-      stopped = true;
-    };
-  }, [conversationId, state, view, watching]);
 
   // 別の会話を開いたら、前の会話の音声を鳴らし続けない。表示も残さない。
   // 会話 ID ではなく世代で判定する。新しい会話に ID が付いただけのときは
@@ -193,24 +103,14 @@ export function ChatPanel({
     setNotice(null);
     // 返答を待つ間に別の会話へ移ることがある。始めたときの世代を覚えておく。
     const sentView = view;
-    // この画面の状態（入力・エラー・busy）を触ってよいのは、始めたときの世代を
-    // まだ見ているときだけ。busy は送信と終了で共有しているので、世代を見ずに
-    // 後始末をすると、**別の会話で始めた要求の busy を解いてしまう**
-    // （第4回レビューの指摘1）。親への通知（onEntry）は別で、履歴に残すために
-    // 世代に関わらず呼ぶ。
-    const stillHere = () => sentView === viewRef.current;
-    // 入力は送った時点で空にする。返答が返ってから消すと、待っている間に別の
-    // 会話へ移って書き始めた下書きを、遅れて届いた返答が消してしまう。
-    setText("");
     try {
       const sentAt = performance.now();
       const entry = await api.chat(trimmed, conversationId, speaker);
       const roundTrip = Math.round(performance.now() - sentAt);
       setChatMs((prev) => ({ ...prev, [entry.reply.id]: roundTrip }));
+      setText("");
       if (!onEntry(entry, sentView)) {
         // 別の会話へ移ったあとの返答。画面には出さず、読み上げもしない。
-        // 知らせるのは世代に関わらず行う。**いま見ている画面の人に、送った
-        // 発言がどうなったかを伝えるための文**なので、移った先に出す。
         setNotice(
           "別の会話へ移ったため、いまの返答はこの画面に出していません。会話履歴から読めます。",
         );
@@ -219,37 +119,24 @@ export function ChatPanel({
       // 返答が出たら読み上げる。生成しただけの状態から、再生の通知で進む。
       if (speechAvailable) player.play(entry.reply.id);
     } catch (e) {
-      if (stillHere()) {
-        setError(e instanceof Error ? e.message : String(e));
-        // 送れなかった文は書き戻す。打ち直させない。
-        setText(trimmed);
-      }
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (stillHere()) setBusy(false);
+      setBusy(false);
     }
   }
 
   async function endConversation() {
-    if (conversationId === null || busy || readOnly || watching) return;
+    if (conversationId === null || busy || readOnly) return;
     setBusy(true);
     setError(null);
-    // 押した時点の世代を覚えておく。終了の応答が返る前に別の会話へ移ることが
-    // あり、そのまま反映すると、切り替え先の会話で前の会話の進行を出し、
-    // 監視まで始めてしまう（第2回レビューの指摘2）。取得側の世代検査だけでは
-    // 防げない。
-    const startedView = view;
+    const endedView = view;
     try {
-      const progress = await api.endConversation(conversationId);
-      if (startedView !== viewRef.current) return;
-      // 終了は待たずに返る。振り返りは会話後のジョブで走り、進み具合は
-      // 上の監視が追う。完了・失敗の反映もそちらで行う。
-      setReflection(progress);
-      setWatching(true);
+      await api.endConversation(conversationId);
+      onEnded(endedView);
     } catch (e) {
-      if (startedView !== viewRef.current) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (startedView === viewRef.current) setBusy(false);
+      setBusy(false);
     }
   }
 
@@ -280,7 +167,7 @@ export function ChatPanel({
           <button
             type="button"
             onClick={endConversation}
-            disabled={conversationId === null || busy || readOnly || watching}
+            disabled={conversationId === null || busy || readOnly}
             title="会話を終了し、長期記憶の候補を抽出します"
           >
             終了して振り返る
@@ -288,11 +175,6 @@ export function ChatPanel({
         </div>
       </header>
 
-      {reflection?.state === "running" && (
-        <p className="muted small">
-          振り返っています：{REFLECTION_STEP_LABEL[reflection.step ?? "picking"]}
-        </p>
-      )}
       {readOnly && (
         <p className="notice">
           {state === "ended"

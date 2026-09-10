@@ -15,14 +15,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.agent import ConversationAgent, get_agent, reflection_job
-from app.agent.action_selector import _OPEN_INSTRUCTION as OPEN_ACTION_INSTRUCTION
-from app.agent.action_selector import _REPLY_INSTRUCTION as REPLY_ACTION_INSTRUCTION
-from app.agent.goal_reflection import _INSTRUCTION as GOAL_INSTRUCTION
+from app.agent import ConversationAgent, get_agent
 from app.agent.reflection import _PICKUP_INSTRUCTION as PICKUP_INSTRUCTION
 from app.agent.state_reflection import _INSTRUCTION as STATE_INSTRUCTION
 from app.config import get_settings
-from app.db import get_session, get_session_factory
+from app.db import get_session
 from app.llm import get_llm_client
 from app.llm.base import ChatMessage, LLMClient, LLMResponse
 from app.main import app
@@ -46,43 +43,22 @@ class FakeLLM(LLMClient):
         # 用意しなくても済むようにする。
         self.state_scripted: list[str] = []
         self.state_default = "[]"
-        # 目標の抽出も別の呼び出し（振り返りの4回目）。既定は「目標なし」。
-        # 記憶や関心を確かめるテストが、目標まで用意しなくても済むようにする。
-        self.goal_scripted: list[str] = []
-        self.goal_default = "[]"
-        # 行動選択（回答・確認質問・話題提案・調査・待機）。既定は「回答」で、
-        # 自分から始める場面では選べないので待機になる。**テストが明示しない
-        # 限り、YUI から話しかけない。**
-        self.action_scripted: list[str] = []
-        self.action_default = '{"action": "answer", "goal": null, "reason": "テストの既定"}'
         # 記憶の抽出は2段階（拾う → 選ぶ）。1段階目は既定で1件拾ったことに
         # して、テストは「選ぶ」側の出力だけを書けばよいようにする。
         self.pickup_scripted: list[str] = []
-        self.pickup_default = '[{"content": "会話に出てきた内容", "source_message_id": null}]' 
+        self.pickup_default = '[{"content": "会話に出てきた内容", "source_message_id": null}]'
         # 生成中の状態を再現するための門。gate を待たせると応答待ちになる。
         self.entered = asyncio.Event()
         self.gate: asyncio.Event | None = None
         # 特定の呼び出しだけを止めたいとき、その指示文を入れる。振り返りは
         # 3回呼ぶため、何回目で止めるかを選べないと、止めたい経路を測れない。
         self.gate_on: str | None = None
-        # 何回目から止めるか。指示文で選べない呼び出し（返答の生成は人格の
-        # プロンプトで、内容が実行時にしか決まらない）を止めるために使う。
-        # 1 を入れると最初の1回は通し、2回目から止める。
-        self.gate_skip = 0
         # 実際に門で止まったことを知らせる。entered は呼び出しごとに立つため、
         # 何回目で止まったかを待ち分けられない。
         self.held = asyncio.Event()
 
     def push(self, text: str) -> None:
         self.scripted.append(text)
-
-    def push_action(self, text: str) -> None:
-        """行動選択が返す内容。"""
-        self.action_scripted.append(text)
-
-    def push_goal(self, text: str) -> None:
-        """目標の抽出が返す内容。"""
-        self.goal_scripted.append(text)
 
     def push_state(self, text: str) -> None:
         """関心・関係性の抽出が返す内容。"""
@@ -103,19 +79,9 @@ class FakeLLM(LLMClient):
         self.entered.set()
         system = messages[0].content if messages else ""
         if self.gate is not None and (self.gate_on is None or self.gate_on == system):
-            if self.gate_skip > 0:
-                self.gate_skip -= 1
-            else:
-                self.held.set()
-                await self.gate.wait()
-        if messages and messages[0].content in {
-            REPLY_ACTION_INSTRUCTION,
-            OPEN_ACTION_INSTRUCTION,
-        }:
-            text = self.action_scripted.pop(0) if self.action_scripted else self.action_default
-        elif messages and messages[0].content == GOAL_INSTRUCTION:
-            text = self.goal_scripted.pop(0) if self.goal_scripted else self.goal_default
-        elif messages and messages[0].content == STATE_INSTRUCTION:
+            self.held.set()
+            await self.gate.wait()
+        if messages and messages[0].content == STATE_INSTRUCTION:
             text = self.state_scripted.pop(0) if self.state_scripted else self.state_default
         elif messages and messages[0].content == PICKUP_INSTRUCTION:
             text = self.pickup_scripted.pop(0) if self.pickup_scripted else self.pickup_default
@@ -179,23 +145,6 @@ def fake_speech() -> FakeSpeech:
     return FakeSpeech()
 
 
-@pytest.fixture(autouse=True)
-def _manual_adoption(monkeypatch: pytest.MonkeyPatch) -> None:
-    """テストは既定で自動採用を切る。**設定を明示しないテストの意味を変えない。**
-
-    出荷時の既定は `promise,goal` を自動採用する（2026-09-09 の測定で根拠を
-    得た）。それをテスト全体の前提にすると、手動採用の経路を測っているテストが
-    黙って別のものを測る。有効にしたいテストは自分で差し替える。
-
-    出荷時の既定そのものは `test_the_shipped_default_matches_the_measurement`
-    で固定する。
-    """
-    from app.config import Settings, get_settings
-
-    settings = Settings(auto_adopt="", database_url=get_settings().database_url)
-    monkeypatch.setattr("app.agent.reflection_job.get_settings", lambda: settings)
-
-
 @pytest_asyncio.fixture
 async def session_factory(tmp_path) -> AsyncIterator[async_sessionmaker]:
     """テスト用の一時DB。通常利用の会話・記憶は変更しない。"""
@@ -221,9 +170,6 @@ async def client(
 
     agent = ConversationAgent(llm=fake_llm, persona=load_persona(), settings=get_settings())
     app.dependency_overrides[get_session] = override_session
-    # 振り返りのジョブはリクエストより長く生きるので、独自に接続を作る。
-    # 一時DBへ向けないと、テストが通常利用のDBを書き換える。
-    app.dependency_overrides[get_session_factory] = lambda: session_factory
     app.dependency_overrides[get_agent] = lambda: agent
     app.dependency_overrides[get_llm_client] = lambda: fake_llm
     app.dependency_overrides[get_speech_client] = lambda: fake_speech
@@ -233,47 +179,3 @@ async def client(
         yield http_client
 
     app.dependency_overrides.clear()
-
-
-async def reflection_progress(client: AsyncClient, conversation_id: int) -> dict:
-    """振り返りの進み具合。"""
-    response = await client.get(f"/api/conversations/{conversation_id}/reflection")
-    return response.json()
-
-
-async def end_and_wait(client: AsyncClient, conversation_id: int):
-    """会話を終了し、振り返りのジョブが終わるまで待つ。
-
-    終了は待たずに返るようになった（フェーズ4 PR5）。テストは結果を見たいので、
-    ここで待ち合わせる。**同期に戻しているのではなく、ジョブの完了を待つだけ**で、
-    通る経路は実際の運用と同じである。
-    """
-    response = await client.post(f"/api/conversations/{conversation_id}/end")
-    await reflection_job.wait(conversation_id)
-    return response
-
-
-async def end_and_candidates(client: AsyncClient, conversation_id: int) -> list[dict]:
-    """終了して振り返り、**成功したことを確かめてから**候補を返す。
-
-    候補一覧を読むだけだと、失敗して0件だった場合と、残すものが無くて0件
-    だった場合を区別できない（第1回レビューの指摘）。
-    """
-    response = await end_and_wait(client, conversation_id)
-    assert response.status_code == 202, response.text
-    progress = await reflection_progress(client, conversation_id)
-    assert progress["state"] == "completed", progress
-    return (await client.get(f"/api/conversations/{conversation_id}/candidates")).json()
-
-
-async def end_and_expect_failure(client: AsyncClient, conversation_id: int) -> dict:
-    """終了して振り返り、ジョブが失敗したことを確かめて理由を返す。
-
-    終了そのものは受け付ける（202）。抽出の失敗はジョブの中で起きるので、
-    HTTP の応答ではなく進行状態で見る（フェーズ4 PR5）。
-    """
-    response = await end_and_wait(client, conversation_id)
-    assert response.status_code == 202, response.text
-    progress = await reflection_progress(client, conversation_id)
-    assert progress["state"] == "failed", progress
-    return progress

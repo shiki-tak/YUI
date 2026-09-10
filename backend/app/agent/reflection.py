@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, time
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -27,7 +26,6 @@ from app.models import (
     MemoryKind,
     Message,
     Provenance,
-    ReflectionStep,
     SpeakerKind,
     Visibility,
     utcnow,
@@ -72,6 +70,7 @@ class ReflectionParseError(RuntimeError):
 
 class _ItemError(ValueError):
     """候補1件を読み取れなかった。理由を添えて上位へ伝える。"""
+
 
 _PICKUP_INSTRUCTION = """あなたは会話ログから、後で話題にできそうな内容を
 **すべて拾い出す**担当です。残すかどうかの判断はしません。それは次の担当が行います。
@@ -219,9 +218,7 @@ def _parse_pickups(text: str) -> list[PickupPayload]:
                 if broken
                 else "JSON配列として読み取れませんでした"
             )
-            raise ReflectionParseError(
-                f"拾い出しの出力を{detail}: {_excerpt(text)}"
-            ) from None
+            raise ReflectionParseError(f"拾い出しの出力を{detail}: {_excerpt(text)}") from None
     if not isinstance(raw, list):
         raise ReflectionParseError("拾い出しの出力が配列ではありませんでした。")
 
@@ -272,10 +269,9 @@ class CandidatePayload(BaseModel):
 
     certainty: str = Certainty.INFERENCE.value
     keywords: str = ""
-    # **既定を False にしない**（PR12 レビューの指摘3）。省略と「第三者について
-    # と判断した false」を区別できないと、判断材料が返っていないのに伝聞と
-    # 確定して長期記憶へ入る。以前 provenance を訊いていた頃は、省略を unknown
-    # にできていた。
+    # **既定を False にしない**。省略と「第三者についてと判断した false」を
+    # 区別できないと、判断材料が返っていないのに伝聞と確定して保存される。
+    # 省略は unknown にする。
     about_partner: bool | None = None
     source_message_id: int | None = None
 
@@ -319,9 +315,7 @@ def _parse_candidates(text: str) -> list[CandidatePayload]:
             f"振り返りの出力をJSONとして読み取れませんでした: {_excerpt(text)}"
         ) from exc
     if not isinstance(raw, list):
-        raise ReflectionParseError(
-            f"振り返りの出力が配列ではありませんでした: {_excerpt(text)}"
-        )
+        raise ReflectionParseError(f"振り返りの出力が配列ではありませんでした: {_excerpt(text)}")
 
     results: list[CandidatePayload] = []
     problems: list[str] = []
@@ -370,8 +364,6 @@ async def extract_candidates(
     llm: LLMClient,
     conversation: Conversation,
     character_name: str,
-    now: datetime | None = None,
-    on_step: Callable[[str], Awaitable[None]] | None = None,
 ) -> list[MemoryCandidate]:
     """会話から記憶の候補を作る。**セッションへは入れない。**
 
@@ -380,10 +372,6 @@ async def extract_candidates(
     記憶の訂正が「database is locked」で失敗する。また、途中で失敗したときに
     一部だけ保存された状態を残さないためでもある（フェーズ3全体レビューの
     指摘4・5）。保存は呼び出し側が、すべて成功してからまとめて行う。
-
-    on_step は、どの段階に入ったかを呼び出し側へ伝える。待ち時間の大半は
-    2段階目にあり（実測で拾う3.9秒・選ぶ16.5秒）、まとめて「処理中」とだけ
-    出すと、止まっているのか進んでいるのかが分からない。
     """
     stmt = (
         select(Message)
@@ -408,15 +396,11 @@ async def extract_candidates(
     sole_participant = next(iter(participants)) if len(participants) == 1 else None
 
     transcript = format_transcript(messages, character_name)
-    # 「先週」「昨日」を日付へ直すには、今日が何日かが要る。差し替えられる
-    # ようにしてあるのは、評価で時間を進めたときに、進めた側の日付で解釈させる
-    # ため。ここだけ実時計のままだと、会話に渡した現在時刻と食い違う。
-    today = (now or utcnow()).astimezone(LOCAL_TZ).date()
+    # 「先週」「昨日」を日付へ直すには、今日が何日かが要る。
+    today = utcnow().astimezone(LOCAL_TZ).date()
 
     # 1段階目：拾う。残すかどうかを判断させない。1回の呼び出しで「拾う」と
     # 「選ぶ」を同時にさせると、種類によっては一度も挙がらなかった（ISSUE-021）。
-    if on_step is not None:
-        await on_step(ReflectionStep.PICKING.value)
     picked = await llm.chat(
         [
             ChatMessage(role="system", content=_PICKUP_INSTRUCTION),
@@ -429,8 +413,6 @@ async def extract_candidates(
         return []
 
     # 2段階目：選ぶ。拾ったものだけを見て、残すものを決める。
-    if on_step is not None:
-        await on_step(ReflectionStep.SELECTING.value)
     response = await llm.chat(
         [
             ChatMessage(role="system", content=_INSTRUCTION),
@@ -472,8 +454,7 @@ async def extract_candidates(
         # 食い違うと、次の会話で本人の発言が「人づてに聞いた話」として渡る。
         #
         # 訊くのは about_partner の1つだけにして、入手経路はそこから決める。
-        # PR10 の「足し算はモデルにやらせない」と同じで、導出できるものを
-        # 訊かない。
+        # 導出できるものを訊かない。
         about_partner = bool(payload.about_partner)
         if payload.kind == MemoryKind.IMPRESSION.value:
             # **impression はキャラクター自身の受け止め方**なので、相手について
@@ -482,8 +463,7 @@ async def extract_candidates(
             # 実測では impression の 4/8 がこれで誤っていた（2026-09-09）。
             provenance = Provenance.FIRSTHAND.value
         elif payload.about_partner is None:
-            # **省略されたら「決められない」にする。** 伝聞と確定しない
-            # （PR12 レビューの指摘3）。unknown の候補は自動採用しない。
+            # **省略されたら「決められない」にする。** 伝聞と確定しない。
             provenance = Provenance.UNKNOWN.value
         elif about_partner:
             provenance = Provenance.FIRSTHAND.value

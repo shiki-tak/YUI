@@ -234,12 +234,16 @@ async def test_reading_is_registered_before_the_first_synthesis():
     client = build_client(handler, readings=[Reading("YUI", "ユイ", 2)])
     result = await client.synthesize("私はYUIです")
 
-    assert ("POST", "/user_dict_word", {
-        "surface": "YUI",
-        "pronunciation": "ユイ",
-        "accent_type": "2",
-        "word_type": "PROPER_NOUN",
-    }) in calls
+    assert (
+        "POST",
+        "/user_dict_word",
+        {
+            "surface": "YUI",
+            "pronunciation": "ユイ",
+            "accent_type": "2",
+            "word_type": "PROPER_NOUN",
+        },
+    ) in calls
     # 表記はそのまま渡す。字幕と読み上げを同じ文字列に保つため。
     query = next(params for method, path, params in calls if path == "/audio_query")
     assert query["text"] == "私はYUIです"
@@ -266,9 +270,7 @@ async def test_existing_word_is_updated_only_when_the_reading_differs():
             )
         return httpx.Response(200, json="ok")
 
-    client = build_client(
-        handler, readings=[Reading("YUI", "ユイ", 2), Reading("凪", "ナギ", 1)]
-    )
+    client = build_client(handler, readings=[Reading("YUI", "ユイ", 2), Reading("凪", "ナギ", 1)])
     await client.register_readings()
 
     # 読みが違う YUI だけ書き換える。合っている語には触れない。

@@ -18,15 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models import (
-    Certainty,
-    GoalTrigger,
-    MemoryKind,
-    Provenance,
-    SourceKind,
-    StateKind,
-    Visibility,
-)
+from app.models import Certainty, MemoryKind, Provenance, SourceKind, StateKind, Visibility
 
 # 設計書 ISSUE-006 が挙げている観点。ファイルの分け方と対応させる。
 ASPECTS = {
@@ -35,7 +27,6 @@ ASPECTS = {
     "persona": "人格：口調と「知らないことは正直に言う」が保たれているか",
     "reflection": "振り返り：残すべき経験・約束が候補に含まれるか",
     "repetition": "繰り返し：同じ話を繰り返していないか",
-    "proactive": "自発性：経験に沿って自分から話し、適切な場面では待てるか",
 }
 
 
@@ -99,42 +90,6 @@ class StateSpec(BaseModel):
         return self
 
 
-class GoalSpec(BaseModel):
-    """会話を始める前に置いておく目標（フェーズ4）。
-
-    既定は候補（pending）で、`accept_goal` の手順で採用するまで行動選択へ
-    渡らない。採用の経路そのものを通すため、最初から active では置かない。
-
-    期限は日数で書く。シナリオは何日に流しても同じ結果になる必要があり、
-    絶対日時で書くと、書いた日を過ぎた時点で意味が変わる。
-    """
-
-    key: str = Field(min_length=1)
-    content: str = Field(min_length=1)
-    # 誰に対する目標か。指定しなければ、相手を選ばない目標として扱う。
-    subject: str | None = None
-    # 根拠にした記憶（MemorySpec.key）。投入のときに実際のIDへ直す。
-    # 結び付けないと、その記憶を訂正しても目標へ波及しない。根拠のない目標に
-    # 対して「訂正で印が付く」を測ると、何も起きていないのに通る
-    # （第1回レビューの指摘2）。
-    basis: list[str] = Field(default_factory=list)
-    trigger: str = GoalTrigger.NEXT_CONVERSATION.value
-    # after_date のとき、何日後から実行してよいか。会話を始めた時点から数える。
-    due_in_days: int | None = None
-    # 最初から採用済みにする。採用の流れを通さずに、参照だけを見たいときに使う。
-    accepted: bool = False
-
-    @model_validator(mode="after")
-    def _check_trigger(self) -> GoalSpec:
-        if self.trigger not in {t.value for t in GoalTrigger}:
-            raise ValueError(f"trigger が不正です: {self.trigger}")
-        if self.trigger == GoalTrigger.AFTER_DATE.value and self.due_in_days is None:
-            raise ValueError("trigger が after_date のときは due_in_days が要ります。")
-        if self.trigger != GoalTrigger.AFTER_DATE.value and self.due_in_days is not None:
-            raise ValueError("due_in_days は trigger が after_date のときだけ書けます。")
-        return self
-
-
 class TurnSpec(BaseModel):
     """1回の発言と、その返答に期待すること。"""
 
@@ -170,16 +125,16 @@ class ReflectionSpec(BaseModel):
     # 候補に「近い既存の記憶」が印として付くこと。同じ出来事を二重に
     # 覚えないための手がかりが働いているかを見る（ISSUE-018）。
     expect_similar_marked: bool = False
-    # 期待する入手経路。**「本文に語が含まれるか」では入手経路の誤りを落とせない**
-    # （PR12）。伝聞と本人の発言を取り違えると、次の会話で本人の発言が
-    # 「人づてに聞いた」として渡る（ISSUE-023）。
+    # 候補が1件も出ないこと。取りこぼしを直すつもりで、何でも記憶にする方向へ
+    # 倒れていないかを見る。
+    expect_empty: bool = False
+    # 期待する入手経路。**「本文に語が含まれるか」では入手経路の誤りを落とせない**。
+    # 伝聞と本人の発言を取り違えると、次の会話で本人の発言が「人づてに聞いた」
+    # として渡る（ISSUE-023）。
     #
     # 書き方：「その語を含む候補の入手経路」を見る。`{"弟": "hearsay"}` なら、
     # 本文に「弟」を含む候補が伝聞になっていること。
     expect_provenance: dict[str, str] = Field(default_factory=dict)
-    # 候補が1件も出ないこと。取りこぼしを直すつもりで、何でも記憶にする方向へ
-    # 倒れていないかを見る。
-    expect_empty: bool = False
     # 機械で判定しない観点。レポートに欄として出す。
     human_check: str | None = None
 
@@ -200,35 +155,24 @@ class ReflectionSpec(BaseModel):
 
 
 # 手順の種類ごとに書ける指定。ここに無いものを書いたら読み込みで止める。
-# 返答を作る手順（say / start_conversation）と、振り返り、操作の手順では、
-# 見られるものが違う。
+# 返答を作る手順（say）と、振り返り、操作の手順では、見られるものが違う。
 _SAY_FIELDS = {
-    "expect_action",
-    "expect_executed_goals",
-    "expect_not_executed_goals",
-    "expect_done_goals",
     "expect_memories",
     "expect_not_memories",
     "expect_states",
     "expect_not_states",
-    "expect_goals",
-    "expect_not_goals",
     "expect_any",
     "expect_none",
     "expect_not_repeating",
 }
 _REFLECT_FIELDS = {
     "accept",
-    "expect_goal_count_max",
-    "expect_goal_due_days",
-    "expect_goal_due_from",
     "accept_contains",
     "accept_key",
     "accept_states",
     "expect_kinds",
     "expect_candidate_any",
     "expect_state_any",
-    "expect_goal_any",
     "expect_empty",
     "expect_occurred_at",
     "expect_similar_marked",
@@ -236,36 +180,14 @@ _REFLECT_FIELDS = {
 }
 _ALLOWED_FIELDS: dict[str, set[str]] = {
     "say": {"speaker", "text"} | _SAY_FIELDS,
-    "start_conversation": _SAY_FIELDS,
     "reflect": _REFLECT_FIELDS,
     "new_conversation": set(),
     "restart": set(),
-    "correct_memory": {"match", "content", "expect_marked_goals"},
-    "delete_memory": {"match", "expect_marked_goals"},
-    "accept_goal": {"match", "goal_key"},
-    "advance_time": {"days"},
-    "deliver": {"delivery"},
+    "correct_memory": {"match", "content"},
+    "delete_memory": {"match"},
 }
 # human_check はどの手順にも書ける（人が読む欄）。
-_EXPECTATION_FIELDS = (
-    {
-        "speaker",
-        "text",
-        "match",
-        "content",
-        "goal_key",
-        "days",
-        "expect_marked_goals",
-        "delivery",
-    }
-    | _SAY_FIELDS
-    | _REFLECT_FIELDS
-)
-# 数値の指定は「0 でも書かれている」ことがある。**検査から外すのではなく、
-# 値の有無ではなく `is not None` で見る**（PR10 レビューの指摘2）。外していた
-# 間は、reflect 以外の手順に書いても弾かれず、判定を1つも実行しないまま
-# 合格になっていた。0 を区別するために検査をやめては、目的が逆になる。
-_OPTIONAL_NUMBERS = {"expect_goal_count_max", "expect_goal_due_days"}
+_EXPECTATION_FIELDS = {"speaker", "text", "match", "content"} | _SAY_FIELDS | _REFLECT_FIELDS
 
 
 class StepSpec(BaseModel):
@@ -281,28 +203,10 @@ class StepSpec(BaseModel):
       再起動ではない**。保存から読み直されることは確かめられるが、起動時の
       処理（lifespan、人格の読み込み）は通らない。
     - correct_memory / delete_memory：開発者が記憶を訂正・削除する。
-    - accept_goal：開発者が目標を採用する（フェーズ4）。
-    - advance_time：時間を進める。期限付きの目標が実行できるようになる時点を
-      またぐために使う。**実際に待つのではなく、会話に渡す現在時刻を進める**。
-    - start_conversation：YUI の側から会話を始める。自発的な発話の起動点は
-      会話開始だけに絞っている（ISSUE-024）。
-    - deliver：直前の YUI の発言に、再生の通知を出す（playing / completed /
-      aborted）。**これを書かない限り、発言は生成しただけの状態のまま**で、
-      目標も実行済みにならない（ISSUE-011）。中断が「途中まで届いた」と
-      数えられるのは、鳴り始めた後（playing → aborted）だけである。
     """
 
     kind: Literal[
-        "say",
-        "reflect",
-        "new_conversation",
-        "restart",
-        "correct_memory",
-        "delete_memory",
-        "accept_goal",
-        "advance_time",
-        "start_conversation",
-        "deliver",
+        "say", "reflect", "new_conversation", "restart", "correct_memory", "delete_memory"
     ] = "say"
 
     # say
@@ -317,17 +221,6 @@ class StepSpec(BaseModel):
     # 渡ってはいけない状態。根拠の記憶を訂正・削除した後に、古い状態が
     # 会話へ入らないことを見る。
     expect_not_states: list[str] = Field(default_factory=list)
-    # 渡された目標（GoalSpec.key）。run_records.referenced_goal_ids と突き合わせる。
-    # 返答の言い回しではなく記録で見る。質問の文面は毎回変わるため。
-    expect_goals: list[str] = Field(default_factory=list)
-    # 渡ってはいけない目標。完了したもの、再評価の印が付いたもの、別の相手の
-    # ものが渡っていないかを見る。
-    expect_not_goals: list[str] = Field(default_factory=list)
-    # 選んでほしい行動（answer / ask / suggest / research / wait）。
-    # 「話しかけなかった」と「話しかけたが目標に触れなかった」を区別する。
-    # 待機だけを見ていると、読み取り失敗による待機と正しい待機が混ざる
-    # （第1回レビューの指摘7）。
-    expect_action: str | None = None
     expect_any: list[str] = Field(default_factory=list)
     expect_none: list[str] = Field(default_factory=list)
     expect_not_repeating: bool = False
@@ -348,96 +241,42 @@ class StepSpec(BaseModel):
     # 関心・関係性の候補に含まれてほしい語。状態が1件も出ていないのに、
     # 後の「古い状態が渡っていない」が空振りで通るのを防ぐ。
     expect_state_any: list[str] = Field(default_factory=list)
-    # 目標の候補に含まれてほしい語。振り返りが目標を出せているかを見る。
-    expect_goal_any: list[str] = Field(default_factory=list)
-    # 目標の候補の上限。**単一の目的しかない会話で複数出ていないか**を見る。
-    # 語の一致だけでは、余分な目標が混ざっても落ちない（PR10 の完了条件2）。
-    expect_goal_count_max: int | None = None
-    # 目標の基準日時。**発言の日からの日数**で書く。シナリオを何日に流しても
-    # 同じ結果になるようにするため。実行条件と日付の誤りを、本文の語ではなく
-    # 日付そのもので見る（ISSUE-028）。
-    expect_goal_due_days: int | None = None
-    # 日数を数える起点の発言。その本文に含まれる語を書く。
-    #
-    # **既定は「この振り返りの直前の発言」**。以前はシナリオ全体の最初の発言に
-    # 固定していたので、会話を分けたり時刻を進めたりすると、別の日の発言から
-    # 数えて偽の合否を作った（PR10 レビューの指摘6）。会話の途中で日をまたぐ
-    # 場合は既定では足りないので、ここで名指しする。
-    expect_goal_due_from: str | None = None
-    # 期待する入手経路。「その語を含む候補の入手経路」を見る（ISSUE-023）。
-    expect_provenance: dict[str, str] = Field(default_factory=dict)
     expect_empty: bool = False
     expect_occurred_at: bool = False
     expect_similar_marked: bool = False
+    # 期待する入手経路。「その語を含む候補の入手経路」を見る（ISSUE-023）。
+    expect_provenance: dict[str, str] = Field(default_factory=dict)
 
     # correct_memory / delete_memory：本文にこの語を含む記憶を選ぶ
-    # accept_goal：本文にこの語を含む目標を採用する
     match: str | None = None
     content: str | None = None
-
-    # correct_memory / delete_memory：訂正・削除の波及で、再評価の印が付いて
-    # ほしい目標（GoalSpec.key）。「渡っていないこと」だけでは、目標を一律に
-    # 渡さない実装でも通ってしまう。印が付いたことを記録で確かめる
-    # （第1回レビューの指摘2）。
-    expect_marked_goals: list[str] = Field(default_factory=list)
-
-    # accept_goal：採用した目標に付ける名前。振り返りが作った目標を、後の
-    # expect_goals から指せるようにする（事前に置いた目標の key と同じ扱い）。
-    goal_key: str | None = None
-
-    # advance_time：何日進めるか。
-    days: int | None = None
-
-    # deliver：どこまで届いたか。completed は最後まで、aborted は途中まで。
-    # 既定を None にしてあるのは、手順ごとの検査（_ALLOWED_FIELDS）が「値が
-    # 入っているか」で見るため。既定値を持たせると全手順で書かれた扱いになる。
-    delivery: Literal["playing", "completed", "aborted"] | None = None
-
-    # say / start_conversation：実行済みになってほしい目標（GoalSpec.key）。
-    # 「渡った」ではなく「相手へ届いて実行済みになった」ことを見る。生成した
-    # だけの質問を実行済みにしないことを測るために要る（ISSUE-011）。
-    expect_executed_goals: list[str] = Field(default_factory=list)
-    expect_not_executed_goals: list[str] = Field(default_factory=list)
-    # say / start_conversation：達成（done）になってほしい目標。
-    # **実行済み（届いた）とは別**。設計書の小実験は「返答を受けて完了とし、
-    # 同じ質問を繰り返さない」までを求めるので、そこを測るために要る
-    # （PR10 レビューの指摘1）。
-    expect_done_goals: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_fields(self) -> StepSpec:
         # 手順の種類に対して意味を持たない指定を、読み込みの時点で弾く。
         #
         # 書けてしまうと**判定を1つも実行しないまま合格になる**。たとえば say に
-        # expect_goal_any（振り返り用）を書くと、機械判定ありと数えられ、
-        # ターンの判定は空のまま通過する。実装の穴より、測る道具の穴のほうが
-        # 見つけにくい（第1回レビューの指摘1）。
+        # expect_kinds（振り返り用）を書くと、機械判定ありと数えられ、ターンの
+        # 判定は空のまま通過する。実装の穴より、測る道具の穴のほうが見つけにくい。
         allowed = _ALLOWED_FIELDS[self.kind]
         wrong = [
-            name
-            for name in _EXPECTATION_FIELDS
-            if name not in allowed
-            and (
-                getattr(self, name) is not None
-                if name in _OPTIONAL_NUMBERS
-                else bool(getattr(self, name))
-            )
+            name for name in _EXPECTATION_FIELDS if name not in allowed and getattr(self, name)
         ]
         if wrong:
             raise ValueError(
                 f"{self.kind} には書けない指定です: {'、'.join(sorted(wrong))}"
                 f"（書けるのは {'、'.join(sorted(allowed)) or 'なし'}）"
             )
+        known_provenance = {p.value for p in Provenance}
+        for word, value in self.expect_provenance.items():
+            if value not in known_provenance:
+                raise ValueError(f"expect_provenance が不正です: {word} → {value}")
         if self.kind == "say" and not self.text:
             raise ValueError("say には text が要ります。")
-        if self.kind in {"correct_memory", "delete_memory", "accept_goal"} and not self.match:
+        if self.kind in {"correct_memory", "delete_memory"} and not self.match:
             raise ValueError(f"{self.kind} には match が要ります。")
         if self.kind == "correct_memory" and not self.content:
             raise ValueError("correct_memory には content が要ります。")
-        if self.kind == "advance_time" and not self.days:
-            raise ValueError("advance_time には days（1以上）が要ります。")
-        if self.kind == "advance_time" and self.days is not None and self.days < 0:
-            raise ValueError("advance_time は時間を戻せません。")
         return self
 
 
@@ -448,7 +287,6 @@ class Scenario(BaseModel):
     speakers: list[SpeakerSpec] = Field(default_factory=list)
     memories: list[MemorySpec] = Field(default_factory=list)
     states: list[StateSpec] = Field(default_factory=list)
-    goals: list[GoalSpec] = Field(default_factory=list)
     # turns は1会話を流すだけの書き方。steps は採用・訂正・再起動を挟める。
     turns: list[TurnSpec] = Field(default_factory=list)
     steps: list[StepSpec] = Field(default_factory=list)
@@ -500,33 +338,23 @@ class Scenario(BaseModel):
         for step in self.effective_steps:
             # 訂正・削除は、対象が見つかったかどうかを機械で判定する
             # （第6回レビューの指摘2）。
-            if step.kind in {"correct_memory", "delete_memory", "accept_goal"}:
+            if step.kind in {"correct_memory", "delete_memory"}:
                 return True
             if (
                 step.expect_memories
                 or step.expect_not_memories
                 or step.expect_states
                 or step.expect_not_states
-                or step.expect_goals
-                or step.expect_not_goals
-                or step.expect_marked_goals
-                or step.expect_action
-                or step.expect_executed_goals
-                or step.expect_not_executed_goals
-                or step.expect_done_goals
                 or step.expect_any
                 or step.expect_none
                 or step.expect_not_repeating
                 or step.expect_kinds
                 or step.expect_candidate_any
                 or step.expect_state_any
-                or step.expect_goal_any
-                or step.expect_goal_count_max is not None
-                or step.expect_goal_due_days is not None
-                or step.expect_provenance
                 or step.expect_empty
                 or step.expect_similar_marked
                 or step.expect_occurred_at
+                or step.expect_provenance
             ):
                 return True
         return False
@@ -565,18 +393,6 @@ class Scenario(BaseModel):
             if state.subject is not None and state.subject not in keys:
                 raise ValueError(f"states.subject が speakers にありません: {state.subject}")
 
-        goal_keys = {g.key for g in self.goals}
-        if len(goal_keys) != len(self.goals):
-            raise ValueError("goals の key が重複しています。")
-        for goal in self.goals:
-            if goal.subject is not None and goal.subject not in keys:
-                raise ValueError(f"goals.subject が speakers にありません: {goal.subject}")
-            for key in goal.basis:
-                if key not in {m.key for m in self.memories}:
-                    raise ValueError(f"goals.basis が memories にありません: {key}")
-        # 採用の手順で名前を付けた目標も、expect_goals から指せる。
-        goal_keys |= {s.goal_key for s in self.steps if s.goal_key}
-
         if not self.turns and not self.steps:
             raise ValueError("turns か steps のどちらかが要ります。")
         if self.turns and self.steps:
@@ -584,18 +400,6 @@ class Scenario(BaseModel):
 
         default_speaker = self.speakers[0].key
         for item in [*self.turns, *self.steps]:
-            for field_name in (
-                "expect_goals",
-                "expect_not_goals",
-                "expect_marked_goals",
-                "expect_executed_goals",
-                "expect_not_executed_goals",
-            ):
-                for key in getattr(item, field_name, []):
-                    if key not in goal_keys:
-                        raise ValueError(f"{field_name} が goals にありません: {key}")
-                    if key in item.expect_goals and key in item.expect_not_goals:
-                        raise ValueError(f"渡す・渡さないの両方に書かれています: {key}")
             if getattr(item, "kind", "say") != "say":
                 continue
             if item.speaker is None:
@@ -637,8 +441,7 @@ def load_scenarios(path: Path) -> list[Scenario]:
                 raise ScenarioError(f"{file} の {index} 件目を読み取れません: {exc}") from exc
             if scenario.id in seen:
                 raise ScenarioError(
-                    f"シナリオ id が重複しています: {scenario.id}"
-                    f"（{seen[scenario.id]} と {file}）"
+                    f"シナリオ id が重複しています: {scenario.id}（{seen[scenario.id]} と {file}）"
                 )
             seen[scenario.id] = file
             scenarios.append(scenario)

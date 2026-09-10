@@ -58,8 +58,6 @@ class MemoryOut(ORMModel):
     certainty: str
     visibility: str
     status: str
-    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。画面で区別して見せる。
-    auto_adopted: bool = False
     keywords: str
     occurred_at: UtcDatetime | None
     source_message_id: int | None
@@ -87,10 +85,6 @@ class RunRecordOut(ORMModel):
     options: dict[str, Any] | None
     referenced_memory_ids: list[int] | None
     referenced_state_ids: list[int] | None
-    # 返答に渡した目標と、選んだ行動。待機を選んだことも読める
-    # （完了条件「行動と状態変化の根拠を追える」）。
-    referenced_goal_ids: list[int] | None
-    selected_action: str | None
     retrieval_ms: int | None
     latency_ms: int | None
     prompt_tokens: int | None
@@ -206,9 +200,7 @@ class MemoryCreate(BaseModel):
     @model_validator(mode="after")
     def _require_explicit_scope(self) -> MemoryCreate:
         if self.visible_to_all and self.visible_to_speaker_id is not None:
-            raise ValueError(
-                "visible_to_speaker_id と visible_to_all は同時に指定できません。"
-            )
+            raise ValueError("visible_to_speaker_id と visible_to_all は同時に指定できません。")
         if not self.visible_to_all and self.visible_to_speaker_id is None:
             raise ValueError(
                 "参照範囲を指定してください。"
@@ -311,8 +303,6 @@ class CharacterStateOut(ORMModel):
     needs_review: bool
     review_reason: str | None
     status: str
-    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。画面で区別して見せる。
-    auto_adopted: bool = False
     visibility: str
     visible_to_speaker_id: int | None
     superseded_by_id: int | None
@@ -339,9 +329,7 @@ class CharacterStateCreate(BaseModel):
     @model_validator(mode="after")
     def _check_scope(self) -> CharacterStateCreate:
         if self.visible_to_all and self.visible_to_speaker_id is not None:
-            raise ValueError(
-                "visible_to_speaker_id と visible_to_all は同時に指定できません。"
-            )
+            raise ValueError("visible_to_speaker_id と visible_to_all は同時に指定できません。")
         if not self.visible_to_all and self.visible_to_speaker_id is None:
             raise ValueError(
                 "参照範囲を指定してください。"
@@ -391,174 +379,6 @@ class CharacterStateRevisionOut(ORMModel):
     created_at: UtcDatetime
 
 
-class GoalOut(ORMModel):
-    """目標：次に何を話したいか。"""
-
-    id: int
-    content: str
-    subject_speaker_id: int | None
-    trigger: str
-    due_at: UtcDatetime | None
-    basis_memory_ids: list[int] | None
-    basis_is_provisional: bool
-    needs_review: bool
-    review_reason: str | None
-    status: str
-    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。画面で区別して見せる。
-    auto_adopted: bool = False
-    visibility: str
-    visible_to_speaker_id: int | None
-    source_conversation_id: int | None
-    # 実行と達成は別に出す。質問を投げても相手が答えなければ、実行済みで
-    # 未達成である。画面でもこの2つを混ぜない。
-    last_executed_at: UtcDatetime | None
-    completed_at: UtcDatetime | None
-    created_at: UtcDatetime
-    updated_at: UtcDatetime
-
-
-class GoalCreate(BaseModel):
-    """目標の追加。既定は候補（pending）で、採用するまで行動選択に渡さない。"""
-
-    content: str = Field(min_length=1, max_length=2000)
-    subject_speaker_id: int | None = None
-    trigger: Literal["next_conversation", "after_date"] = "next_conversation"
-    # after_date のときの基準日時。この日時を過ぎてから実行してよい。
-    due_at: datetime | None = None
-    basis_memory_ids: list[int] = Field(default_factory=list)
-    visibility: Visibility = Visibility.PRIVATE
-    # 参照範囲。記憶・状態と同じく、既定で全員に渡さない（ISSUE-010）。
-    visible_to_speaker_id: int | None = None
-    visible_to_all: bool = False
-    reason: str | None = None
-
-    @model_validator(mode="after")
-    def _check_scope(self) -> GoalCreate:
-        if self.visible_to_all and self.visible_to_speaker_id is not None:
-            raise ValueError(
-                "visible_to_speaker_id と visible_to_all は同時に指定できません。"
-            )
-        if not self.visible_to_all and self.visible_to_speaker_id is None:
-            raise ValueError(
-                "参照範囲を指定してください。"
-                "特定の相手との会話に限る場合は visible_to_speaker_id、"
-                "限定しない場合は visible_to_all=true。"
-            )
-        return self
-
-
-class GoalDecision(BaseModel):
-    """候補の採用・却下。採用時に内容と実行条件を直せる。
-
-    振り返りが出した候補は、実行条件まで正しいとは限らない。採用の場で直せない
-    と、いったん採用してから直すことになり、その間に実行される。
-    """
-
-    decision: Literal["accept", "reject"]
-    content: str | None = Field(default=None, min_length=1, max_length=2000)
-    trigger: Literal["next_conversation", "after_date"] | None = None
-    due_at: datetime | None = None
-    reason: str | None = None
-
-
-class GoalUpdate(BaseModel):
-    """採用済みの目標を直す。終わり方を記録するのもここで行う。
-
-    状態は終わり方ごとに分ける。達成（done）と、取消・前提の消滅・期限切れを
-    混ぜると、完了条件「一度完了した質問・目標を繰り返さない」を測れない。
-    """
-
-    content: str | None = Field(default=None, min_length=1, max_length=2000)
-    trigger: Literal["next_conversation", "after_date"] | None = None
-    due_at: datetime | None = None
-    status: (
-        Literal["active", "withdrawn", "done", "cancelled", "expired"] | None
-    ) = None
-    # 確認したので再評価の印を下ろす。内容を直したかどうかとは別に指定する。
-    reviewed: bool = False
-    reason: str | None = None
-
-
-class GoalRevisionOut(ORMModel):
-    id: int
-    goal_id: int
-    action: str
-    before: dict[str, Any] | None
-    after: dict[str, Any] | None
-    reason: str | None
-    created_at: UtcDatetime
-
-
-class ProactiveTurn(BaseModel):
-    """YUI の側から会話を始めた結果（フェーズ4 PR7）。
-
-    **話しかけないこともある。** そのときは message が null になる。設計書
-    「常に話しかけることを自律性の達成条件にはしません」。何を選んだかは
-    action に残し、待機したことも読めるようにする。
-    """
-
-    action: Literal["ask", "suggest", "research", "wait", "answer"]
-    reason: str | None = None
-    referenced_goal_ids: list[int] = Field(default_factory=list)
-    message: MessageOut | None = None
-
-
-class ReflectionProgress(BaseModel):
-    """振り返りの進み具合（フェーズ4 PR5）。
-
-    会話終了は待たせずに返し、進行はここから見る。状態は3つに分ける。
-
-    - running：処理中。step がどこまで進んだかを示す。
-    - completed：終わった。候補は /candidates から取る。
-    - failed：失敗した。開始権は解放済みで、もう一度実行できる。
-    """
-
-    conversation_id: int
-    state: Literal["running", "completed", "failed", "idle"]
-    step: str | None = None
-    error: str | None = None
-    started_at: UtcDatetime | None = None
-    completed_at: UtcDatetime | None = None
-
-
 class MemorySearchResult(BaseModel):
     query: str
     results: list[RetrievedMemoryOut]
-
-
-# --- 自動採用（フェーズ4 PR11）---------------------------------------------
-
-
-class AutoAdoptedOut(BaseModel):
-    """自動採用したもの。記憶・状態・目標をまとめて1つの形で返す。
-
-    3つの表にまたがるので、どの表のどの行かが分かるようにする。戻す前に
-    何が入ったのかを読むためのもので、詳細は各表の API で見る。
-    """
-
-    # "memory" / "state" / "goal"
-    table: str
-    id: int
-    kind: str
-    content: str
-    status: str
-    # 既存の UTC 補完型を使う。SQLite は timezone を落として返すため、素の
-    # datetime で出すとオフセットの無い値になる（レビューの指摘4）。
-    created_at: UtcDatetime
-
-
-class RollbackSkipped(BaseModel):
-    """戻せなかったもの。**理由を必ず添える。**
-
-    黙って取りこぼすと、戻したつもりで残る。達成した目標や、すでに持ち出した
-    目標は、取り下げても聞いた事実が消えないので触れない。
-    """
-
-    table: str
-    id: int
-    reason: str
-
-
-class RollbackResult(BaseModel):
-    reverted: list[AutoAdoptedOut]
-    skipped: list[RollbackSkipped]

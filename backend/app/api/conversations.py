@@ -7,17 +7,17 @@ from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import CursorResult, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.agent import get_agent, reflection_job
-from app.agent.auto_adopt import Overrides, accept_candidate
-from app.agent.conversation import ConversationAgent
+from app.agent.character_state import active_states, create_state
 from app.agent.delivery import apply_delivery_state
-from app.agent.memory_store import get_or_create_speaker
+from app.agent.memory_store import create_memory
+from app.agent.reflection import ReflectionParseError, extract_candidates, format_transcript
+from app.agent.state_reflection import StateReflectionError, propose_state_candidates
 from app.agent.turn_lock import conversation_locks
 from app.config import Settings, get_settings
-from app.db import get_session, get_session_factory
+from app.db import get_session
 from app.llm import get_llm_client
 from app.llm.base import LLMClient, LLMError
 from app.models import (
@@ -31,6 +31,8 @@ from app.models import (
     Speaker,
     SpeakerKind,
     SpeechRun,
+    StateKind,
+    StateStatus,
     utcnow,
 )
 from app.persona import load_persona
@@ -43,33 +45,13 @@ from app.schemas import (
     IdealResponseOut,
     MemoryCandidateOut,
     MessageOut,
-    ProactiveTurn,
-    ReflectionProgress,
     RunRecordDetail,
-    SpeakerRef,
     SpeechRunOut,
 )
 from app.voice import get_speech_client
 from app.voice.base import SpeechClient, SpeechError
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
-
-
-def _ensure_open(conversation: Conversation) -> None:
-    """発言を追加できる状態かを確かめる。
-
-    ロックを取る前と取った後の両方で呼ぶ。api/chat.py と同じ判定にする。
-    振り返りが始まった後に発言が入ると、抽出の対象と会話ログが食い違う。
-    """
-    if conversation.ended_at is not None or conversation.reflection_completed_at is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "この会話は終了しています。新しい会話を始めてください。"
-        )
-    if conversation.reflection_started_at is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "この会話は振り返り中です。終わるまで発言を追加できません。",
-        )
 
 
 async def _release_reflection(session: AsyncSession, conversation_id: int) -> None:
@@ -152,50 +134,14 @@ async def _sole_partner(session: AsyncSession, conversation_id: int) -> Speaker 
     return found[0] if len(found) == 1 else None
 
 
-def _progress(conversation: Conversation) -> ReflectionProgress:
-    """会話の記録から、振り返りの進み具合を組み立てる。
-
-    プロセス内の変数ではなく DB の内容だけで決める。画面を再読み込みしても、
-    別の接続から見ても同じものが見える（ISSUE-025）。
-    """
-    if conversation.reflection_completed_at is not None:
-        state = "completed"
-    elif conversation.reflection_started_at is not None:
-        state = "running"
-    elif conversation.reflection_error is not None:
-        state = "failed"
-    else:
-        state = "idle"
-    return ReflectionProgress(
-        conversation_id=conversation.id,
-        state=state,
-        step=conversation.reflection_step,
-        error=conversation.reflection_error,
-        started_at=conversation.reflection_started_at,
-        completed_at=conversation.reflection_completed_at,
-    )
-
-
-@router.post(
-    "/{conversation_id}/end",
-    response_model=ReflectionProgress,
-    status_code=status.HTTP_202_ACCEPTED,
-)
+@router.post("/{conversation_id}/end", response_model=list[MemoryCandidateOut])
 async def end_conversation(
     conversation_id: int,
     session: AsyncSession = Depends(get_session),
-    factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
     llm: LLMClient = Depends(get_llm_client),
     settings: Settings = Depends(get_settings),
-) -> ReflectionProgress:
-    """会話を終了し、振り返りのジョブを積む。**待たずに返す。**
-
-    振り返りは LLM を3回以上呼ぶため20秒以上かかる。同期で処理すると、その間
-    画面には何も出ない（設計書「重い振り返りは会話後のジョブへ分離します」）。
-
-    候補の抽出結果はここでは返さない。進み具合は GET /reflection、できた候補は
-    GET /candidates から取る。
-    """
+) -> list[MemoryCandidate]:
+    """会話を終了し、長期記憶の候補を抽出する。採用は別途 /candidates で行う。"""
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
@@ -206,20 +152,11 @@ async def end_conversation(
     # 人格の読み込みはファイルを読むため、ここで失敗しうる。
     character_name = load_persona().name
 
+    # 回収期限に含まれ、稼働中の振り返りまで期限切れとみなされてしまう。
     async with conversation_locks.hold(conversation_id):
         await session.refresh(conversation)
         if conversation.reflection_completed_at is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "この会話はすでに終了しています。")
-
-        # ジョブが走っている間は積み直さない。同期で処理していたころはロックを
-        # 掛けたまま最後まで走ったが、いまはロックを持つのが開始権を取る間だけ
-        # なので、走っているかどうかを別に見る必要がある。**回収期限を過ぎても、
-        # 実際に走っているものは横取りしない**（フェーズ4 PR5）。
-        if reflection_job.is_running(conversation_id):
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "この会話の振り返りは実行中です。しばらく待って再試行してください。",
-            )
 
         # 同一プロセスではロックが排他を保証する。ここでの期限判定は、
         # プロセスが落ちて開始だけが残った場合を回収するためのもの。
@@ -236,12 +173,7 @@ async def end_conversation(
                     (Conversation.reflection_started_at.is_(None))
                     | (Conversation.reflection_started_at < stale_before),
                 )
-                .values(
-                    reflection_started_at=now,
-                    # やり直しなので、前回の失敗の記録は消す。
-                    reflection_error=None,
-                    reflection_step=None,
-                )
+                .values(reflection_started_at=now)
                 # SQLite は timezone を落として返すため、条件の評価を Python 側で
                 # 行わせない。判定は SQL に任せる。
                 .execution_options(synchronize_session=False)
@@ -252,84 +184,71 @@ async def end_conversation(
                 status.HTTP_409_CONFLICT,
                 "この会話の振り返りは実行中です。しばらく待って再試行してください。",
             )
-        # 開始権を確定させてからジョブを積む。積んだ後に確定させると、ジョブが
-        # 先に走って自分の開始権を見つけられない。
+
+        sole_partner = await _sole_partner(session, conversation_id)
+        # 生成に入る前に DB の書き込みロックを手放す（会話 API と同じ理由）。
         await session.commit()
 
-    reflection_job.schedule(
-        factory,
-        conversation_id=conversation_id,
-        llm=llm,
-        character_name=character_name,
-    )
-    await session.refresh(conversation)
-    return _progress(conversation)
+        # 相手がひとりの会話でだけ、関係性の候補を作る。複数いる会話で
+        # 「その相手との関係」を最後の話者へ寄せると、別人の関係になる。
+        partner_id = sole_partner.id if sole_partner else None
+        messages = await _conversation_messages(session, conversation_id)
+        current_states = await active_states(session, speaker_id=partner_id, mode=conversation.mode)
 
-
-@router.post("/{conversation_id}/open", response_model=ProactiveTurn)
-async def open_conversation(
-    conversation_id: int,
-    speaker: SpeakerRef = SpeakerRef(),
-    session: AsyncSession = Depends(get_session),
-    agent: ConversationAgent = Depends(get_agent),
-) -> ProactiveTurn:
-    """YUI の側から会話を始める（設計書 6「自発的行動」）。
-
-    起動点は会話開始だけに絞っている。話題の区切りと、許可された待機時間は
-    ISSUE-024 に記録した。
-
-    **話しかけないこともある。** 目標が無い、いま持ち出す場面ではないと判断
-    したら、発言を作らずに返す。呼んだ側は message が null であることで分かる。
-    """
-    conversation = await session.get(Conversation, conversation_id)
-    if conversation is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
-    _ensure_open(conversation)
-
-    partner = await get_or_create_speaker(
-        session,
-        source=speaker.source,
-        external_id=speaker.external_id,
-        display_name=speaker.display_name,
-    )
-    # 話者の作成・表示名の更新をここで確定させる。**モデルを呼ぶ前に書き込みを
-    # 閉じる。** 未登録の相手を指定すると INSERT が開いたまま行動選択の応答を
-    # 待つことになり、他の会話や記憶の訂正が「database is locked」で失敗する
-    # （第2回レビューの指摘1。発言の API は同じ位置で閉じている）。
-    await session.commit()
-
-    async with conversation_locks.hold(conversation_id):
-        # ロック待ちの間に振り返りが始まる・終わることがある。取る前だけの
-        # 判定では、振り返りの対象を固めた後に発言が入り、抽出した内容と
-        # 会話ログが食い違う（第1回レビューの指摘2）。発言と同じ検査を通す。
-        await session.refresh(conversation)
-        _ensure_open(conversation)
         try:
-            opened = await agent.open(
-                session, conversation=conversation, speaker=partner
+            # モデルを呼んでいる間は、書き込みのトランザクションを開かない。
+            # 開いたまま待つと、別の会話の書き込みが「database is locked」で
+            # 失敗する。抽出はここでは保存せず、すべて成功してからまとめて
+            # 保存する（フェーズ3全体レビューの指摘4・5）。
+            candidates = await extract_candidates(
+                session,
+                llm=llm,
+                conversation=conversation,
+                character_name=character_name,
             )
-        except LLMError as exc:
-            # モデルに繋がらないことと、正しく待機したことを区別して返す
-            # （発言の API と同じ扱い。第1回レビューの指摘7）。
+            # 関心・関係性の更新候補は、別の呼び出しで作る。同じ指示文へ項目を
+            # 足すと記憶の抽出が落ちるため（ISSUE-017 で実測）。
+            state_payloads = await propose_state_candidates(
+                llm=llm,
+                transcript=format_transcript(messages, character_name),
+                partner_speaker_id=partner_id,
+                current_states=current_states,
+            )
+        except (LLMError, ReflectionParseError, StateReflectionError) as exc:
+            # 抽出できなかった会話を処理中・終了済みのまま残すと、やり直せない。
+            # 特に出力の解析失敗は「候補なしの成功」と区別する必要がある。
+            # 途中まで作ったものは捨てる。残すと、再試行で二重に保存される。
+            await session.rollback()
+            await _release_reflection(session, conversation_id)
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+        # ここから保存。すべて成功したものだけを、1つのトランザクションで書く。
+        session.add_all(candidates)
+        for payload in state_payloads:
+            is_relationship = payload.kind == StateKind.RELATIONSHIP.value
+            await create_state(
+                session,
+                kind=payload.kind,
+                content=payload.content,
+                topic=None if is_relationship else payload.topic,
+                subject_speaker_id=partner_id if is_relationship else None,
+                # 非公開の会話から作った状態は、その相手との会話に限る。
+                visible_to_speaker_id=partner_id,
+                source_conversation_id=conversation.id,
+                status=StateStatus.PENDING.value,
+                reason=payload.reason or "会話の振り返りから",
+            )
+        await session.flush()
+
+        completed = utcnow()
+        await session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(reflection_completed_at=completed, ended_at=completed)
+        )
         await session.commit()
-    return ProactiveTurn(
-        action=opened.choice.action,
-        reason=opened.choice.reason,
-        referenced_goal_ids=[goal.id for goal in opened.goals],
-        message=opened.reply_message,
-    )
 
-
-@router.get("/{conversation_id}/reflection", response_model=ReflectionProgress)
-async def read_reflection(
-    conversation_id: int, session: AsyncSession = Depends(get_session)
-) -> ReflectionProgress:
-    """振り返りの進み具合。画面はこれを見て、終わったら候補を取りに行く。"""
-    conversation = await session.get(Conversation, conversation_id)
-    if conversation is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "会話が見つかりません。")
-    return _progress(conversation)
+    return candidates
 
 
 @router.get("/{conversation_id}/candidates", response_model=list[MemoryCandidateOut])
@@ -366,33 +285,35 @@ async def decide_candidate(
             status.HTTP_400_BAD_REQUEST,
             "subject_speaker_id と subject_to_none は同時に指定できません。",
         )
-    # 開発者が直した内容は、**候補を書き換えずに**渡す（PR11 レビューの指摘6）。
-    # 書き換えると、モデルが抽出した内容と開発者が直した内容を区別して追えなく
-    # なる。設計書は「更新前後を比較し」て自動採用へ移すとしており、比較する元が
-    # 消える。採用の手順そのものは自動採用と同じ関数を通す。
-    await accept_candidate(
+    if payload.subject_to_none:
+        subject_speaker_id = None
+    elif payload.subject_speaker_id is not None:
+        subject_speaker_id = payload.subject_speaker_id
+    else:
+        subject_speaker_id = candidate.subject_speaker_id
+
+    memory = await create_memory(
         session,
-        candidate,
+        kind=(payload.kind.value if payload.kind else candidate.kind),
+        content=(payload.content or candidate.content),
+        subject_speaker_id=subject_speaker_id,
+        visible_to_speaker_id=candidate.visible_to_speaker_id,
+        certainty=(payload.certainty.value if payload.certainty else candidate.certainty),
+        provenance=(payload.provenance.value if payload.provenance else candidate.provenance),
+        visibility=(payload.visibility.value if payload.visibility else candidate.visibility),
+        keywords=(payload.keywords if payload.keywords is not None else candidate.keywords),
+        occurred_at=candidate.occurred_at,
+        source_message_id=candidate.source_message_id,
+        source_conversation_id=candidate.conversation_id,
         reason=payload.reason or "会話の振り返りから採用",
-        auto=False,
-        overrides=Overrides(
-            kind=payload.kind.value if payload.kind else None,
-            content=payload.content,
-            certainty=payload.certainty.value if payload.certainty else None,
-            provenance=payload.provenance.value if payload.provenance else None,
-            visibility=payload.visibility.value if payload.visibility else None,
-            keywords=payload.keywords,
-            subject_speaker_id=payload.subject_speaker_id,
-            subject_to_none=payload.subject_to_none,
-        ),
     )
+    candidate.status = CandidateStatus.ACCEPTED.value
+    candidate.accepted_memory_id = memory.id
     return candidate
 
 
 @router.get("/messages/{message_id}", response_model=MessageOut)
-async def get_message(
-    message_id: int, session: AsyncSession = Depends(get_session)
-) -> Message:
+async def get_message(message_id: int, session: AsyncSession = Depends(get_session)) -> Message:
     """根拠の発言の本文を確認する。記憶がどの発言から作られたかを追うため。"""
     message = await session.get(Message, message_id)
     if message is None:
@@ -417,9 +338,7 @@ async def _character_message(session: AsyncSession, message_id: int) -> Message:
     if message is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "発言が見つかりません。")
     if message.speaker_kind != SpeakerKind.CHARACTER.value:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "読み上げの対象はキャラクターの発言です。"
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "読み上げの対象はキャラクターの発言です。")
     return message
 
 
@@ -439,9 +358,7 @@ async def get_speech(
     音声は都度合成する。保存や先読みは、どの区間が遅いかを測ってから判断する。
     """
     if not settings.speech_enabled:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "音声合成は無効になっています。"
-        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "音声合成は無効になっています。")
     message = await _character_message(session, message_id)
     try:
         result = await speech.synthesize(message.content)
@@ -471,11 +388,7 @@ async def list_speech_runs(
     message_id: int, session: AsyncSession = Depends(get_session)
 ) -> list[SpeechRun]:
     """この発言を合成したときの記録。新しい順に返す。"""
-    stmt = (
-        select(SpeechRun)
-        .where(SpeechRun.message_id == message_id)
-        .order_by(SpeechRun.id.desc())
-    )
+    stmt = select(SpeechRun).where(SpeechRun.message_id == message_id).order_by(SpeechRun.id.desc())
     return list((await session.execute(stmt)).scalars())
 
 
@@ -490,9 +403,7 @@ async def update_delivery(
     すでに話し終えた発言への通知は、聞き直しとみなして記録を変えない。
     """
     message = await _character_message(session, message_id)
-    return await apply_delivery_state(
-        session, message, DeliveryState(payload.state), now=utcnow()
-    )
+    return await apply_delivery_state(session, message, DeliveryState(payload.state), now=utcnow())
 
 
 @router.post("/messages/{message_id}/ideal", response_model=IdealResponseOut)
@@ -509,9 +420,7 @@ async def create_ideal_response(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "理想の返答はキャラクターの発言に対して記録します。"
         )
-    ideal = IdealResponse(
-        message_id=message_id, ideal_text=payload.ideal_text, note=payload.note
-    )
+    ideal = IdealResponse(message_id=message_id, ideal_text=payload.ideal_text, note=payload.note)
     session.add(ideal)
     await session.flush()
     return ideal

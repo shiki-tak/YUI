@@ -13,7 +13,7 @@ from httpx import AsyncClient
 
 from app.agent.reflection import _parse_occurred_on
 from app.config import LOCAL_TZ
-from tests.conftest import FakeLLM, end_and_wait
+from tests.conftest import FakeLLM
 
 TODAY = date(2026, 9, 7)
 
@@ -53,10 +53,9 @@ def test_date_is_stored_as_the_start_of_the_day_here() -> None:
 async def _reflect(client: AsyncClient, fake_llm: FakeLLM, text: str, output: str) -> list[dict]:
     first = await client.post("/api/chat", json={"text": text})
     fake_llm.push(output)
-    conversation_id = first.json()["conversation_id"]
-    ended = await end_and_wait(client, conversation_id)
-    assert ended.status_code == 202, ended.text
-    return (await client.get(f"/api/conversations/{conversation_id}/candidates")).json()
+    ended = await client.post(f"/api/conversations/{first.json()['conversation_id']}/end")
+    assert ended.status_code == 200, ended.text
+    return ended.json()
 
 
 async def test_today_is_given_to_the_model(client: AsyncClient, fake_llm: FakeLLM) -> None:
@@ -64,9 +63,7 @@ async def test_today_is_given_to_the_model(client: AsyncClient, fake_llm: FakeLL
     await _reflect(client, fake_llm, "先週の話なんだけど", "[]")
     # 振り返りは2回呼ぶ（記憶の抽出と、関心・関係性の抽出）。日付を渡すのは
     # 記憶の抽出のほう。
-    memory_call = next(
-        call for call in fake_llm.calls if "occurred_on" in call[0].content
-    )
+    memory_call = next(call for call in fake_llm.calls if "occurred_on" in call[0].content)
     sent = memory_call[-1].content
     assert "振り返りを行っている日:" in sent
     assert datetime.now(LOCAL_TZ).date().isoformat() in sent
@@ -86,9 +83,7 @@ async def test_candidate_keeps_the_event_date(client: AsyncClient, fake_llm: Fak
     assert candidates[0]["occurred_at"].startswith("2026-08-31T15:00")
 
 
-async def test_accepted_memory_keeps_the_event_date(
-    client: AsyncClient, fake_llm: FakeLLM
-) -> None:
+async def test_accepted_memory_keeps_the_event_date(client: AsyncClient, fake_llm: FakeLLM) -> None:
     candidates = await _reflect(
         client,
         fake_llm,

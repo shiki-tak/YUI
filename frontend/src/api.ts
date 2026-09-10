@@ -11,11 +11,8 @@ import type {
   Memory,
   MemoryCandidate,
   MemoryRevision,
-  ReflectionProgress,
   Message,
   CharacterState,
-  Goal,
-  GoalRevision,
   RetrievedMemory,
   RunRecord,
   Speaker,
@@ -70,15 +67,10 @@ export const api = {
   conversation: (conversationId: number) =>
     request<ConversationDetail>(`/conversations/${conversationId}`),
 
-  /** 会話を終了し、振り返りのジョブを積む。**結果は待たない。** */
   endConversation: (conversationId: number) =>
-    request<ReflectionProgress>(`/conversations/${conversationId}/end`, {
+    request<MemoryCandidate[]>(`/conversations/${conversationId}/end`, {
       method: "POST",
     }),
-
-  /** 振り返りの進み具合。終わったら候補を取りに行く。 */
-  reflection: (conversationId: number) =>
-    request<ReflectionProgress>(`/conversations/${conversationId}/reflection`),
 
   candidates: (conversationId: number) =>
     request<MemoryCandidate[]>(`/conversations/${conversationId}/candidates`),
@@ -185,40 +177,4 @@ export const api = {
 
   revisions: (memoryId: number) =>
     request<MemoryRevision[]>(`/memories/${memoryId}/revisions`),
-
-  // 目標。採用したものだけが行動の候補になる。
-  goals: () => request<Goal[]>("/goals"),
-
-  decideGoal: (
-    goalId: number,
-    body: {
-      decision: "accept" | "reject";
-      content?: string;
-      trigger?: Goal["trigger"];
-      due_at?: string | null;
-      reason?: string;
-    },
-  ) =>
-    request<Goal>(`/goals/${goalId}/decide`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  updateGoal: (
-    goalId: number,
-    body: {
-      content?: string;
-      trigger?: Goal["trigger"];
-      due_at?: string | null;
-      status?: Goal["status"];
-      reviewed?: boolean;
-      reason?: string;
-    },
-  ) =>
-    request<Goal>(`/goals/${goalId}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-
-  goalRevisions: (goalId: number) => request<GoalRevision[]>(`/goals/${goalId}/revisions`),
 };

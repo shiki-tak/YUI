@@ -59,8 +59,7 @@ def build_markdown(
     lines += [
         "## まとめ",
         "",
-        f"自動判定を通った試行：**{passed} / {total}**"
-        f"（機械で判定した {len(machine)} シナリオ）",
+        f"自動判定を通った試行：**{passed} / {total}**（機械で判定した {len(machine)} シナリオ）",
         "",
         f"人が読んで判断するシナリオ：**{len(human_only)}**。"
         "機械の判定項目を書いていないため、上の数には含めない。読んで判断する"
@@ -74,11 +73,7 @@ def build_markdown(
     ]
     for result in results:
         aspect = ASPECTS.get(result.scenario.aspect, result.scenario.aspect).split("：")[0]
-        verdict = (
-            "人手（未判定）"
-            if result.human_only
-            else f"{result.passed} / {result.total}"
-        )
+        verdict = "人手（未判定）" if result.human_only else f"{result.passed} / {result.total}"
         lines.append(f"| {result.scenario.id} | {aspect} | {verdict} |")
     lines.append("")
 
@@ -96,9 +91,7 @@ def build_markdown(
         for index, attempt in enumerate(result.attempts, start=1):
             # 人手だけのシナリオは、機械では判定していない。「通過」と書かない。
             mark = (
-                "未判定（人が読む）"
-                if result.human_only
-                else ("通過" if attempt.ok else "不通過")
+                "未判定（人が読む）" if result.human_only else ("通過" if attempt.ok else "不通過")
             )
             lines += [f"### {index} 回目（{mark}）", ""]
             for turn in attempt.turns:
@@ -110,13 +103,7 @@ def build_markdown(
                 if turn.referenced:
                     lines.append(f"  - 渡した記憶：{'、'.join(turn.referenced)}")
                 if turn.referenced_states:
-                    lines.append(
-                        f"  - 渡した状態：{_escape('、'.join(turn.referenced_states))}"
-                    )
-                if turn.referenced_goals:
-                    lines.append(
-                        f"  - 渡した目標：{_escape('、'.join(turn.referenced_goals))}"
-                    )
+                    lines.append(f"  - 渡した状態：{_escape('、'.join(turn.referenced_states))}")
                 for check in turn.checks:
                     lines.append(
                         f"  - {'○' if check.ok else '×'} {check.name}：{_escape(check.detail)}"
@@ -143,8 +130,7 @@ def build_markdown(
                     lines.append("  - 候補：なし")
                 for check in reflection.checks:
                     lines.append(
-                        f"  - {'○' if check.ok else '×'} {check.name}："
-                        f"{_escape(check.detail)}"
+                        f"  - {'○' if check.ok else '×'} {check.name}：{_escape(check.detail)}"
                     )
                 if reflection.human_check:
                     lines.append(f"  - 人が見る点：{reflection.human_check} → ")

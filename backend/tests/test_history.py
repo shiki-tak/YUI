@@ -14,7 +14,7 @@ from datetime import datetime
 
 from httpx import AsyncClient
 
-from tests.conftest import FakeLLM, end_and_candidates, end_and_wait
+from tests.conftest import FakeLLM
 
 
 async def _say(client: AsyncClient, text: str, conversation_id: int | None = None) -> dict:
@@ -59,9 +59,7 @@ async def test_past_conversation_can_be_read_back(client: AsyncClient, fake_llm:
     ]
 
 
-async def test_ended_conversation_is_marked_as_read_only(
-    client: AsyncClient, fake_llm: FakeLLM
-):
+async def test_ended_conversation_is_marked_as_read_only(client: AsyncClient, fake_llm: FakeLLM):
     """終了した会話は、開く前に読み取り専用だと分かる。"""
     first = await _say(client, "そろそろ終わろうか")
 
@@ -70,7 +68,7 @@ async def test_ended_conversation_is_marked_as_read_only(
     assert before["reflection_completed_at"] is None
 
     fake_llm.push("[]")
-    await end_and_wait(client, first['conversation_id'])
+    await client.post(f"/api/conversations/{first['conversation_id']}/end")
 
     after = (await client.get(f"/api/conversations/{first['conversation_id']}")).json()
     assert after["ended_at"] is not None
@@ -104,9 +102,7 @@ async def test_referenced_memory_can_be_read_back_by_id(client: AsyncClient):
     memory_id = created.json()["id"]
 
     reply = await _say(client, "山登りはどう？", first["conversation_id"])
-    run = (
-        await client.get(f"/api/conversations/messages/{reply['reply']['id']}/run")
-    ).json()
+    run = (await client.get(f"/api/conversations/messages/{reply['reply']['id']}/run")).json()
     assert memory_id in run["referenced_memory_ids"]
 
     fetched = await client.get(f"/api/memories/{memory_id}")
@@ -161,7 +157,7 @@ async def test_api_datetimes_carry_a_timezone(client: AsyncClient, fake_llm: Fak
             ensure_ascii=False,
         )
     )
-    candidates = await end_and_candidates(client, first['conversation_id'])
+    candidates = (await client.post(f"/api/conversations/{first['conversation_id']}/end")).json()
     assert datetime.fromisoformat(candidates[0]["created_at"]).tzinfo is not None
 
     memory = (

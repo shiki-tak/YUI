@@ -36,9 +36,7 @@ from app.schemas import (
 router = APIRouter(tags=["states"])
 
 
-async def _check_scope_against_basis(
-    session: AsyncSession, payload: CharacterStateCreate
-) -> None:
+async def _check_scope_against_basis(session: AsyncSession, payload: CharacterStateCreate) -> None:
     """根拠の記憶より広い参照範囲を許さない。"""
     stmt = select(Memory).where(Memory.id.in_(payload.basis_memory_ids))
     memories = list((await session.execute(stmt)).scalars())
@@ -50,9 +48,7 @@ async def _check_scope_against_basis(
             f"根拠にした記憶が見つかりません: {'、'.join(str(m) for m in missing)}",
         )
 
-    dead = [
-        memory.id for memory in memories if memory.status != MemoryStatus.ACTIVE.value
-    ]
+    dead = [memory.id for memory in memories if memory.status != MemoryStatus.ACTIVE.value]
     if dead:
         # 削除・訂正された記憶を根拠にした状態は、作られた時点で古い前提を
         # 持っている。訂正の波及（ISSUE-016）は「後から変わったもの」を拾う
@@ -175,8 +171,7 @@ async def decide_state(
         if gone:
             state.needs_review = True
             state.review_reason = (
-                f"根拠にした記憶 {'、'.join(f'#{mid}' for mid in gone)} が"
-                "有効でなくなっている"
+                f"根拠にした記憶 {'、'.join(f'#{mid}' for mid in gone)} が有効でなくなっている"
             )
     else:
         state.status = StateStatus.REJECTED.value
@@ -212,8 +207,7 @@ async def update_state(
         if gone:
             state.needs_review = True
             state.review_reason = (
-                f"根拠にした記憶 {'、'.join(f'#{mid}' for mid in gone)} が"
-                "有効でなくなっている"
+                f"根拠にした記憶 {'、'.join(f'#{mid}' for mid in gone)} が有効でなくなっている"
             )
     await session.flush()
     record_revision(session, state, action="corrected", before=before, reason=payload.reason)

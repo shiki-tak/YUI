@@ -57,9 +57,7 @@ class VoicevoxClient(SpeechClient):
         try:
             response = await self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
-            raise SpeechError(
-                f"VOICEVOX に接続できませんでした（{self.host}）: {exc}"
-            ) from exc
+            raise SpeechError(f"VOICEVOX に接続できませんでした（{self.host}）: {exc}") from exc
         if response.is_error:
             # 本文は原因の手がかりになるが、長い HTML が返ることもあるため切る。
             detail = response.text[:200].replace("\n", " ")

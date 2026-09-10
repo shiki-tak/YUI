@@ -55,9 +55,7 @@ def parse_readings(value: str) -> list[Reading]:
             raise ValueError(f"読み替えに空の項目があります: {item}")
         if not accent.isdigit():
             raise ValueError(f"アクセント位置が数値ではありません: {item}")
-        readings.append(
-            Reading(surface=surface, pronunciation=pronunciation, accent=int(accent))
-        )
+        readings.append(Reading(surface=surface, pronunciation=pronunciation, accent=int(accent)))
     return readings
 
 

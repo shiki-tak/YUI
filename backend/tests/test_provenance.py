@@ -12,16 +12,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import MemoryCandidate, Provenance
-from tests.conftest import FakeLLM, end_and_wait
+from tests.conftest import FakeLLM
 
 
 async def _talk_and_reflect(client: AsyncClient, fake_llm: FakeLLM, text: str, output: str):
     first = await client.post("/api/chat", json={"text": text})
     conversation_id = first.json()["conversation_id"]
     fake_llm.push(output)
-    ended = await end_and_wait(client, conversation_id)
-    assert ended.status_code == 202, ended.text
-    return (await client.get(f"/api/conversations/{conversation_id}/candidates")).json()
+    ended = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert ended.status_code == 200, ended.text
+    return ended.json()
 
 
 async def test_hearsay_is_not_attached_to_the_partner(
@@ -49,9 +49,7 @@ async def test_hearsay_is_not_attached_to_the_partner(
     assert candidates[0]["subject_speaker_id"] is None
 
 
-async def test_firsthand_is_attached_to_the_partner(
-    client: AsyncClient, fake_llm: FakeLLM
-) -> None:
+async def test_firsthand_is_attached_to_the_partner(client: AsyncClient, fake_llm: FakeLLM) -> None:
     candidates = await _talk_and_reflect(
         client,
         fake_llm,
@@ -63,14 +61,12 @@ async def test_firsthand_is_attached_to_the_partner(
     assert candidates[0]["subject_speaker_id"] is not None
 
 
-async def test_provenance_is_derived_not_asked(
-    client: AsyncClient, fake_llm: FakeLLM
-) -> None:
+async def test_provenance_is_derived_not_asked(client: AsyncClient, fake_llm: FakeLLM) -> None:
     """入手経路はモデルへ訊かない。about_partner から決める（ISSUE-023）。
 
     モデルが provenance を書いてきても無視する。**同じ軸を2回訊くと食い違い、
     食い違えば必ずどちらかが誤りになる。** 導出できるものは訊かない
-    （PR10 の「足し算はモデルにやらせない」と同じ）。
+    導出できるものを訊かない。
 
     以前は「読み取れない入手経路は既定へ寄せずに失敗させる」としていたが、
     読み取る対象そのものが無くなったので、その検査も無くなった。
@@ -190,7 +186,7 @@ async def test_an_impression_is_firsthand_even_though_it_is_not_about_the_partne
 async def test_a_missing_about_partner_is_unknown_not_hearsay(
     client: AsyncClient, fake_llm: FakeLLM
 ) -> None:
-    """判断材料が返っていないなら、伝聞と確定しない（PR12 レビューの指摘3）。
+    """判断材料が返っていないなら、伝聞と確定しない。
 
     入手経路を about_partner から導出するようにしたとき、**省略を既定の false
     として扱っていた**。「第三者についてと判断した false」と区別が付かず、

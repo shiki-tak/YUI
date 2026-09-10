@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models import CharacterState, MemoryCandidate
-from tests.conftest import FakeLLM, end_and_candidates, end_and_expect_failure, end_and_wait
+from tests.conftest import FakeLLM
 
 A = {"source": "local_text", "external_id": "rev-a", "display_name": "Aさん"}
 B = {"source": "local_text", "external_id": "rev-b", "display_name": "Bさん"}
@@ -36,7 +36,7 @@ async def test_transcript_names_each_speaker(client: AsyncClient, fake_llm: Fake
     """
     conversation_id, _, _ = await _two_speaker_conversation(client)
     fake_llm.push("[]")
-    await end_and_wait(client, conversation_id)
+    await client.post(f"/api/conversations/{conversation_id}/end")
 
     sent = next(call[-1].content for call in fake_llm.calls if "会話:" in call[-1].content)
     assert "Aさん: 私は写真が好きなんだ" in sent
@@ -68,7 +68,7 @@ async def test_candidate_belongs_to_the_speaker_of_its_source(
         f'"provenance":"firsthand","keywords":"写真","about_partner":true,'
         f'"source_message_id":{a_message.id}}}]'
     )
-    candidates = await end_and_candidates(client, conversation_id)
+    candidates = (await client.post(f"/api/conversations/{conversation_id}/end")).json()
 
     # 最後に話したのは B さんだが、根拠は A さんの発言。
     assert candidates[0]["subject_speaker_id"] == a_id
@@ -139,7 +139,8 @@ async def test_failed_reflection_leaves_no_candidates(
         '"provenance":"firsthand","keywords":"写真","about_partner":true}]'
     )
     fake_llm.push_state("読み取れない出力")
-    await end_and_expect_failure(client, conversation_id)
+    failed = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert failed.status_code == 503
 
     async with session_factory() as session:
         stored = list((await session.execute(select(MemoryCandidate))).scalars())
@@ -153,12 +154,9 @@ async def test_failed_reflection_leaves_no_candidates(
         '"provenance":"firsthand","keywords":"写真","about_partner":true}]'
     )
     fake_llm.push_state("[]")
-    retried = await end_and_wait(client, conversation_id)
-    assert retried.status_code == 202
-    candidates = (
-        await client.get(f"/api/conversations/{conversation_id}/candidates")
-    ).json()
-    assert len(candidates) == 1
+    retried = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert retried.status_code == 200
+    assert len(retried.json()) == 1
 
 
 async def test_other_conversations_can_write_while_reflecting(
@@ -178,9 +176,7 @@ async def test_other_conversations_can_write_while_reflecting(
     fake_llm.gate = gate
     fake_llm.entered.clear()
 
-    reflecting = asyncio.create_task(
-        end_and_wait(client, conversation_id)
-    )
+    reflecting = asyncio.create_task(client.post(f"/api/conversations/{conversation_id}/end"))
     await asyncio.wait_for(fake_llm.entered.wait(), timeout=2)
 
     # 抽出の途中でも、別の記憶を書ける。
@@ -197,7 +193,7 @@ async def test_other_conversations_can_write_while_reflecting(
 
     fake_llm.gate = None
     gate.set()
-    assert (await reflecting).status_code == 202
+    assert (await reflecting).status_code == 200
 
 
 # --- 再レビューの指摘 -------------------------------------------------------
@@ -221,7 +217,7 @@ async def test_correction_reaches_states_made_by_reflection(
     fake_llm.push_state(
         '[{"kind":"interest","topic":"写真","content":"人が撮った写真に興味がある"}]'
     )
-    candidates = await end_and_candidates(client, conversation_id)
+    candidates = (await client.post(f"/api/conversations/{conversation_id}/end")).json()
 
     memory_id = (
         await client.post(
@@ -258,7 +254,7 @@ async def test_correction_reaches_states_accepted_before_the_memory(
     fake_llm.push_state(
         '[{"kind":"interest","topic":"写真","content":"人が撮った写真に興味がある"}]'
     )
-    candidates = await end_and_candidates(client, conversation_id)
+    candidates = (await client.post(f"/api/conversations/{conversation_id}/end")).json()
 
     # 記憶を採用する前に、状態を採用する。根拠は結び付かない。
     states = (await client.get("/api/states?state_status=pending")).json()
@@ -397,7 +393,7 @@ async def test_correction_reaches_states_adopted_between_memories(
     fake_llm.push_state(
         '[{"kind":"interest","topic":"飲み物","content":"紅茶の話をもっと聞きたい"}]'
     )
-    candidates = await end_and_candidates(client, conversation_id)
+    candidates = (await client.post(f"/api/conversations/{conversation_id}/end")).json()
     photo = next(c for c in candidates if "写真" in c["content"])
     tea = next(c for c in candidates if "紅茶" in c["content"])
 
@@ -464,9 +460,7 @@ async def test_withdrawn_state_is_checked_when_brought_back(client: AsyncClient)
 
     # 印を無視して有効へ戻しても、根拠が消えていることに気づく。
     await client.patch(f"/api/states/{state['id']}", json={"reviewed": True})
-    back = (
-        await client.patch(f"/api/states/{state['id']}", json={"status": "active"})
-    ).json()
+    back = (await client.patch(f"/api/states/{state['id']}", json={"status": "active"})).json()
     assert back["needs_review"] is True
     assert "有効でなくなっている" in back["review_reason"]
 
@@ -497,9 +491,7 @@ async def test_third_model_call_does_not_hold_the_write_lock(
     fake_llm.gate_on = STATE_INSTRUCTION
     fake_llm.held.clear()
 
-    reflecting = asyncio.create_task(
-        end_and_wait(client, conversation_id)
-    )
+    reflecting = asyncio.create_task(client.post(f"/api/conversations/{conversation_id}/end"))
     await asyncio.wait_for(fake_llm.held.wait(), timeout=2)
     # 止まっているのが振り返りの3回目であることを確かめる。
     # （1回目は会話の返答、そのあと 拾う → 選ぶ → 関心・関係性 と続く）
@@ -522,7 +514,7 @@ async def test_third_model_call_does_not_hold_the_write_lock(
     fake_llm.gate = None
     fake_llm.gate_on = None
     gate.set()
-    assert (await reflecting).status_code == 202
+    assert (await reflecting).status_code == 200
 
 
 # --- 第5回レビューの指摘 -----------------------------------------------------

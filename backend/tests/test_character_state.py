@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from httpx import AsyncClient
 
-from tests.conftest import FakeLLM, end_and_wait
+from tests.conftest import FakeLLM
 
 
 async def _speaker(client: AsyncClient, text: str = "こんにちは", **speaker) -> int:
@@ -48,9 +48,7 @@ async def test_new_state_is_a_candidate_until_accepted(
     assert "雨の日の静かな時間が好き" in fake_llm.last_system_prompt
 
 
-async def test_state_is_separate_from_the_persona(
-    client: AsyncClient, fake_llm: FakeLLM
-) -> None:
+async def test_state_is_separate_from_the_persona(client: AsyncClient, fake_llm: FakeLLM) -> None:
     """人格とは別の見出しで渡す。いま思っていることを人格の一部にしない。"""
     state = await _add(client)
     await client.post(f"/api/states/{state['id']}/decide", json={"decision": "accept"})
@@ -78,8 +76,9 @@ async def test_relationship_is_only_used_with_that_partner(
     client: AsyncClient, fake_llm: FakeLLM
 ) -> None:
     """別の相手との関係を持ち出さない（3C）。"""
-    a_id = await _speaker(client, "こんにちは", source="local_text", external_id="st-a",
-                          display_name="Aさん")
+    a_id = await _speaker(
+        client, "こんにちは", source="local_text", external_id="st-a", display_name="Aさん"
+    )
     state = await _add(
         client,
         kind="relationship",
@@ -200,9 +199,7 @@ async def test_changes_are_kept_in_the_history(client: AsyncClient) -> None:
     assert revisions[0]["before"]["content"] == "雨の日の静かな時間が好き"
 
 
-async def test_reflection_creates_state_candidates(
-    client: AsyncClient, fake_llm: FakeLLM
-) -> None:
+async def test_reflection_creates_state_candidates(client: AsyncClient, fake_llm: FakeLLM) -> None:
     """会話の振り返りから、関心・関係性の候補が作られる（ISSUE-015）。"""
     first = await client.post("/api/chat", json={"text": "山で撮った写真を見せたいな"})
     conversation_id = first.json()["conversation_id"]
@@ -214,8 +211,8 @@ async def test_reflection_creates_state_candidates(
         '{"kind":"relationship","content":"開発者とは写真の話でよく盛り上がる",'
         '"reason":"同じ話題が続いている"}]'
     )
-    ended = await end_and_wait(client, conversation_id)
-    assert ended.status_code == 202
+    ended = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert ended.status_code == 200
 
     states = (await client.get("/api/states?state_status=pending")).json()
     kinds = {s["kind"] for s in states}
@@ -240,20 +237,16 @@ async def test_state_extraction_failure_can_be_retried(
 
     fake_llm.push("[]")
     fake_llm.push_state("関心はありません")
-    # 失敗はジョブの中で起きる。終了は受け付けたうえで、理由を進行状態に残す。
-    assert (await end_and_wait(client, conversation_id)).status_code == 202
-    progress = (await client.get(f"/api/conversations/{conversation_id}/reflection")).json()
-    assert progress["state"] == "failed"
-    assert "状態の更新候補" in progress["error"]
+    failed = await client.post(f"/api/conversations/{conversation_id}/end")
+    assert failed.status_code == 503
+    assert "状態の更新候補" in failed.json()["detail"]
 
     fake_llm.push("[]")
     fake_llm.push_state("[]")
-    assert (await end_and_wait(client, conversation_id)).status_code == 202
+    assert (await client.post(f"/api/conversations/{conversation_id}/end")).status_code == 200
 
 
-async def test_no_state_candidates_when_the_partner_is_unclear(
-    fake_llm: FakeLLM
-) -> None:
+async def test_no_state_candidates_when_the_partner_is_unclear(fake_llm: FakeLLM) -> None:
     """相手を決められない会話では、状態の候補を作らない。
 
     非公開の会話から作った状態にも参照範囲を引き継ぐ必要があり、誰に限るかを

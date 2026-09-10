@@ -125,10 +125,10 @@ class StateKind(StrEnum):
     固定人格（口調・価値観・自己設定）は personas/<版>.toml にあり、ここでは
     扱わない。ここに置くのは、経験によって変わっていくものだけ。
 
-    目標（次に感想を聞く、一緒に調べる）はここに kind を足さず、goals として
-    別の表に持つ（フェーズ4）。目標だけが実行条件・期限・最後に実行した時刻を
-    必要とし、実行と達成を分けて記録するため。「候補 → 開発者が採用 → 根拠を
-    残す」という流れは同じ形にしてある。
+    目標（次に感想を聞く、一緒に調べる）はフェーズ4の担当なので、まだ持たない。
+    ただし「候補 → 開発者が採用 → 根拠を残す」という流れは同じ形にしてあり、
+    フェーズ4では kind を1つ増やし、実行条件・期限・完了条件の列を足せば足りる
+    ようにしている。
     """
 
     # YUI 自身の関心・好み。相手の好みとは別に持つ。
@@ -157,78 +157,6 @@ class CandidateStatus(StrEnum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
 
-
-class Action(StrEnum):
-    """会話・自発的行動で選ぶ行動（設計書 6 の 3）。
-
-    設計書：「回答・確認質問・話題提案・調査・待機から適切な行動を選ぶ」。
-    **待機も行動である。** 合格は「よく喋ること」ではなく、適切に待てることも
-    測る対象なので、選んだことを記録する（run_records.selected_action）。
-    """
-
-    # 相手の発言に答える。目標には触れない。
-    ANSWER = "answer"
-    # 目標について聞く。「この前の映画どうだった？」
-    ASK = "ask"
-    # 自分から話題を出す。
-    SUGGEST = "suggest"
-    # 調べて伝える。フェーズ5A が未実装のため、選ばれても実行はしない。
-    # 目標は保留し、「調べた」と発言させない（設計書 6）。
-    RESEARCH = "research"
-    # いまは持ち出さない。相手が疲れている、話したくないときに選ぶ。
-    WAIT = "wait"
-
-
-class ReflectionStep(StrEnum):
-    """振り返りがいまどこを処理しているか（フェーズ4 PR5）。
-
-    LLM の呼び出しは役割ごとに分けてある（ISSUE-021）。段階ごとの時間差が
-    大きく、まとめて「処理中」とだけ出すと、止まっているのか進んでいるのかが
-    分からない。実測は拾う3.9秒／選ぶ16.5秒／関心・関係性5.4秒。
-    """
-
-    PICKING = "picking"  # 会話から、後で話題にできそうな内容を拾う
-    SELECTING = "selecting"  # 拾ったものから、長期的に覚えるものを選ぶ
-    STATES = "states"  # 関心・関係性の更新候補を作る
-    GOALS = "goals"  # 次に何を話したいかの候補を作る
-    SAVING = "saving"  # すべて成功したものをまとめて保存する
-
-
-class GoalTrigger(StrEnum):
-    """目標を実行してよい条件（設計書 5「目標」の実行条件）。
-
-    フェーズ4では2種類だけ持つ。条件式にはしない。器を小さく作って評価で
-    足りないものを見つけるほうが速い、というフェーズ3の教訓による。
-    """
-
-    # 次に会話が始まれば実行してよい。
-    NEXT_CONVERSATION = "next_conversation"
-    # due_at を過ぎてから実行してよい。「予定日後に感想を聞く」がこれ。
-    AFTER_DATE = "after_date"
-
-
-class GoalStatus(StrEnum):
-    """目標の扱い。候補から完了までを同じ表で追う。
-
-    終わり方を1つにまとめない。却下・取消・前提の消滅・期限切れは、後から
-    見たときに意味が違う。特に done（達成した）と、それ以外の終わり方を
-    混ぜると、完了条件3「一度完了した質問・目標を繰り返さない」を測れない。
-    """
-
-    # 振り返りが出した候補。開発者が確認するまで行動選択に渡さない。
-    PENDING = "pending"
-    # 採用済み。実行条件を満たせば行動選択に渡る。
-    ACTIVE = "active"
-    # 採用しなかった。
-    REJECTED = "rejected"
-    # 目的を達成した。二度と実行しない。
-    DONE = "done"
-    # 開発者が取り消した。
-    WITHDRAWN = "withdrawn"
-    # 前提が消えた。予定そのものが無くなった場合。
-    CANCELLED = "cancelled"
-    # 実行しないまま、実行してよい時期を過ぎた。
-    EXPIRED = "expired"
 
 # --- テーブル ---------------------------------------------------------------
 
@@ -260,16 +188,6 @@ class Conversation(Base):
     # 開始だけが残った場合に、やり直せるようにするため。
     reflection_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reflection_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # いまどこを処理しているか。振り返りは LLM を3回以上呼ぶため、終わるまで
-    # 20秒以上かかる。画面に何も出ないと、動いているのか止まっているのかが
-    # 分からない（フェーズ4 PR5）。
-    #
-    # プロセス内の変数ではなく DB に置く。単一プロセスのジョブで始めるが、
-    # 別プロセスへ移すときに進行の見え方を作り直さずに済む（ISSUE-025）。
-    reflection_step: Mapped[str | None] = mapped_column(String(24))
-    # 失敗した理由。開始だけが残った状態と、失敗して終わった状態を区別する。
-    # 失敗はやり直せるので、開始権は解放したうえで理由を残す。
-    reflection_error: Mapped[str | None] = mapped_column(Text)
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",
@@ -329,13 +247,6 @@ class Memory(Base):
     )
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default=MemoryStatus.ACTIVE, nullable=False)
-    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。
-    # **手動の採用と区別できないと、まとめて戻せない。** 設計書は「更新前後を
-    # 比較し、評価できた種類から自動採用へ移す」としており、移した結果が悪け
-    # れば戻せることが前提になる。画面でも区別して見せる。
-    auto_adopted: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", nullable=False
-    )
     # 記憶検索のキーワード。いまは語の一致で検索する。意味検索は、検索漏れが
     # 具体的に確認された段階で足す（ISSUE-008）。
     keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -437,13 +348,6 @@ class CharacterState(Base):
     review_reason: Mapped[str | None] = mapped_column(Text)
 
     status: Mapped[str] = mapped_column(String(16), default=StateStatus.PENDING, nullable=False)
-    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。
-    # **手動の採用と区別できないと、まとめて戻せない。** 設計書は「更新前後を
-    # 比較し、評価できた種類から自動採用へ移す」としており、移した結果が悪け
-    # れば戻せることが前提になる。画面でも区別して見せる。
-    auto_adopted: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", nullable=False
-    )
     # 参照範囲。記憶と同じ考え方で、非公開のものを配信で使わない。
     visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
     visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
@@ -474,144 +378,6 @@ class CharacterStateRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
-class Goal(Base):
-    """目標：次に何を話したいか（設計書 5「目標」・6、フェーズ4）。
-
-    記憶（あったこと）とも、関心・関係性（いまどう思っているか）とも分ける。
-    目標だけが実行条件と期限を持ち、**実行したことと達成したことを別に記録する**。
-    質問を投げても相手が答えなければ、実行済みで未達成である。
-
-    候補 → 採用 → 根拠を残す流れと、根拠が変わったときの再評価は
-    character_states と同じ形にしてある（ISSUE-016 の波及に乗せるため）。
-    """
-
-    __tablename__ = "goals"
-    __table_args__ = (Index("ix_goals_status_trigger", "status", "trigger"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # 目的の本文。「週末に見た映画の感想を聞く」
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    # 誰に対する目標か。相手が決まらない目標は NULL。
-    subject_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
-
-    trigger: Mapped[str] = mapped_column(
-        String(24), default=GoalTrigger.NEXT_CONVERSATION, nullable=False
-    )
-    # after_date の基準日時。この日時を過ぎてから実行してよい。UTC で保存する
-    # （SQLite は timezone を落とすため、揃えないと読み戻しでずれる）。
-    # 期限切れ（expired）の判定に何を使うかは、完了・取消の扱いと一緒に決める。
-    # ここで猶予の列を先に作らない。
-    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    # 根拠になった記憶。訂正・削除されたら再評価が要る（ISSUE-016）。
-    basis_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
-    # 上の根拠が「暫定」かどうか。会話から自動で並べた根拠は、後から採用された
-    # 記憶が抜けているため、完全に特定した根拠として扱わない。
-    basis_is_provisional: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", nullable=False
-    )
-    # 根拠が変わった。開発者が確認するまで印を残す。自動では消さない。
-    needs_review: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", nullable=False
-    )
-    review_reason: Mapped[str | None] = mapped_column(Text)
-
-    status: Mapped[str] = mapped_column(String(16), default=GoalStatus.PENDING, nullable=False)
-    # 開発者の確認を経ずに採用したか（フェーズ4 PR11）。
-    # **手動の採用と区別できないと、まとめて戻せない。** 設計書は「更新前後を
-    # 比較し、評価できた種類から自動採用へ移す」としており、移した結果が悪け
-    # れば戻せることが前提になる。画面でも区別して見せる。
-    auto_adopted: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", nullable=False
-    )
-    # 参照範囲。記憶・状態と同じ考え方で、非公開のものを配信で使わない。
-    visibility: Mapped[str] = mapped_column(String(16), default=Visibility.PRIVATE, nullable=False)
-    visible_to_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
-
-    source_conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id"))
-
-    # 最後に実行した時刻。質問を投げた時刻であって、答えを得た時刻ではない。
-    last_executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # 目的を達成した時刻。実行とは分ける（設計書 6）。
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
-    )
-
-    subject: Mapped[Speaker | None] = relationship(foreign_keys=[subject_speaker_id])
-
-
-class GoalRevision(Base):
-    """目標の変更履歴。採用・実行・完了・取消を、根拠付きで戻せるようにする。
-
-    完了条件5「行動と状態変化の根拠を追え、悪化時に戻せる」の後半にあたる。
-    """
-
-    __tablename__ = "goal_revisions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    goal_id: Mapped[int] = mapped_column(
-        ForeignKey("goals.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    action: Mapped[str] = mapped_column(String(24), nullable=False)
-    before: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    after: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    reason: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class ActionRecord(Base):
-    """行動の判断の記録（設計書 6 の 3、完了条件5）。
-
-    **発言を伴わない判断も残す。** 待機を選んだとき、run_records は作られない
-    （発言が無いので message_id を持てない）。設計書は「不要な質問、重複、
-    誤った推測、適切な待機も確認する」としており、待機したことを後から追えない
-    と、適切に待てたのかを測れない（第1回レビューの指摘5）。
-
-    架空の空発言を作って辻褄を合わせない。発言があるときは message_id で
-    run_records と突き合わせる。
-    """
-
-    __tablename__ = "action_records"
-    __table_args__ = (Index("ix_action_records_conversation", "conversation_id", "id"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    conversation_id: Mapped[int] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
-    )
-    speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
-    # 選んだ行動（Action）。待機・調査も入る。
-    action: Mapped[str] = mapped_column(String(24), nullable=False)
-    # そう判断した理由。モデルが返した文をそのまま残す。
-    reason: Mapped[str | None] = mapped_column(Text)
-    # 判断のときに渡した目標と、そのうち選んだもの。全候補だけでは、
-    # どれを選んだのかを後から確かめられない。
-    candidate_goal_ids: Mapped[list[int] | None] = mapped_column(JSON)
-    selected_goal_ids: Mapped[list[int] | None] = mapped_column(JSON)
-    # 発言したときだけ入る。待機のときは NULL。
-    message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"))
-    # 自分から始めた判断か、返答の中での判断か。
-    is_proactive: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", nullable=False
-    )
-    # 判断に使ったモデルと生成設定。**発言が無い判断は run_records が作られない
-    # ため、ここに残さないと、どのモデル・設定が待機を選んだのかを後から追えない**
-    # （第2回レビューの指摘2）。モデルを呼ばずに決めた場合は NULL のままにして、
-    # 呼んだ判断と区別する。
-    provider: Mapped[str | None] = mapped_column(String(32))
-    model: Mapped[str | None] = mapped_column(String(128))
-    model_digest: Mapped[str | None] = mapped_column(String(128))
-    options: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    # 出力を読み取れずに待機へ倒したか。正常な待機の判断と区別する。
-    # 区別できないと、適切に待てた回数を数えられない。
-    is_fallback: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class RunRecord(Base):
     """実行記録。モデルの版・生成設定・参照した記憶・応答時間を残す。"""
 
@@ -635,13 +401,6 @@ class RunRecord(Base):
     # 返答に渡した可変状態（関心・関係性）。完了条件「参照した記憶・人格版・
     # 可変状態を追跡できる」のために、記憶と分けて残す。
     referenced_state_ids: Mapped[list[int] | None] = mapped_column(JSON)
-    # 返答に渡した目標。完了条件「行動と状態変化の根拠を追え、悪化時に戻せる」
-    # のために、記憶・状態と分けて残す（フェーズ4）。評価はこの記録を見て
-    # 判定する。返答の言い回しからは、目標が渡ったのかを決められない。
-    referenced_goal_ids: Mapped[list[int] | None] = mapped_column(JSON)
-    # 選んだ行動（回答・確認質問・話題提案・調査・待機）。待機を選んだことも
-    # 記録する。合格は「よく喋ること」ではなく、適切な待機も測る対象のため。
-    selected_action: Mapped[str | None] = mapped_column(String(24))
     system_prompt: Mapped[str | None] = mapped_column(Text)
     # 記憶検索にかかった時間。生成の時間と分けて、どこが遅いかを見る。
     retrieval_ms: Mapped[int | None] = mapped_column(Integer)

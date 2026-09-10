@@ -5,7 +5,6 @@ import { CandidatePanel } from "./components/CandidatePanel";
 import { ChatPanel } from "./components/ChatPanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { MemoryPanel } from "./components/MemoryPanel";
-import { GoalPanel } from "./components/GoalPanel";
 import { StatePanel } from "./components/StatePanel";
 import type {
   ChatResponse,
@@ -18,7 +17,7 @@ import type {
 import { SELF_SPEAKER, conversationState, shouldApplyDelivery } from "./types";
 import { useSpeechPlayer } from "./useSpeechPlayer";
 
-type Tab = "memories" | "candidates" | "states" | "goals" | "history";
+type Tab = "memories" | "candidates" | "states" | "history";
 
 function voiceLabel(health: Health): string {
   if (!health.voice.enabled) return "音声：無効";
@@ -218,13 +217,6 @@ export default function App() {
             refreshCandidates();
             setTab("candidates");
           }}
-          onReflectionFailed={(token) => {
-            // 振り返りに失敗した会話は、終了していない。読み取り専用のままだと
-            // その場でやり直せないので、続けられる状態へ戻す
-            // （第2回レビューの指摘1）。開始権はジョブ側で解放済み。
-            if (token === viewRef.current) setConversation("open");
-            setHistoryRefresh((n) => n + 1);
-          }}
           onNewConversation={startNewConversation}
         />
 
@@ -253,13 +245,6 @@ export default function App() {
             </button>
             <button
               type="button"
-              className={tab === "goals" ? "active" : ""}
-              onClick={() => setTab("goals")}
-            >
-              目標
-            </button>
-            <button
-              type="button"
               className={tab === "history" ? "active" : ""}
               onClick={() => setTab("history")}
             >
@@ -282,7 +267,6 @@ export default function App() {
             />
           )}
           {tab === "states" && <StatePanel refreshKey={memoryRefresh} />}
-          {tab === "goals" && <GoalPanel refreshKey={memoryRefresh} />}
           {tab === "history" && (
             <>
               {historyError && <p className="error">{historyError}</p>}

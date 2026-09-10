@@ -11,7 +11,7 @@ import json
 
 from httpx import AsyncClient
 
-from tests.conftest import FakeLLM, end_and_wait
+from tests.conftest import FakeLLM
 
 
 async def _say(client: AsyncClient, text: str, conversation_id: int | None = None) -> dict:
@@ -75,9 +75,7 @@ async def test_promise_is_retrieved_even_without_keyword_overlap(client: AsyncCl
     assert "直近の約束として常に参照" in reasons
 
 
-async def test_correction_is_reflected_in_the_next_reply(
-    client: AsyncClient, fake_llm: FakeLLM
-):
+async def test_correction_is_reflected_in_the_next_reply(client: AsyncClient, fake_llm: FakeLLM):
     first = await _say(client, "好きな食べ物の話をしよう")
     created = await client.post(
         "/api/memories",
@@ -167,9 +165,7 @@ async def test_run_record_shows_the_basis_of_the_reply(client: AsyncClient):
     memory_id = created.json()["id"]
 
     result = await _say(client, "山登りはどう？")
-    run = (
-        await client.get(f"/api/conversations/messages/{result['reply']['id']}/run")
-    ).json()
+    run = (await client.get(f"/api/conversations/messages/{result['reply']['id']}/run")).json()
 
     assert run["model"] == "fake-model"
     assert run["model_digest"] == "sha256:test"
@@ -184,9 +180,7 @@ async def test_run_record_shows_the_basis_of_the_reply(client: AsyncClient):
     assert target["source_message_id"] == first["user_message"]["id"]
 
 
-async def test_reflection_extracts_and_accepts_candidates(
-    client: AsyncClient, fake_llm: FakeLLM
-):
+async def test_reflection_extracts_and_accepts_candidates(client: AsyncClient, fake_llm: FakeLLM):
     first = await _say(client, "写真を撮るのが好き。次は山で撮った写真の話をしよう")
 
     fake_llm.push(
@@ -210,11 +204,9 @@ async def test_reflection_extracts_and_accepts_candidates(
             ensure_ascii=False,
         )
     )
-    ended = await end_and_wait(client, first['conversation_id'])
-    assert ended.status_code == 202, ended.text
-    candidates = (
-        await client.get(f"/api/conversations/{first['conversation_id']}/candidates")
-    ).json()
+    ended = await client.post(f"/api/conversations/{first['conversation_id']}/end")
+    assert ended.status_code == 200, ended.text
+    candidates = ended.json()
     assert len(candidates) == 2
     assert all(c["status"] == "pending" for c in candidates)
 
@@ -238,7 +230,7 @@ async def test_reflection_extracts_and_accepts_candidates(
 async def test_ended_conversation_rejects_new_messages(client: AsyncClient, fake_llm: FakeLLM):
     first = await _say(client, "そろそろ終わろうか")
     fake_llm.push("[]")
-    await end_and_wait(client, first['conversation_id'])
+    await client.post(f"/api/conversations/{first['conversation_id']}/end")
 
     response = await client.post(
         "/api/chat", json={"text": "やっぱり続き", "conversation_id": first["conversation_id"]}
@@ -253,7 +245,5 @@ async def test_ideal_response_is_recorded(client: AsyncClient):
         json={"ideal_text": "もっと短く、質問を添えて返してほしい", "note": "冗長だった"},
     )
     assert created.status_code == 200, created.text
-    listed = (
-        await client.get(f"/api/conversations/messages/{result['reply']['id']}/ideal")
-    ).json()
+    listed = (await client.get(f"/api/conversations/messages/{result['reply']['id']}/ideal")).json()
     assert listed[0]["ideal_text"] == "もっと短く、質問を添えて返してほしい"

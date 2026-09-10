@@ -10,7 +10,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.agent.memory_store import _SIMILAR_THRESHOLD, similarity, tokenize
-from tests.conftest import FakeLLM, end_and_wait
+from tests.conftest import FakeLLM
 
 
 @pytest.mark.parametrize(
@@ -41,17 +41,12 @@ def test_similarity_separates_duplicates_from_other_topics(
     assert (similarity(tokenize(left), tokenize(right)) >= _SIMILAR_THRESHOLD) is expected
 
 
-async def _candidates(client: AsyncClient, conversation_id: int) -> list[dict]:
-    response = await client.get(f"/api/conversations/{conversation_id}/candidates")
-    return response.json()
-
-
 async def _reflect(client: AsyncClient, fake_llm: FakeLLM, text: str, output: str) -> list[dict]:
     first = await client.post("/api/chat", json={"text": text})
     fake_llm.push(output)
-    ended = await end_and_wait(client, first.json()['conversation_id'])
-    assert ended.status_code == 202, ended.text
-    return await _candidates(client, first.json()['conversation_id'])
+    ended = await client.post(f"/api/conversations/{first.json()['conversation_id']}/end")
+    assert ended.status_code == 200, ended.text
+    return ended.json()
 
 
 async def test_candidate_points_at_the_memory_it_repeats(
@@ -125,6 +120,5 @@ async def test_similar_memories_respect_the_reference_scope(
         '[{"kind":"about_person","content":"Bさんは写真を撮るのが好き","certainty":"fact",'
         '"provenance":"firsthand","keywords":"写真 趣味","about_partner":true}]'
     )
-    await end_and_wait(client, first.json()['conversation_id'])
-    candidates = await _candidates(client, first.json()['conversation_id'])
-    assert candidates[0]["similar_memory_ids"] is None
+    ended = await client.post(f"/api/conversations/{first.json()['conversation_id']}/end")
+    assert ended.json()[0]["similar_memory_ids"] is None

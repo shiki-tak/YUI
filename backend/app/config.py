@@ -5,35 +5,12 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 # 表示と、会話に出てくる日付の解釈に使う地域時刻。保存は UTC のまま。
 LOCAL_TZ = ZoneInfo("Asia/Tokyo")
-
-# 自動採用の対象にできる種類（フェーズ4 PR11）。記憶・状態の種類と、目標。
-#
-# **models を import しない。** 設定は起動のいちばん外側で読むもので、ここから
-# モデルへ依存を張ると輪になる。代わりに、この一覧が MemoryKind / StateKind と
-# ずれていないことをテストで見る（test_auto_adopt.py）。種類を増やしたときに
-# ここを直し忘れると、有効にできない種類が黙って生まれる。
-AUTO_ADOPTABLE_KINDS = frozenset(
-    {
-        # 記憶
-        "experience",
-        "about_person",
-        "promise",
-        "impression",
-        "fact",
-        # 変化する状態
-        "interest",
-        "relationship",
-        # 目標。種類を持たないので、そのまま1つの名前にする。
-        "goal",
-    }
-)
 
 
 def to_local(value: datetime) -> datetime:
@@ -46,10 +23,6 @@ def to_local(value: datetime) -> datetime:
     """
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     return aware.astimezone(LOCAL_TZ)
-
-
-def _parse_kinds(value: str) -> set[str]:
-    return {name.strip() for name in value.split(",") if name.strip()}
 
 
 class Settings(BaseSettings):
@@ -102,85 +75,8 @@ class Settings(BaseSettings):
     memory_retrieval_limit: int = 8
     recent_message_limit: int = 12
 
-    # 目標（フェーズ4）
-    # 一度聞いた目標を、次に持ち出せるようになるまでの間隔。**恒久的な禁止では
-    # ない。** 届いたが答えてもらえなかった質問を二度と聞けなくしないため
-    # （PR8 から渡した条件2・3）。繰り返し防止そのものは達成（done）で行う。
-    goal_reask_interval_hours: float = 12.0
-    # 実行してよくなる日から、これだけ過ぎても実行していない目標は期限切れに
-    # する。予定の話題は時間が経つと持ち出しにくくなるため。
-    goal_expiry_days: float = 14.0
-
-    # 自動採用する種類（フェーズ4 PR11、設計書の実装内容9）。
-    #
-    # **既定は空＝すべて手動のまま。** 設計書は「更新前後を比較し、評価できた
-    # 種類から自動採用へ移す」としている。移してよい根拠は種類ごとに要る。
-    #
-    # **既定で有効にしたのは promise だけ**（2026-09-09 の測定、
-    # `docs/result/phase4.md`）。全種類を有効にして全シナリオ×3回を流し、
-    # **採用された中身を1件ずつ読んで**決めた。
-    #
-    # 設計書「自動化の合否を単なる採用件数で測りません。不要な質問、重複、
-    # 誤った推測、適切な待機も確認します」に従い、**件数ではなく中身**で見る。
-    #
-    # | 種類 | 採用 | 冗談・雑談・人格変更から | 重複・時期違い | 判断 |
-    # | --- | ---: | ---: | --- | --- |
-    # | promise | 16 | 0 | 1件/回のみ。3件が約束でない内容 | **有効** |
-    # | goal | 48 | 1 | **33回中13回で2件以上。言い換えの重複と時期違い** | 手動 |
-    # | impression | 8 | 1（架空の観察） | — | 手動 |
-    # | about_person | 23 | 1 | — | 手動 |
-    # | experience | 44 | 1 | — | 手動 |
-    # | interest | 30 | **4** | — | 手動 |
-    # | relationship | 6 | 0 | 観測が薄い | 手動 |
-    # | fact | 0 | — | 観測なし | 手動 |
-    #
-    # **数字だけ見ていたら間違える。**
-    #
-    # - `goal` は「残すべきでない筋書きから0件」だけ見て一度は有効にしたが、
-    #   採用された48件を読み直すと、**1つの会話から2件以上を採用した回が
-    #   33回中13回**あった。「コードの練習について理論的な話や実際の感覚を聞く」
-    #   と「コードの練習で感じたことを聞く」のような言い換えの重複、
-    #   「今週の土曜に見る**予定**の映画」を数日後に聞く時期違いが混ざる。
-    #   **採用された目標はそのまま質問になる**ので、害が直接出る。
-    # - `impression` は入手経路の誤りが 0/8 だが、冗談から**架空の観察**を採用した
-    #   （「開発者の表情が立派だったと評価した」。YUI は表情を見られない）。
-    # - `interest` は冗談から採用した（「10 億円当てた時の本当の感情を知りたい」）。
-    # - `relationship` は 0 だが 6 件しか観測しておらず、根拠が薄い。
-    # - `fact` は観測が無い。**根拠が無いという意味であり、安全という意味ではない。**
-    #
-    # 書ける名前：記憶（experience / about_person / promise / impression /
-    # fact）、状態（interest / relationship）、目標（goal）。カンマ区切り。
-    # **綴りを間違えたら起動時に止める。** 黙って無効になると、自動採用を
-    # 有効にしたつもりの測定が、無効の測定になる。
-    auto_adopt: str = "promise"
-
     # カンマ区切り。.env に JSON を書かせないため文字列で受ける。
     cors_origins: str = "http://localhost:5173"
-
-    @field_validator("auto_adopt")
-    @classmethod
-    def _check_auto_adopt(cls, value: str) -> str:
-        """書き間違いを**設定を作った時点で**落とす（PR11 レビューの指摘7）。
-
-        以前は `auto_adopt_kinds` を読むまで検証しなかった。本番で最初に読むのは
-        振り返りの保存の直前なので、**4回の抽出を終えた後に設定エラーになり、
-        候補を保存できない**。起動時に止まるほうがよい。
-
-        黙って無効へ倒さないのは、**自動採用を有効にしたつもりの測定が、無効の
-        測定になる**ため。PR12 は有無を比べる測定で、そこが狂うと結論が変わる。
-        """
-        unknown = _parse_kinds(value) - AUTO_ADOPTABLE_KINDS
-        if unknown:
-            raise ValueError(
-                f"auto_adopt に知らない種類があります: {'、'.join(sorted(unknown))}"
-                f"（書けるのは {'、'.join(sorted(AUTO_ADOPTABLE_KINDS))}）"
-            )
-        return value
-
-    @property
-    def auto_adopt_kinds(self) -> set[str]:
-        """自動採用する種類。検証は生成時に済んでいる。"""
-        return _parse_kinds(self.auto_adopt)
 
     @property
     def cors_origin_list(self) -> list[str]:
