@@ -2,7 +2,7 @@
 
 更新日：2026-09-10
 
-本書は「人格を持ったAIと継続的にコミュニケーションできること」を目指す開発計画です。ファイル名は `ai_vtuber_development_phases.md` を維持します。システムの責任分担と技術は [全体構成](ai_vtuber_architecture.md) を参照してください。
+本書は「人格を持ったAIと継続的にコミュニケーションできること」を目指す開発計画です。ファイル名は `ai_vtuber_development_phases.md` を維持します。システムの責任分担と技術は [全体構成](ai_vtuber_architecture.md) を参照してください。**各版で何ができるようになるかは [版ごとにできるようになること](version_capabilities.md) に一覧があります。**
 
 ## 1. 目的・現在地・開発方針
 
