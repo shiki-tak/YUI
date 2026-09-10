@@ -7,8 +7,7 @@
 ## 設計と作業範囲
 
 - 作業前に `README.md` と、存在する場合は以下を読む。
-  - `docs/design/ai_vtuber_architecture.md`
-  - `docs/design/ai_vtuber_development_phases.md`
+  - `docs/design/ai_vtuber_architecture.md`（設計。全体構成・現在地・版の計画・旧計画との対応を1冊に持つ）
   - 例外：reviewer サブエージェントは diff を先に読み、設計書はその後で読む（`.claude/agents/reviewer.md` の手順に従う）。
 - ユーザーが指定したフェーズ・変更範囲に集中する。将来フェーズの機能を先回りして追加しない。
 - ユーザーの最新の指示を優先する。設計書と実装に食い違いがある場合は、関連コードや変更履歴を確認して意図を把握する。

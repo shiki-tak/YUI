@@ -1,7 +1,7 @@
 # フェーズ2：アバターと音声 実装記録
 
 完了承認日：2026-09-07
-対象：[docs/design/ai_vtuber_development_phases.md](../design/ai_vtuber_development_phases.md) の「4. フェーズ2：アバターと音声」
+対象：旧 `docs/design/ai_vtuber_development_phases.md` の「4. フェーズ2：アバターと音声」（2026-09-11 に [設計](../design/ai_vtuber_architecture.md) の第9節へ統合）
 
 用意した画像のキャラクターが、声と口パクで返答する状態までを実装した。入力は文字のままで、音声入力は行わない。
 
@@ -163,7 +163,7 @@ Codex による[レビュー](../review/codex/phase2_review.md)を3回受けた�
 
 開発計画を組み直したため、この記録に出てくるフェーズ番号のうち「フェーズ4（YouTube配信）」は
 新しい計画の **フェーズ6A** にあたる。対応は
-[開発フェーズの第13節](../design/ai_vtuber_development_phases.md) にある。
+[設計の第2.4節](../design/ai_vtuber_architecture.md) にある。
 
 再編の途中で、フェーズ2の範囲に音声入力（マイク・whisper.cpp）が含まれた記載があったが、
 **フェーズ2で音声入力は実装していない**。入力は文字のままである。音声入力は新設した

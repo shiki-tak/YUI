@@ -1,6 +1,6 @@
 # フェーズ3：人格と関係の継続性 実装記録
 
-対象：[docs/design/ai_vtuber_development_phases.md](../design/ai_vtuber_development_phases.md) の
+対象：旧 `docs/design/ai_vtuber_development_phases.md`（2026-09-11 に [設計](../design/ai_vtuber_architecture.md) の第9節へ統合）の
 「5. フェーズ3：人格と関係の継続性」（3A・3B・3C）
 
 **状態：完了（2026-09-08 承認）。**7回のレビューを経て、フェーズ3を完了として

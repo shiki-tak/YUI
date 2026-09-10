@@ -3,8 +3,7 @@
 同じ人格と記憶を持つ AI VTuber キャラクター。普段は開発者と会話し、YouTube では視聴者と交流し、
 その経験を次の話題選びや行動に反映することを目指します。
 
-設計は [docs/design/ai_vtuber_architecture.md](docs/design/ai_vtuber_architecture.md)（全体構成）と
-[docs/design/ai_vtuber_development_phases.md](docs/design/ai_vtuber_development_phases.md)（開発フェーズ）にあります。
+設計は [docs/design/ai_vtuber_architecture.md](docs/design/ai_vtuber_architecture.md) にあります（全体構成、現在地、版の計画、旧計画との対応を1冊にまとめています）。
 
 ## いまの状態：フェーズ2（アバターと音声）完了
 
@@ -49,7 +48,7 @@
 | 10：音声入力 | 最後。マイクで話しかけられるようにする |
 | 並行改善 | 選別データと比較評価によるファインチューニング |
 
-旧計画との対応は [開発フェーズの第13節](docs/design/ai_vtuber_development_phases.md) にあります。
+旧計画との対応は [設計の第2.4節](docs/design/ai_vtuber_architecture.md) にあります。
 音声入力（マイク・whisper.cpp）はフェーズ2に含まれておらず、フェーズ10で実装します。
 
 ## 構成

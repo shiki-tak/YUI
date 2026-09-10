@@ -1,7 +1,7 @@
 # フェーズ1：文字会話MVP 実装記録
 
 完了承認日：2026-09-06
-対象：[docs/design/ai_vtuber_development_phases.md](../design/ai_vtuber_development_phases.md) の「3. フェーズ1：文字会話MVP」
+対象：旧 `docs/design/ai_vtuber_development_phases.md` の「3. フェーズ1：文字会話MVP」（2026-09-11 に [設計](../design/ai_vtuber_architecture.md) の第9節へ統合）
 
 設定した人格で会話し、再起動を越えて過去の経験を使って答えられる状態までを実装した。
 
