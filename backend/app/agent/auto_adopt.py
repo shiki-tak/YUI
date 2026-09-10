@@ -36,6 +36,7 @@ from app.models import (
     GoalStatus,
     Memory,
     MemoryCandidate,
+    Provenance,
     StateStatus,
 )
 
@@ -240,6 +241,11 @@ async def apply(
         if candidate.kind not in kinds or candidate.status != CandidateStatus.PENDING.value:
             continue
         if touches_persona(candidate.content):
+            continue
+        if candidate.provenance == Provenance.UNKNOWN.value:
+            # **入手経路を決められなかったものは自動採用しない**
+            # （PR12 レビューの指摘3）。確認を省けるのは、判断材料が揃って
+            # いるときだけである。候補としては残るので開発者が採用できる。
             continue
         accepted.append(
             await accept_candidate(

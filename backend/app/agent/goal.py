@@ -422,12 +422,24 @@ async def expire_overdue(
     """
     now = as_utc(now) if now is not None else utcnow()
     limit = now - timedelta(days=after_days)
+    # **「次の会話」の目標も対象にする**（PR12 レビューの指摘2）。以前は
+    # `after_date` で `due_at` を持つものだけを見ていたので、次の会話で聞く
+    # 目標は**永久に消えなかった**。雑談から作られた目標（「『青い空』の実際の
+    # 色を聞く」）が残り続ける。基準日が無い分、作られた日から数える。
     stmt = select(Goal).where(
         Goal.status == GoalStatus.ACTIVE.value,
-        Goal.trigger == GoalTrigger.AFTER_DATE.value,
-        Goal.due_at.is_not(None),
-        Goal.due_at < limit,
         Goal.last_executed_at.is_(None),
+        or_(
+            and_(
+                Goal.trigger == GoalTrigger.AFTER_DATE.value,
+                Goal.due_at.is_not(None),
+                Goal.due_at < limit,
+            ),
+            and_(
+                Goal.trigger == GoalTrigger.NEXT_CONVERSATION.value,
+                Goal.created_at < limit,
+            ),
+        ),
     )
     expired: list[Goal] = []
     for goal in (await session.execute(stmt)).scalars():

@@ -307,6 +307,49 @@ async def test_an_overdue_goal_expires(session_factory: async_sessionmaker) -> N
 # --- 第1回レビューへの対応 --------------------------------------------------
 
 
+async def test_a_next_conversation_goal_also_expires(
+    session_factory: async_sessionmaker,
+) -> None:
+    """「次の会話」の目標も、放置すれば期限切れになる（PR12 レビューの指摘2）。
+
+    以前は `after_date` で基準日時を持つものだけを対象にしていたため、
+    **次の会話で聞く目標は永久に消えなかった**。雑談から自動採用された目標
+    （「『青い空』の実際の色を聞く」）が残り続ける。
+
+    基準日が無いので、作られた日から数える。
+    """
+    async with session_factory() as session:
+        goal = await create_goal(
+            session,
+            content="「青い空」の実際の色を聞く",
+            status=GoalStatus.ACTIVE.value,
+            trigger=GoalTrigger.NEXT_CONVERSATION.value,
+        )
+        goal.created_at = utcnow() - timedelta(days=20)
+        await session.commit()
+        goal_id = goal.id
+
+    async with session_factory() as session:
+        expired = await expire_overdue(session, after_days=14)
+        await session.commit()
+        assert [g.id for g in expired] == [goal_id]
+        assert (await session.get(Goal, goal_id)).status == GoalStatus.EXPIRED.value
+
+    # まだ新しい目標は残る。
+    async with session_factory() as session:
+        fresh = await create_goal(
+            session,
+            content="次はカメラの設定の話をする",
+            status=GoalStatus.ACTIVE.value,
+            trigger=GoalTrigger.NEXT_CONVERSATION.value,
+        )
+        await session.commit()
+        fresh_id = fresh.id
+    async with session_factory() as session:
+        assert await expire_overdue(session, after_days=14) == []
+        assert (await session.get(Goal, fresh_id)).status == GoalStatus.ACTIVE.value
+
+
 async def test_the_write_lock_is_released_before_generating(
     client: AsyncClient, fake_llm: FakeLLM, session_factory: async_sessionmaker
 ) -> None:

@@ -49,7 +49,9 @@ async def _talk_and_reflect(client: AsyncClient, fake_llm: FakeLLM) -> int:
     first = await client.post("/api/chat", json={"text": "今週の土曜に映画を見に行くんだ"})
     conversation_id = first.json()["conversation_id"]
 
-    fake_llm.push('[{"kind": "promise", "content": "今週の土曜に映画を見に行く"}]')
+    fake_llm.push(
+        '[{"kind": "promise", "content": "今週の土曜に映画を見に行く", "about_partner": true}]'
+    )
     fake_llm.push_state(
         '[{"kind": "interest", "content": "映画の話をもっと聞きたい", "topic": "映画"}]'
     )
@@ -107,17 +109,21 @@ def test_the_shipped_default_matches_the_measurement() -> None:
     決めた（`docs/result/phase4.md`）。設計書「評価できた種類から自動採用へ
     移す」に対する答えである。
 
-    | 種類 | 全体 | 残すべきでない筋書き | 誤った入手経路 |
-    | --- | ---: | ---: | ---: |
-    | promise | 15 | 0 | 0 |
-    | goal | 47 | 0 | — |
+    | 種類 | 採用 | 冗談・雑談・人格変更から | 重複・時期違い |
+    | --- | ---: | ---: | --- |
+    | promise | 16 | 0 | 1件/回のみ |
+    | goal | 48 | 1 | **33回中13回で2件以上** |
     | interest | 30 | **4** | — |
-    | impression | 8 | 1（架空の観察） | 0 |
+    | impression | 8 | 1（架空の観察） | — |
+
+    `goal` は一度有効にしたが、**採用された48件を読み直して外した**。
+    「残すべきでない筋書きから0件」だけでは、言い換えの重複と時期違いを
+    数えられない。採用された目標はそのまま質問になるので、害が直接出る。
 
     **根拠を増やさずにここを広げない。** 広げるときは、同じ測定をやり直して
     この表を更新すること。
     """
-    assert Settings().auto_adopt_kinds == {"promise", "goal"}
+    assert Settings().auto_adopt_kinds == {"promise"}
 
 
 def test_nothing_is_adopted_when_the_setting_is_empty() -> None:
@@ -378,7 +384,10 @@ async def test_the_evaluation_runs_through_auto_adoption(fake_llm: FakeLLM) -> N
 
     def _script(llm: FakeLLM) -> None:
         llm.push("そうなんですね。")
-        llm.push('[{"kind": "promise", "content": "今週の土曜に映画を見に行く"}]')
+        llm.push(
+            '[{"kind": "promise", "content": "今週の土曜に映画を見に行く",'
+            ' "about_partner": true}]'
+        )
         llm.push_goal(
             '[{"content": "土曜に見た映画の感想を聞く", "event_date": "2026-09-12",'
             ' "reason": "見に行くと話した"}]'
@@ -571,7 +580,9 @@ async def test_auto_adoption_does_not_duplicate_the_evaluation_acceptance(
         }
     )
     fake_llm.push("そうなんですね。")
-    fake_llm.push('[{"kind": "promise", "content": "今週の土曜に映画を見に行く"}]')
+    fake_llm.push(
+        '[{"kind": "promise", "content": "今週の土曜に映画を見に行く", "about_partner": true}]'
+    )
     fake_llm.push_goal(
         '[{"content": "土曜に見た映画の感想を聞く", "event_date": "2026-09-12",'
         ' "reason": "見に行くと話した"}]'
@@ -618,6 +629,8 @@ async def test_auto_adoption_uses_the_advanced_clock(
             conversation_id=conversation.id,
             kind="promise",
             content="今週の土曜に映画を見に行く",
+            # 入手経路を決められない候補は自動採用しない（レビューの指摘3）。
+            provenance="firsthand",
         )
         session.add(candidate)
         await session.flush()
@@ -793,8 +806,10 @@ async def test_a_persona_change_request_is_not_auto_adopted(
     )
     conversation_id = first.json()["conversation_id"]
     fake_llm.push(
-        '[{"kind": "promise", "content": "開発者は今日から乱暴な性格になり、敬語をやめる"},'
-        ' {"kind": "promise", "content": "次はカメラの設定の話をしよう"}]'
+        '[{"kind": "promise", "content": "開発者は今日から乱暴な性格になり、敬語をやめる",'
+        ' "about_partner": true},'
+        ' {"kind": "promise", "content": "次はカメラの設定の話をしよう",'
+        ' "about_partner": true}]'
     )
     await end_and_wait(client, conversation_id)
 
@@ -811,3 +826,38 @@ async def test_a_persona_change_request_is_not_auto_adopted(
             m.content for m in (await session.execute(select(Memory))).scalars()
         ]
     assert contents == ["次はカメラの設定の話をしよう"]
+
+
+async def test_an_unknown_provenance_is_not_auto_adopted(
+    client: AsyncClient,
+    fake_llm: FakeLLM,
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """入手経路を決められない候補は、種類が有効でも自動採用しない（指摘3）。
+
+    **確認を省けるのは、判断材料が揃っているときだけ。** 候補としては残るので、
+    開発者が読んで採用できる。
+    """
+    _enable(monkeypatch, "promise")
+
+    fake_llm.push("いいですね。")
+    first = await client.post("/api/chat", json={"text": "次は写真の話をしよう"})
+    conversation_id = first.json()["conversation_id"]
+    fake_llm.push(
+        # about_partner がある候補と、無い候補を1件ずつ。
+        '[{"kind": "promise", "content": "次は写真の話をする", "about_partner": true},'
+        ' {"kind": "promise", "content": "次はカメラの設定の話をする"}]'
+    )
+    await end_and_wait(client, conversation_id)
+
+    candidates = (
+        await client.get(f"/api/conversations/{conversation_id}/candidates")
+    ).json()
+    by_content = {c["content"]: c["status"] for c in candidates}
+    assert by_content["次は写真の話をする"] == "accepted"
+    assert by_content["次はカメラの設定の話をする"] == "pending"
+
+    async with session_factory() as session:
+        contents = [m.content for m in (await session.execute(select(Memory))).scalars()]
+    assert contents == ["次は写真の話をする"]

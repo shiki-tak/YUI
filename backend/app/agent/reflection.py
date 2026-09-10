@@ -272,7 +272,11 @@ class CandidatePayload(BaseModel):
 
     certainty: str = Certainty.INFERENCE.value
     keywords: str = ""
-    about_partner: bool = False
+    # **既定を False にしない**（PR12 レビューの指摘3）。省略と「第三者について
+    # と判断した false」を区別できないと、判断材料が返っていないのに伝聞と
+    # 確定して長期記憶へ入る。以前 provenance を訊いていた頃は、省略を unknown
+    # にできていた。
+    about_partner: bool | None = None
     source_message_id: int | None = None
 
 
@@ -470,13 +474,17 @@ async def extract_candidates(
         # 訊くのは about_partner の1つだけにして、入手経路はそこから決める。
         # PR10 の「足し算はモデルにやらせない」と同じで、導出できるものを
         # 訊かない。
-        about_partner = payload.about_partner
+        about_partner = bool(payload.about_partner)
         if payload.kind == MemoryKind.IMPRESSION.value:
             # **impression はキャラクター自身の受け止め方**なので、相手について
             # の内容ではない（about_partner は false になる）。そのまま導出すると
             # 伝聞へ倒れるが、自分が感じたことを人づてに聞いたことにはならない。
             # 実測では impression の 4/8 がこれで誤っていた（2026-09-09）。
             provenance = Provenance.FIRSTHAND.value
+        elif payload.about_partner is None:
+            # **省略されたら「決められない」にする。** 伝聞と確定しない
+            # （PR12 レビューの指摘3）。unknown の候補は自動採用しない。
+            provenance = Provenance.UNKNOWN.value
         elif about_partner:
             provenance = Provenance.FIRSTHAND.value
         else:

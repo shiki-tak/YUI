@@ -185,3 +185,26 @@ async def test_an_impression_is_firsthand_even_though_it_is_not_about_the_partne
     assert candidates[0]["provenance"] == Provenance.FIRSTHAND.value
     # 相手についての情報ではないので、相手には紐づけない。
     assert candidates[0]["subject_speaker_id"] is None
+
+
+async def test_a_missing_about_partner_is_unknown_not_hearsay(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """判断材料が返っていないなら、伝聞と確定しない（PR12 レビューの指摘3）。
+
+    入手経路を about_partner から導出するようにしたとき、**省略を既定の false
+    として扱っていた**。「第三者についてと判断した false」と区別が付かず、
+    モデルが何も答えていないのに伝聞として長期記憶へ入る。
+
+    以前 provenance を訊いていた頃は、省略を unknown にできていた。導出元を
+    変えたときに、その表現力を落としていた。
+    """
+    candidates = await _talk_and_reflect(
+        client,
+        fake_llm,
+        "次は写真の話をしよう",
+        # about_partner が無い出力。
+        '[{"kind":"promise","content":"次は写真の話をする","certainty":"fact"}]',
+    )
+    assert candidates[0]["provenance"] == Provenance.UNKNOWN.value
+    assert candidates[0]["subject_speaker_id"] is None
