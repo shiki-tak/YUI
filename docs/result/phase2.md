@@ -163,7 +163,7 @@ Codex による[レビュー](../review/codex/phase2_review.md)を3回受けた�
 
 開発計画を組み直したため、この記録に出てくるフェーズ番号のうち「フェーズ4（YouTube配信）」は
 新しい計画の **フェーズ6A** にあたる。対応は
-[設計の第2.4節](../design/ai_vtuber_architecture.md) にある。
+[設計の付録A](../design/ai_vtuber_architecture.md) にある。
 
 再編の途中で、フェーズ2の範囲に音声入力（マイク・whisper.cpp）が含まれた記載があったが、
 **フェーズ2で音声入力は実装していない**。入力は文字のままである。音声入力は新設した
