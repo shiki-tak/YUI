@@ -1,0 +1,36 @@
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: "#ffffff"
+    primaryBorderColor: "#2b3450"
+    primaryTextColor: "#1f2740"
+    lineColor: "#2b3450"
+    fontSize: 20px
+---
+%% images/dev_flow.png の元データ。2026-09-07 のフェーズ再編に合わせて更新した。
+%% 設計書本文は mermaid を直接埋め込んでいる。図を貼り直す場合だけ再生成する。
+%% 更新するには次を実行する:
+%%   npx -y @mermaid-js/mermaid-cli -i docs/design/dev_flow.mmd \
+%%       -o images/dev_flow.png -b white -s 3
+flowchart TD
+    P1["1：文字会話・記憶／完了"]
+    P2["2：アバター・音声／完了"]
+    P3["3：人格と関係の継続性"]
+    P4["4：経験に基づく自発性"]
+    P5["5：知識・知覚・表現"]
+    P6["6：任意のYouTube等への拡張"]
+    P10["10：音声入力／最後"]
+    E["並行：評価・データ選別・学習"]
+    V["並行：VRM・表現の制作"]
+
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    P4 --> P5
+    P4 -.-> P6
+    P3 -.-> E
+    E -.-> P4
+    P2 -.-> V
+    V -.-> P5
+    P5 -.-> P10
