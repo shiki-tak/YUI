@@ -279,6 +279,8 @@ LLM は質問文の言語化だけを行う。不作為選好の入り込む余�
 
 ### 3.4 作業一覧
 
+PR への割り当ては [v1.0 の実装計画](../plan/v1.md) にある。
+
 ```
 ① 目標テーブルを作る（状態4つ、source_message_id・source_span・event_date・
    asked_message_id、部分ユニーク）。第1.6節のとおり既存の器は無い
