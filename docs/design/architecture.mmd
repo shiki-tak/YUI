@@ -2,61 +2,80 @@
 config:
   theme: neutral
 ---
-%% images/architecture.png の元データ。
+%% images/architecture.png の元データ。**コンポーネント図**である。
+%% 実際に動く部品・配置境界・技術名を示す。
+%% docs/design/ai_vtuber_architecture.md 第3節の図は責任分担の抽象図で、別物。
+%% 粒度が違うので、どちらかに合わせて潰さない。
+%% ---
+%% (v1.0) などの注記は未実装で、その版で作るもの。注記の無い部品は v0.1 で実装済み。
+%% 破線は追加能力・任意の接続先・別トラック（第14節）。
+%% ---
+%% 図が崩れるので次に注意する:
+%%   - 空行だけの %% を置かない（パースエラーになる）
+%%   - subgraph 内の direction は外部エッジがあると無視される
+%%   - 連結していないノードを並べると縦に伸びる。必ずエッジで繋ぐ
 %% 更新するには次を実行する:
 %%   npx -y @mermaid-js/mermaid-cli -i docs/design/architecture.mmd \
 %%       -o images/architecture.png -b white -s 3
 flowchart TB
-    ME["自分：文字入力"]
+    ME["開発者：文字入力"]
 
     subgraph BROWSER["ブラウザ：React・TypeScript"]
-        UI["操作画面・記憶の確認"]
+        UI["操作画面：会話・記憶・目標の確認"]
         AVATAR["アバター・字幕・音声再生"]
     end
 
-    YTIN["YouTube：視聴者コメント"]
+    YTIN["YouTube：視聴者コメント<br/>（別トラック）"]
+    WHISPER["whisper.cpp：音声入力<br/>（別トラック）"]
 
-    subgraph BACKEND["Pythonバックエンド"]
+    subgraph BACKEND["Pythonバックエンド：FastAPI（単一プロセス）"]
         API["FastAPI：HTTP・WebSocket"]
-        INPUT["入力整理・コメント選択・発話キュー"]
-        AGENT["自作エージェント：人格・記憶・行動判断"]
+        INPUT["入力アダプター・会話進行<br/>順序・中断・発話キュー"]
+        AGENT["キャラクター中核：自作Python<br/>固定人格・記憶・関心・関係性"]
+        GOAL["目標：採用・発火判定・完了<br/>発火はコードで決める (v1.0)"]
+        REFLECT["振り返り：会話後に<br/>記憶・状態・目標の候補を作る"]
         LLMMOD["LLM接続モジュール"]
-        CHECK["出力検査・必要時の再生成"]
-        DB[("SQLite：SQLAlchemy")]
+        CHECK["出力検査：形式・根拠・人格・公開範囲"]
+        DB[("SQLite：SQLAlchemy・Alembic<br/>会話・記憶・状態・目標・実行記録")]
     end
 
     subgraph LOCALAI["ローカルAIサービス"]
         OLLAMA["Ollama：通常の推論"]
         MLX["MLX-LM：将来の推論候補"]
+        VISION["視覚モデル：画像理解 (v1.6)"]
         VOICEVOX["VOICEVOX Engine：音声合成"]
     end
 
     subgraph EXTERNAL["外部サービス"]
-        SEARCH["検索API・公式情報API"]
+        SEARCH["検索API：出典・取得日時つき (v1.5a)"]
         CLAUDE["Claude API：分析・追加判定"]
     end
 
     OBS["OBS Studio"]
-    YTLIVE["YouTube Live"]
+    YTLIVE["YouTube Live<br/>（別トラック）"]
 
     ME --> UI
     UI -- "HTTP・WebSocket" --> API
     API -- "文字入力" --> INPUT
-    YTIN -- "YouTube API" --> INPUT
+    YTIN -. "YouTube API" .-> INPUT
+    WHISPER -. "文字起こし" .-> API
     INPUT --> AGENT
+    AGENT <-- "発火判定・切り出す目標" --> GOAL
     AGENT --> LLMMOD
-    AGENT -- "確定した返答" --> DB
+    AGENT -- "参照した記憶・人格版" --> DB
+    AGENT -- "会話の終了後" --> REFLECT
+    REFLECT -- "採用待ちの候補" --> DB
     LLMMOD --> OLLAMA
     LLMMOD -. "将来の切り替え先" .-> MLX
-    AGENT -. "最新情報が必要" .-> SEARCH
-    SEARCH -. "出典・日時付きの情報" .-> AGENT
+    LLMMOD -. "画像入力時 (v1.6)" .-> VISION
+    AGENT -. "明示的な依頼のみ (v1.5a)" .-> SEARCH
+    SEARCH -. "出典・日時つきの情報" .-> AGENT
     LLMMOD -. "難しい分析" .-> CLAUDE
     CLAUDE -. "分析結果" .-> LLMMOD
     LLMMOD --> CHECK
-    CHECK -. "追加判定" .-> CLAUDE
-    CLAUDE -. "判定結果" .-> CHECK
+    CHECK -- "確定した返答" --> DB
     CHECK -- "読み上げる文章" --> VOICEVOX
     VOICEVOX -- "生成音声" --> API
-    API -- "字幕・表情" --> AVATAR
-    AVATAR --> OBS
-    OBS --> YTLIVE
+    API -- "字幕・表情・音声" --> AVATAR
+    AVATAR -. "画面・音声" .-> OBS
+    OBS -. "配信" .-> YTLIVE
