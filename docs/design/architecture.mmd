@@ -7,8 +7,8 @@ config:
 %% docs/design/ai_vtuber_architecture.md 第3節の図は責任分担の抽象図で、別物。
 %% 粒度が違うので、どちらかに合わせて潰さない。
 %% ---
-%% (v1.0) などの注記は未実装で、その版で作るもの。注記の無い部品は v0.1 で実装済み。
-%% 破線は追加能力・任意の接続先・別トラック（第14節）。
+%% (v0.2) などの注記は未実装で、その版で作るもの。注記の無い部品は v0.1 で実装済み。
+%% 破線は追加能力・任意の接続先・並行トラック（設計書 第7節）。
 %% ---
 %% 図が崩れるので次に注意する:
 %%   - 空行だけの %% を置かない（パースエラーになる）
@@ -25,14 +25,15 @@ flowchart TB
         AVATAR["アバター・字幕・音声再生"]
     end
 
-    YTIN["YouTube：視聴者コメント<br/>（別トラック）"]
-    WHISPER["whisper.cpp：音声入力<br/>（別トラック）"]
+    YTIN["YouTube：視聴者コメント<br/>（並行トラック）"]
+    WHISPER["whisper.cpp：音声入力<br/>（並行トラック）"]
 
     subgraph BACKEND["Pythonバックエンド：FastAPI（単一プロセス）"]
         API["FastAPI：HTTP・WebSocket"]
         INPUT["入力アダプター・会話進行<br/>順序・中断・発話キュー"]
         AGENT["キャラクター中核：自作Python<br/>固定人格・記憶・関心・関係性"]
-        GOAL["目標：採用・発火判定・完了<br/>発火はコードで決める (v1.0)"]
+        GOAL["目標：採用・発火判定・完了<br/>発火はコードで決める (v0.5)"]
+        CONV["会話状態：用件・未回答・延期・終了・食い違い (v0.2)"]
         REFLECT["振り返り：会話後に<br/>記憶・状態・目標の候補を作る"]
         LLMMOD["LLM接続モジュール"]
         CHECK["出力検査：形式・根拠・人格・公開範囲"]
@@ -42,17 +43,17 @@ flowchart TB
     subgraph LOCALAI["ローカルAIサービス"]
         OLLAMA["Ollama：通常の推論"]
         MLX["MLX-LM：将来の推論候補"]
-        VISION["視覚モデル：画像理解 (v1.6)"]
+        VISION["視覚モデル：画像理解（並行トラック）"]
         VOICEVOX["VOICEVOX Engine：音声合成"]
     end
 
     subgraph EXTERNAL["外部サービス"]
-        SEARCH["検索API：出典・取得日時つき (v1.5a)"]
+        SEARCH["検索API：出典・取得日時つき（並行トラック）"]
         CLAUDE["Claude API：分析・追加判定"]
     end
 
     OBS["OBS Studio"]
-    YTLIVE["YouTube Live<br/>（別トラック）"]
+    YTLIVE["YouTube Live<br/>（並行トラック）"]
 
     ME --> UI
     UI -- "HTTP・WebSocket" --> API
@@ -61,14 +62,15 @@ flowchart TB
     WHISPER -. "文字起こし" .-> API
     INPUT --> AGENT
     AGENT <-- "発火判定・切り出す目標" --> GOAL
+    AGENT <-- "更新と参照" --> CONV
     AGENT --> LLMMOD
     AGENT -- "参照した記憶・人格版" --> DB
     AGENT -- "会話の終了後" --> REFLECT
     REFLECT -- "採用待ちの候補" --> DB
     LLMMOD --> OLLAMA
     LLMMOD -. "将来の切り替え先" .-> MLX
-    LLMMOD -. "画像入力時 (v1.6)" .-> VISION
-    AGENT -. "明示的な依頼のみ (v1.5a)" .-> SEARCH
+    LLMMOD -. "画像入力時（並行トラック）" .-> VISION
+    AGENT -. "明示的な依頼のみ（並行トラック）" .-> SEARCH
     SEARCH -. "出典・日時つきの情報" .-> AGENT
     LLMMOD -. "難しい分析" .-> CLAUDE
     CLAUDE -. "分析結果" .-> LLMMOD

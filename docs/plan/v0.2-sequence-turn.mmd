@@ -1,0 +1,67 @@
+---
+config:
+  theme: neutral
+---
+%% docs/plan/v0.2.md §4「1ターンの処理」の元データ。
+%% images/v0.2-sequence-turn.png はこれを描画したもの。
+%% 更新するには次を実行する:
+%%   npx -y @mermaid-js/mermaid-cli -i docs/plan/v0.2-sequence-turn.mmd \
+%%       -o images/v0.2-sequence-turn.png -b white -s 2
+sequenceDiagram
+    autonumber
+    actor Partner as 相手
+    participant UI as 画面
+    participant API as FastAPI /chat
+    participant Agent as ConversationAgent
+    participant CS as conversation_state（新）
+    participant LLM as Ollama
+    participant DB as SQLite
+
+    Partner->>UI: 発言
+    UI->>API: POST /chat（既存）
+    Note over API: conversation_locks.hold の内側
+    API->>Agent: respond(text)
+    Agent->>DB: Message(partner) を保存（既存）
+    Agent->>CS: 規則で検出：question_to_yui / deferral / closing
+    CS->>DB: 開いている question_to_partner・discrepancy を resolved に
+    alt 解釈の呼び出しが有効
+        CS->>LLM: 直近N件・開いている状態・記憶の要約（enum だけの JSON）
+        alt 成功
+            LLM-->>CS: request / answers_question / deferral_topic /<br/>is_closing / confirms_presented / discrepancy
+            CS->>DB: request・confirmed・discrepancy を作る（detected_by=llm）<br/>相づち辞書に当たる発言からは confirmed を作らない<br/>discrepancy は開いているものが無いときだけ
+        else 例外・timeout・解析失敗
+            Note over CS: 規則の結果だけで進む（返答は止めない）
+        end
+    end
+    Agent->>DB: 記憶の検索・状態の読み込み（既存）
+    Agent->>Agent: build_messages（既存）＋「この会話で」の節（新）
+    Agent->>DB: commit（生成前にロックを手放す。既存）
+    Agent->>LLM: chat（既存）
+    LLM-->>Agent: 返答
+    Agent->>CS: 出力検査（コード）
+    alt closing が開いているのに質問・用件がある
+        CS-->>Agent: 1回だけ再生成
+        Agent->>LLM: chat（指示を強めて）
+        LLM-->>Agent: 返答
+        alt まだ通らない
+            Note over Agent: 定型の締めの文へ落とす（人格判定済みの固定文）
+        end
+    else deferral の話題の語を含む
+        CS-->>Agent: 1回だけ再生成。通らなければそのまま通して記録
+    end
+    rect rgb(238,246,238)
+        Note over Agent,DB: 1トランザクション
+        Agent->>DB: Message(character) を保存
+        Agent->>CS: 規則で question_to_partner・presented を作る<br/>question_to_yui を resolved に
+        Agent->>DB: RunRecord（system_prompt に節が残る。検査結果は options に）
+    end
+    Agent-->>API: ReplyResult
+    API-->>UI: ChatResponse（＋ conversation_states：開いているもの）
+    UI-->>Partner: 返答・音声・字幕（既存）と「この会話で」の表示（新）
+
+    Partner->>UI: 会話を終了
+    UI->>API: POST /conversations/{id}/end（既存）
+    API->>LLM: 記憶候補・状態候補の抽出（既存。別の呼び出し）
+    API->>CS: 開いている会話状態をすべて resolved に
+    Note over CS,DB: discrepancy は訂正の候補として GET /states で開発者へ。<br/>記憶は自動で訂正しない
+    API-->>UI: 候補の一覧（既存の応答のまま）
