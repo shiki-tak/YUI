@@ -47,6 +47,14 @@ def test_detect_question_matches_sentence_ending_forms() -> None:
     # レビューで「明日は雨でしょう」「たぶん来るかな」の誤検出を実測）。
     assert not detect_question("明日は雨でしょう")
     assert not detect_question("たぶん来るかな")
+    # 「そう(なん)ですか」は相づちで、質問ではない（コードレビューで
+    # 「なるほど、そうですか！」等の誤検出を実測）。
+    assert not detect_question("そうですか。")
+    assert not detect_question("そうですか")
+    assert not detect_question("なるほど、そうですか！")
+    assert not detect_question("へえ、そうなんですか")
+    # 「ですか」を含んでいても、相づちの定型文でなければ質問として扱う。
+    assert detect_question("山は好きですか")
 
 
 def test_detect_request_question_matches_request_forms_too() -> None:
@@ -68,6 +76,10 @@ def test_detect_deferral_topic_requires_topic_and_sentence_ending() -> None:
     assert detect_deferral_topic("今日は映画の話はまた今度にしよう") == "映画"
     # 語尾のバリエーション。
     assert detect_deferral_topic("映画の話はまた今度にしようね") == "映画"
+    # 改行区切りでも、前の行を topic が飲み込まない（画面の入力欄は textarea
+    # で Enter が改行になるため、通常操作で複数行の発言が届く。コード
+    # レビューで「今日は疲れた\n映画の話はまた今度」の取りこぼしを実測）。
+    assert detect_deferral_topic("今日は疲れた\n映画の話はまた今度") == "映画"
 
 
 def test_detect_closing_requires_sentence_ending_form() -> None:
@@ -83,6 +95,9 @@ def test_detect_closing_requires_sentence_ending_form() -> None:
     assert not detect_closing("成績が落ちる")
     # 前の文に用事があっても、最後の文が定型句なら検出する。
     assert detect_closing("楽しかった。そろそろ寝るね")
+    # 改行区切りでも同様（textarea の Enter は改行。コードレビューで
+    # 「今日は楽しかった\nそろそろ寝るね」の取りこぼしを実測）。
+    assert detect_closing("今日は楽しかった\nそろそろ寝るね")
 
 
 def test_is_acknowledgement_only_catches_short_backchannel_words() -> None:
@@ -251,6 +266,30 @@ async def test_conversation_state_section_appears_in_prompt(
     assert "まだ答えていない相手の質問" in fake_llm.last_system_prompt
 
 
+async def test_long_question_is_truncated_in_content_and_prompt(
+    client: AsyncClient, session_factory
+) -> None:
+    """質問の本文は `presented` と同じ上限で切る。
+
+    `ChatRequest.text` は最大4000文字を許すため、切らないと `# この会話で`
+    節だけで数千文字になり、ローカルモデルのコンテキストを圧迫する
+    （コードレビューで実測）。
+    """
+    # ChatRequest.text の上限（4000文字）に収まる範囲で長文を作る。
+    long_question = "明日の予定は" + "あ" * 3900 + "教えて"
+    turn = await client.post("/api/chat", json={"text": long_question})
+    conversation_id = turn.json()["conversation_id"]
+
+    async with session_factory() as session:
+        states = await get_open_states(
+            session,
+            conversation_id=conversation_id,
+            kind=ConversationStateKind.QUESTION_TO_YUI.value,
+        )
+    assert len(states) == 1
+    assert len(states[0].content) <= 200
+
+
 # --- 別の相手では遷移しない（target_speaker_id の一致） ---------------------
 
 
@@ -331,6 +370,62 @@ async def test_yuis_question_to_a_is_not_answered_by_b(
     assert len(questions) == 1
     # B の発言では応答済みにならない。
     assert questions[0].responded_message_id is None
+
+
+async def test_yuis_reply_failure_then_b_does_not_answer_a_question_to_yui(
+    client: AsyncClient, session_factory, fake_llm: FakeLLM
+) -> None:
+    """A の質問への YUI の返答が失敗し、次に B のターンが来ても、
+    A 宛の `question_to_yui` を応答済みにしない（apply_character_message_rules
+    の target 絞り込み。レビュー指摘）。
+
+    A 自身のターンの返答が成功すると、その返答自体が最初の応答候補になって
+    しまい（設計どおり）、target の絞り込みが効いているかを検出できない。
+    生成を失敗させて A 自身の返答由来の状態が作られない状況を作ることで、
+    絞り込みが実際に効いているかを区別する。
+    """
+    from app.llm.base import LLMError
+
+    original_chat = fake_llm.chat
+
+    async def failing_chat(*args, **kwargs):
+        raise LLMError("接続できません（テスト）")
+
+    fake_llm.chat = failing_chat  # type: ignore[method-assign]
+
+    a_turn = await client.post(
+        "/api/chat",
+        json={
+            "text": "明日の予定はどうですか？",
+            "speaker": {"source": "local", "external_id": "a4", "display_name": "Aさん"},
+        },
+    )
+    assert a_turn.status_code == 503
+    conversation_id = (
+        await client.get("/api/conversations")
+    ).json()[0]["id"]
+
+    fake_llm.chat = original_chat  # type: ignore[method-assign]
+
+    b_turn = await client.post(
+        "/api/chat",
+        json={
+            "text": "こんにちは、はじめまして",
+            "conversation_id": conversation_id,
+            "speaker": {"source": "local", "external_id": "b4", "display_name": "Bさん"},
+        },
+    )
+    assert b_turn.status_code == 200
+
+    async with session_factory() as session:
+        states = await get_open_states(
+            session,
+            conversation_id=conversation_id,
+            kind=ConversationStateKind.QUESTION_TO_YUI.value,
+        )
+    assert len(states) == 1
+    # A への質問は、B のターン（B の発言・B 向けの返答）では応答済みにならない。
+    assert states[0].responded_message_id is None
 
 
 async def test_get_open_states_filters_by_target_speaker(
@@ -633,6 +728,31 @@ def test_prompt_section_deduplicates_repeated_closing_and_deferral() -> None:
     section = build_conversation_state_section(states, window_message_ids=set())
     assert section.count("終わりにしようとしている") == 1
     assert section.count("相手が後にすると言った話題：映画") == 1
+
+
+def test_prompt_section_deduplicates_repeated_questions() -> None:
+    """生成失敗（503）後に相手が同じ質問を再送すると、規則は重複制約を
+    置かないため同じ本文の `question_to_yui` が複数件できうる（設計 §4
+    末尾で受容済み）。節では同じ本文をまとめる（レビュー指摘）。
+    """
+
+    def make(**kwargs) -> ConversationState:
+        state = ConversationState(
+            conversation_id=1,
+            source_message_id=1,
+            status=ConversationStateStatus.OPEN.value,
+            detected_by="rule",
+        )
+        for key, value in kwargs.items():
+            setattr(state, key, value)
+        return state
+
+    states = [
+        make(kind=ConversationStateKind.QUESTION_TO_YUI.value, content="明日の予定は？"),
+        make(kind=ConversationStateKind.QUESTION_TO_YUI.value, content="明日の予定は？"),
+    ]
+    section = build_conversation_state_section(states, window_message_ids=set())
+    assert section.count("まだ答えていない相手の質問：「明日の予定は？」") == 1
 
 
 def test_prompt_section_limits_answered_questions_to_recent_ones() -> None:

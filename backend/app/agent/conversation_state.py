@@ -30,6 +30,11 @@ from app.models import (
     utcnow,
 )
 
+# 本文の保存上限。`content` は開発者向けの本文だが（計画 §3）、質問の全文が
+# system prompt の「この会話で」節にそのまま入るため、`presented` と同じ上限で
+# 切る（レビューで、4000文字の発言1件だけで節が4000文字を超えることを実測）。
+CONTENT_LIMIT = 200
+
 # --- 規則：文末の形だけを見る。曖昧な内容判定はしない -----------------------
 
 # 質問の文末（相手の発言・YUI の発言の両方に使う）。「でしょうか」は疑問だが
@@ -67,7 +72,7 @@ _REQUEST_ENDING_RE = re.compile(
 # 拾い直す。トピックの先頭が仮名の「は」で始まる語（稀）は切り詰められる
 # トレードオフを受け入れる（レビューで実測した「今日は映画の話は…」の誤り）。
 _DEFERRAL_RE = re.compile(
-    r"(?P<topic>[^。！!、,　は]{1,20}?)(の話|について)?は\s*"
+    r"(?P<topic>[^。！!、,　\nは]{1,20}?)(の話|について)?は\s*"
     r"(また今度|また後で|後で|あとで)"
     r"(ね|にする|にします|にしよう|にしようね|にしますね|話そう|話します)?"
     r"[。.！!]*\s*$"
@@ -87,8 +92,12 @@ _CLOSING_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"また(今度|ね|明日)[。.！!]*$"),
 ]
 
-# 文の区切り。最後の文だけを終了・延期の判定対象にする。
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！!])")
+# 文の区切り。最後の文だけを終了・延期の判定対象にする。改行・疑問符も
+# 区切りに含める——画面の入力欄は textarea で Enter は改行のため、通常操作で
+# 複数行の発言が届く（レビューで「今日は楽しかった\nそろそろ寝るね」の
+# 取りこぼしを実測。区切らないと前の行を延期の話題が飲み込み、終了の合図は
+# 逆に検出されなくなる）。
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！!？?\n])")
 
 
 def _last_sentence(text: str) -> str:
@@ -102,6 +111,12 @@ _ACKNOWLEDGEMENT_WORDS = {
     "うん", "はい", "ええ", "そう", "そうだね", "そうですね", "へえ", "なるほど",
 }
 
+# 「そうですか」「そうなんですか」は相づちで、質問ではない。前に「なるほど、」
+# 「へえ、」等が付く形もあるため、is_acknowledgement_only の完全一致（短い
+# 発言限定）では弾けない。文末だけを見て、質問扱いから明示的に除外する
+# （レビューで「なるほど、そうですか！」等の誤検出を実測）。
+_ACKNOWLEDGEMENT_QUESTION_RE = re.compile(r"そう(なん)?ですか[。.！!]*\s*$")
+
 
 def is_acknowledgement_only(text: str) -> bool:
     """短い相づちだけの発言か（confirmed を作らない条件。設計 §3）。"""
@@ -110,8 +125,11 @@ def is_acknowledgement_only(text: str) -> bool:
 
 
 def detect_question(text: str) -> bool:
-    """文末が質問の形か。"""
-    return bool(_QUESTION_ENDING_RE.search(text.strip()))
+    """文末が質問の形か。「そう(なん)ですか」は相づちなので質問に数えない。"""
+    stripped = text.strip()
+    if _ACKNOWLEDGEMENT_QUESTION_RE.search(stripped):
+        return False
+    return bool(_QUESTION_ENDING_RE.search(stripped))
 
 
 def detect_request_question(text: str) -> bool:
@@ -411,7 +429,7 @@ async def apply_partner_message_rules(
             session,
             conversation_id=conversation_id,
             kind=ConversationStateKind.QUESTION_TO_YUI.value,
-            content=text,
+            content=text[:CONTENT_LIMIT],
             source_message_id=message.id,
             speaker_id=speaker_id,
             target_speaker_id=speaker_id,
@@ -434,7 +452,7 @@ async def apply_partner_message_rules(
             session,
             conversation_id=conversation_id,
             kind=ConversationStateKind.CLOSING.value,
-            content=text,
+            content=text[:CONTENT_LIMIT],
             source_message_id=message.id,
             speaker_id=speaker_id,
             target_speaker_id=speaker_id,
@@ -477,7 +495,7 @@ async def apply_character_message_rules(
             session,
             conversation_id=conversation_id,
             kind=ConversationStateKind.QUESTION_TO_PARTNER.value,
-            content=text,
+            content=text[:CONTENT_LIMIT],
             source_message_id=message.id,
             speaker_id=None,
             target_speaker_id=target_speaker_id,
@@ -487,7 +505,7 @@ async def apply_character_message_rules(
         session,
         conversation_id=conversation_id,
         kind=ConversationStateKind.PRESENTED.value,
-        content=text[:200],
+        content=text[:CONTENT_LIMIT],
         source_message_id=message.id,
         speaker_id=None,
         target_speaker_id=target_speaker_id,
@@ -507,7 +525,7 @@ async def apply_character_message_rules(
 
 # --- プロンプトへの節 ---------------------------------------------------------
 
-PRESENTED_LIMIT = 5
+PRESENTED_LIMIT = 5  # 節に出す presented の件数上限（本文の長さ上限は CONTENT_LIMIT）
 # PR1 は解決・取消をしないため、応答済みの question_to_partner は解釈が
 # 「答えた」と返す（PR3）まで open のまま残り続ける。上限を置かないと、
 # 長い会話でこの1種類だけで節の大半を占める（レビューで36ターン30行を実測）。
@@ -525,33 +543,45 @@ def build_conversation_state_section(
     """
     lines: list[str] = []
 
+    # 生成失敗（503）後に相手が同じ質問を再送すると、規則は重複制約を
+    # 置かないため同じ本文の question_to_yui が複数件できうる。節では
+    # 同じ本文をまとめる（deferral・closing と同じ扱い。レビュー指摘）。
+    seen_unanswered: set[str] = set()
     for state in states:
         if (
             state.kind == ConversationStateKind.QUESTION_TO_YUI.value
             and state.responded_message_id is None
+            and state.content not in seen_unanswered
         ):
+            seen_unanswered.add(state.content)
             lines.append(f"- まだ答えていない相手の質問：「{state.content}」")
             # responded が入っていて未判定のものは、答え損ねと決まっていない
             # ので渡さない（followup_needed は PR3 が立てる）。
 
-    waiting = [
-        state
-        for state in states
-        if state.kind == ConversationStateKind.QUESTION_TO_PARTNER.value
-        and state.responded_message_id is None
-    ]
-    for state in waiting:
-        lines.append(f"- 自分が聞いて答えを待っている質問：「{state.content}」")
+    seen_waiting: set[str] = set()
+    for state in states:
+        if (
+            state.kind == ConversationStateKind.QUESTION_TO_PARTNER.value
+            and state.responded_message_id is None
+            and state.content not in seen_waiting
+        ):
+            seen_waiting.add(state.content)
+            lines.append(f"- 自分が聞いて答えを待っている質問：「{state.content}」")
 
     # 応答済みは PR3 の解決が付くまで open のまま溜まり続けるので、
     # 直近だけに絞る（古いものは「同じ会話では繰り返さない」効果が薄い）。
+    # 上限を切ってから重複を除く（新しいものを優先して残すため）。
     answered_once = [
         state
         for state in states
         if state.kind == ConversationStateKind.QUESTION_TO_PARTNER.value
         and state.responded_message_id is not None
     ][-RESPONDED_QUESTION_LIMIT:]
+    seen_answered: set[str] = set()
     for state in answered_once:
+        if state.content in seen_answered:
+            continue
+        seen_answered.add(state.content)
         lines.append(
             f"- 自分が聞いて一度答えのあった質問：「{state.content}」"
             "（同じ会話では繰り返し聞かない）"
