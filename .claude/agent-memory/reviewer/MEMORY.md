@@ -1,0 +1,1 @@
+- [表層規則の誤検出は会話全体に残る](project_surface_regex_false_positives.md) — conversation_state.py の検出器を触る diff は誤検出側の文で実測。open 判定は responded も見る

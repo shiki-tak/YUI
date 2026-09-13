@@ -21,16 +21,24 @@ from sqlalchemy.orm import selectinload
 from app.agent import prompt as prompt_builder
 from app.agent.character_state import active_states
 from app.agent.conversation_state import (
+    CLOSING_FALLBACK_SENTENCE,
+    CLOSING_REINFORCEMENT_INSTRUCTION,
     apply_character_message_rules,
     apply_partner_message_rules,
     build_conversation_state_section,
+    detect_question,
     get_open_states,
+    has_open_state,
+    has_unanswered_question_to_yui,
+    looks_assertive,
+    mentioned_deferral_topics,
 )
 from app.agent.memory_store import RetrievedMemory, search_memories
 from app.config import Settings
-from app.llm.base import LLMClient
+from app.llm.base import ChatMessage, LLMClient, LLMError
 from app.models import (
     Conversation,
+    ConversationStateKind,
     DeliveryState,
     Message,
     RunRecord,
@@ -146,6 +154,62 @@ class ConversationAgent:
         # LLMError はここでは握らず、API 層で 503 として返す。
         response = await self._llm.chat(messages)
 
+        # 出力検査（設計 §4 手順6。v0.2 PR2）。conversation_states は commit の
+        # 前（生成前）に読んだもので、この相手宛に絞り込み済み。生成前後で
+        # 内容は変わらないので、そのまま使う（expire_on_commit=False）。
+        checks: dict[str, object] = {
+            "closing_open": has_open_state(
+                conversation_states, kind=ConversationStateKind.CLOSING.value
+            ),
+            "closing_new_question_detected": False,
+            "regenerated_for_closing": False,
+            "regeneration_failed": False,
+            "closing_fell_back_to_template": False,
+            "closing_unresolved_due_to_open_question": False,
+            "deferral_topics_mentioned": [],
+            "discrepancy_open": has_open_state(
+                conversation_states, kind=ConversationStateKind.DISCREPANCY.value
+            ),
+            "discrepancy_possibly_assertive": False,
+        }
+
+        if checks["closing_open"] and detect_question(response.text):
+            checks["closing_new_question_detected"] = True
+            # 1回だけ再生成する。強めた指示を追加のシステムメッセージとして渡す
+            # （元の system prompt は変えない。人格の弁など既存の規則は残す）。
+            reinforced = [
+                *messages,
+                ChatMessage(role="system", content=CLOSING_REINFORCEMENT_INSTRUCTION),
+            ]
+            try:
+                response = await self._llm.chat(reinforced)
+            except LLMError:
+                # 1回目の応答はすでに生成できている。品質向上のための
+                # 再生成が失敗しただけで相手の発言への応答自体は失われて
+                # いないので、503 にはせず1回目の応答をそのまま使う
+                # （レビューで指摘。計画 §8 は生成そのものの失敗を想定）。
+                checks["regeneration_failed"] = True
+            else:
+                checks["regenerated_for_closing"] = True
+                if detect_question(response.text):
+                    open_question_to_yui = has_unanswered_question_to_yui(conversation_states)
+                    if open_question_to_yui:
+                        # 答えと新しい質問を機械判定で分けられないので、定型へは
+                        # 落とさず、人手判定に回す記録だけを残す（設計 §4 手順6）。
+                        checks["closing_unresolved_due_to_open_question"] = True
+                    else:
+                        response.text = CLOSING_FALLBACK_SENTENCE
+                        checks["closing_fell_back_to_template"] = True
+
+        # deferral・discrepancy の検査は closing の結果と独立に行う
+        # （設計 §4 手順6の3項目は互いに排他ではない）。
+        deferral_hits = mentioned_deferral_topics(conversation_states, reply_text=response.text)
+        if deferral_hits:
+            checks["deferral_topics_mentioned"] = deferral_hits
+
+        if checks["discrepancy_open"] and looks_assertive(response.text):
+            checks["discrepancy_possibly_assertive"] = True
+
         now = utcnow()
         # 読み上げる構成では、生成しただけの状態から始める。実際に鳴ったかは
         # 再生側の通知で進める。読み上げない構成では、画面に出た時点で届く。
@@ -175,13 +239,18 @@ class ConversationAgent:
             target_speaker_id=speaker.id,
         )
 
+        # 検査結果は options に checks の鍵で残す（設計 §4 手順6）。生成設定
+        # （response.options）を上書きしないよう、コピーへ足す。
+        options = dict(response.options)
+        options["checks"] = checks
+
         run = RunRecord(
             message_id=reply_message.id,
             provider=response.provider,
             model=response.model,
             model_digest=response.model_digest,
             persona_version=persona.version,
-            options=response.options,
+            options=options,
             referenced_memory_ids=[m.memory.id for m in memories],
             referenced_state_ids=[state.id for state in states] or None,
             system_prompt=system_prompt,

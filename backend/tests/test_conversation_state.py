@@ -11,6 +11,7 @@ from __future__ import annotations
 from httpx import AsyncClient
 
 from app.agent.conversation_state import (
+    CLOSING_FALLBACK_SENTENCE,
     build_conversation_state_section,
     can_create_discrepancy,
     create_or_supersede_correction,
@@ -98,6 +99,30 @@ def test_detect_closing_requires_sentence_ending_form() -> None:
     # 改行区切りでも同様（textarea の Enter は改行。コードレビューで
     # 「今日は楽しかった\nそろそろ寝るね」の取りこぼしを実測）。
     assert detect_closing("今日は楽しかった\nそろそろ寝るね")
+
+
+def test_detect_closing_matches_before_form_with_a_trailing_request() -> None:
+    """「寝る前に」のように、終了語が文末以外の位置に付く形も終了の意図として
+    拾う（計画 §7 シナリオ4：終了の合図と最後の依頼が同時に来る）。
+    """
+    assert detect_closing("寝る前に明日の集合時間だけ教えて")
+    assert detect_closing("そろそろ帰る前に一つ聞いてもいい？")
+    # 「前に」が付かない単なる予定の報告は、引き続き終了として拾わない。
+    assert not detect_closing("明日は実家に帰る予定です")
+    # 「〜前に」が依頼を伴わない習慣・伝聞の報告は終了の合図ではない
+    # （レビューで誤検出を実測。要求するのは「最後の文が依頼の形」であること）。
+    assert not detect_closing("毎晩寝る前にストレッチしてるんだ")
+    assert not detect_closing("寝る前に本を読むのが習慣なんだよね")
+    assert not detect_closing("友達が帰る前に一緒に写真を撮ったよ")
+    assert not detect_closing("明日は帰る前に買い物して来るつもり")
+    # 「最後の文が依頼の形」まで絞っても、終了の意図が無い一般的な質問・依頼は
+    # 拾ってしまう。「前に」の直後に「だけ／一つ／ひとつ／最後に」を求めて
+    # 除く（レビューで誤検出を実測）。
+    assert not detect_closing("寝る前にストレッチするといいって本当？")
+    assert not detect_closing("寝る前に飲むといい薬を教えて")
+    assert not detect_closing("成績が落ちる前に対策を教えてほしい")
+    assert not detect_closing("帰る前にやることリストを教えてくれる？")
+    assert not detect_closing("おやすみ前に読む絵本、おすすめある？")
 
 
 def test_is_acknowledgement_only_catches_short_backchannel_words() -> None:
@@ -777,3 +802,180 @@ def test_prompt_section_limits_answered_questions_to_recent_ones() -> None:
     # 直近（新しいもの）が残る。
     assert "質問9" in section
     assert "質問0" not in section
+
+
+# --- 出力検査（v0.2 PR2） ----------------------------------------------------
+
+
+async def test_closing_reply_with_no_new_question_passes_without_regeneration(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """closing が開いていても、返答が新しい質問を含まなければ何もしない。"""
+    turn = await client.post("/api/chat", json={"text": "そろそろ寝るね"})
+    reply_id = turn.json()["reply"]["id"]
+    run = (await client.get(f"/api/conversations/messages/{reply_id}/run")).json()
+
+    assert run["options"]["checks"]["closing_open"] is True
+    assert run["options"]["checks"]["closing_new_question_detected"] is False
+    assert run["options"]["checks"]["regenerated_for_closing"] is False
+    assert len(fake_llm.calls) == 1
+
+
+async def test_closing_reply_with_new_question_is_regenerated_once(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """closing が開いているのに新しい質問が出たら、1回だけ再生成する。"""
+    fake_llm.push("承知しました。ちなみに明日は何をご予定ですか？")  # 1回目：質問が残る
+    fake_llm.push("承知しました。おやすみなさいませ。")  # 2回目：質問が無い
+
+    turn = await client.post("/api/chat", json={"text": "そろそろ寝るね"})
+    reply = turn.json()["reply"]
+    reply_id = reply["id"]
+    run = (await client.get(f"/api/conversations/messages/{reply_id}/run")).json()
+
+    assert reply["content"] == "承知しました。おやすみなさいませ。"
+    assert len(fake_llm.calls) == 2
+    checks = run["options"]["checks"]
+    assert checks["closing_new_question_detected"] is True
+    assert checks["regenerated_for_closing"] is True
+    assert checks["closing_fell_back_to_template"] is False
+    assert checks["closing_unresolved_due_to_open_question"] is False
+
+
+async def test_closing_reply_falls_back_to_template_when_regeneration_still_asks(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """再生成でも質問が残り、答えを待っている相手の質問も無ければ、定型文へ落とす。"""
+    fake_llm.push("承知しました。明日は何をご予定ですか？")
+    fake_llm.push("では、明後日はいかがですか？")  # 2回目も質問が残る
+
+    turn = await client.post("/api/chat", json={"text": "そろそろ寝るね"})
+    reply = turn.json()["reply"]
+    reply_id = reply["id"]
+    run = (await client.get(f"/api/conversations/messages/{reply_id}/run")).json()
+
+    assert reply["content"] == CLOSING_FALLBACK_SENTENCE
+    assert len(fake_llm.calls) == 2
+    checks = run["options"]["checks"]
+    assert checks["closing_fell_back_to_template"] is True
+    assert checks["closing_unresolved_due_to_open_question"] is False
+
+
+async def test_closing_reply_does_not_fall_back_when_partners_question_is_open(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """相手の質問（question_to_yui）が未応答のまま残っているターンでは、答えと
+    新しい質問を機械判定で分けられないため、定型文へは落とさず記録だけする。
+    """
+    fake_llm.push("えっと、寝る前に一つ確認してもいいですか？")  # 1回目
+    fake_llm.push("承知しました。ところでそちらはどうでしたか？")  # 2回目も質問が残る
+
+    # 「寝る前に」の1文にすることで closing と question_to_yui を同時に作る
+    # （終了語が最後の文以外にある形は closing の判定対象外。計画 §7 シナリオ4）。
+    turn = await client.post(
+        "/api/chat", json={"text": "寝る前に明日の集合時間だけ教えて"}
+    )
+    reply = turn.json()["reply"]
+    reply_id = reply["id"]
+    run = (await client.get(f"/api/conversations/messages/{reply_id}/run")).json()
+
+    # 定型文には落ちていない（2回目の生成結果がそのまま使われる）。
+    assert reply["content"] == "承知しました。ところでそちらはどうでしたか？"
+    checks = run["options"]["checks"]
+    assert checks["closing_fell_back_to_template"] is False
+    assert checks["closing_unresolved_due_to_open_question"] is True
+
+
+async def test_closing_falls_back_even_if_an_earlier_question_was_already_answered(
+    client: AsyncClient, fake_llm: FakeLLM
+) -> None:
+    """相手の質問に一度答えると `status` は `open` のまま残る（PR3 の解釈まで
+    解決しない）。answered な question_to_yui まで「未応答」として数えると、
+    一度でも質問された会話では定型への差し替えがずっと働かなくなる
+    （レビューで実測。判定は `responded_message_id` の有無で見る）。
+    """
+    fake_llm.push("はい、元気ですよ。")
+    first = await client.post("/api/chat", json={"text": "元気？"})
+    conversation_id = first.json()["conversation_id"]
+
+    fake_llm.push("承知しました。明日は何をご予定ですか？")
+    fake_llm.push("では、明後日はいかがですか？")
+    turn = await client.post(
+        "/api/chat", json={"text": "そろそろ寝るね", "conversation_id": conversation_id}
+    )
+    reply = turn.json()["reply"]
+    run = (await client.get(f"/api/conversations/messages/{reply['id']}/run")).json()
+
+    assert reply["content"] == CLOSING_FALLBACK_SENTENCE
+    checks = run["options"]["checks"]
+    assert checks["closing_fell_back_to_template"] is True
+    assert checks["closing_unresolved_due_to_open_question"] is False
+
+
+async def test_deferral_mention_is_recorded_but_reply_is_not_changed(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory
+) -> None:
+    """延期の話題の語が返答に含まれても、記録するだけで再生成しない。"""
+    await client.post("/api/chat", json={"text": "映画の話はまた今度にしよう"})
+    first_conversation = (await client.get("/api/conversations")).json()[0]
+    conversation_id = first_conversation["id"]
+
+    calls_before = len(fake_llm.calls)
+    fake_llm.push("承知しました。映画、楽しみですね。")
+    turn = await client.post(
+        "/api/chat", json={"text": "そういえば元気？", "conversation_id": conversation_id}
+    )
+    reply = turn.json()["reply"]
+    run = (await client.get(f"/api/conversations/messages/{reply['id']}/run")).json()
+
+    # 語が含まれていても、そのまま通す（再生成しない）。
+    assert reply["content"] == "承知しました。映画、楽しみですね。"
+    assert len(fake_llm.calls) - calls_before == 1
+    assert run["options"]["checks"]["deferral_topics_mentioned"] == ["映画"]
+
+
+async def test_discrepancy_open_records_whether_reply_looks_assertive(
+    client: AsyncClient, fake_llm: FakeLLM, session_factory
+) -> None:
+    """discrepancy が開いているとき、返答が断定的に見えるかを記録する
+    （行動は変えない。設計 §4 手順6「記録のみ」）。discrepancy 自体は解釈
+    （PR3）でしか作られないため、ここではテスト用に直接作る。
+    """
+    turn = await client.post("/api/chat", json={"text": "土曜に映画に行くよ"})
+    conversation_id = turn.json()["conversation_id"]
+    message_id = turn.json()["user_message"]["id"]
+    speaker_id = turn.json()["user_message"]["speaker_id"]
+
+    async with session_factory() as session:
+        await create_state(
+            session,
+            conversation_id=conversation_id,
+            kind=ConversationStateKind.DISCREPANCY.value,
+            content="土曜と聞いていたが日曜と言っている",
+            source_message_id=message_id,
+            speaker_id=speaker_id,
+            target_speaker_id=speaker_id,
+            ref_kind=ConversationStateRefKind.MESSAGE.value,
+            ref_id=message_id,
+            detected_by="llm",
+        )
+        await session.commit()
+
+    fake_llm.push("日曜日ですね、承知しました。")  # 断定
+    assertive_turn = await client.post(
+        "/api/chat", json={"text": "そういえば元気？", "conversation_id": conversation_id}
+    )
+    assertive_run = (
+        await client.get(f"/api/conversations/messages/{assertive_turn.json()['reply']['id']}/run")
+    ).json()
+    assert assertive_run["options"]["checks"]["discrepancy_open"] is True
+    assert assertive_run["options"]["checks"]["discrepancy_possibly_assertive"] is True
+
+    fake_llm.push("日曜日で合っていますでしょうか？")  # 確認する形（ヘッジあり）
+    hedged_turn = await client.post(
+        "/api/chat", json={"text": "うん", "conversation_id": conversation_id}
+    )
+    hedged_run = (
+        await client.get(f"/api/conversations/messages/{hedged_turn.json()['reply']['id']}/run")
+    ).json()
+    assert hedged_run["options"]["checks"]["discrepancy_possibly_assertive"] is False

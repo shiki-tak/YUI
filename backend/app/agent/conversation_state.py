@@ -92,6 +92,23 @@ _CLOSING_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"また(今度|ね|明日)[。.！!]*$"),
 ]
 
+# 「寝る前に明日の集合時間だけ教えて」のように、終了語が文末以外の位置に
+# 「〜前に」の形で付く場合も終了の意図として拾う（計画 §7 シナリオ4：
+# 終了の合図と最後の依頼が同時に来る形）。`_CLOSING_PATTERNS` は最後の文
+# 全体の一致を求めるため、依頼が続く文はそこでは拾えない。
+#
+# **「前に」の直後に「だけ／一つ／ひとつ／最後に」のいずれかを求める。**
+# 「最後の文が依頼の形であること」まで絞っても、「寝る前にストレッチする
+# といいって本当？」「帰る前にやることリストを教えてくれる？」のような、
+# 終了の意図が無い一般的な質問・依頼が拾われてしまう（レビューで実測）。
+# シナリオ4の言い方（「〜前に◯◯だけ」）は「終わる前にこれだけ済ませたい」
+# という限定を伴うので、その語を要求すると誤検出を防ぎつつ実際の言い方は
+# 拾える。
+_CLOSING_BEFORE_RE = re.compile(
+    r"(そろそろ)?(寝る|寝ます|おやすみ|落ちる|落ちます|帰る|帰ります)前に"
+    r".{0,20}?(だけ|ひとつ|一つ|最後に)"
+)
+
 # 文の区切り。最後の文だけを終了・延期の判定対象にする。改行・疑問符も
 # 区切りに含める——画面の入力欄は textarea で Enter は改行のため、通常操作で
 # 複数行の発言が届く（レビューで「今日は楽しかった\nそろそろ寝るね」の
@@ -155,10 +172,15 @@ def detect_closing(text: str) -> bool:
 
     最後の文**全体**が定型句であることを求める（`fullmatch`）。「そろそろ」等の
     前置きは任意だが、それ以外の内容が混ざった平叙文（「明日は実家に帰ります」）
-    を終了の合図として拾わない。
+    を終了の合図として拾わない。加えて、「寝る前に」のような「〜前に」の形は、
+    **最後の文が依頼の形であるときに限って**拾う（依頼と同時に終了の意図が出て
+    くる形。計画 §7 シナリオ4）。依頼を求めないと、「毎晩寝る前にストレッチ
+    してる」のような習慣・伝聞の報告まで終了の合図になる（レビューで実測）。
     """
     last = _last_sentence(text)
-    return any(pattern.fullmatch(last) for pattern in _CLOSING_PATTERNS)
+    if any(pattern.fullmatch(last) for pattern in _CLOSING_PATTERNS):
+        return True
+    return bool(_CLOSING_BEFORE_RE.search(last)) and detect_request_question(last)
 
 
 # --- 低レベルの作成・遷移 ----------------------------------------------------
@@ -521,6 +543,79 @@ async def apply_character_message_rules(
         mark_first_response(question, message_id=message.id)
     if open_questions:
         await session.flush()
+
+
+# --- 出力検査（設計 §4 手順6。v0.2 PR2） -------------------------------------
+
+# 再生成でも通らなかった場合に使う、人格判定済みの固定文（計画 §9：1文固定、
+# 設定にしない）。おしとやかな口調（`personas/*.toml` の speech）に合わせる。
+CLOSING_FALLBACK_SENTENCE = (
+    "はい、今日はここまでにいたしましょう。またお話しできるのを楽しみにしていますね。"
+)
+
+# closing が開いているのに YUI から新しい質問が出たときの、再生成用の追加指示。
+CLOSING_REINFORCEMENT_INSTRUCTION = (
+    "相手は会話を終えようとしています。新しい質問や話題を自分から出さず、"
+    "相手の依頼にはきちんと答えたうえで、短い言葉で締めくくってください。"
+)
+
+# discrepancy が開いているときに、返答が断定に見えるかを見る弱いヒューリスティック。
+# 行動は変えず記録するだけなので、精度は求めない（設計 §4 手順6「記録のみ」）。
+_HEDGE_MARKERS = ("かもしれ", "でしょうか", "たぶん", "確認", "念のため", "合ってい", "でしたっけ")
+
+
+def has_open_state(states: list[ConversationState], *, kind: str) -> bool:
+    """渡された状態一覧（既に target で絞り込み済みの前提）に、その種類が
+    開いているものがあるか。
+    """
+    return any(state.kind == kind for state in states)
+
+
+def has_unanswered_question_to_yui(states: list[ConversationState]) -> bool:
+    """まだ答えていない相手の質問があるか（設計 §3・`build_conversation_state_section`
+    と同じ条件：`open` かつ `responded_message_id` が空）。
+
+    PR1・PR2 は解決を作らないため、一度答えた question_to_yui も `status` は
+    `open` のまま残る（PR3 の解釈まで）。`has_open_state(kind=QUESTION_TO_YUI)`
+    のように `status` だけを見ると、会話のどこかで一度でも質問された時点で
+    ずっと真になり、closing の定型への差し替えが実運用でほぼ働かなくなる
+    （レビューで実測）。
+
+    `status` も明示的に見る。呼び出し元（`conversation.py`）は `get_open_states`
+    で絞り込み済みの一覧しか渡さないため実害は無いが、`withdrawn`／`expired`
+    （PR3 以降）を含む一覧を渡す呼び出し元が増えても壊れないようにする
+    （レビュー指摘）。
+    """
+    return any(
+        state.kind == ConversationStateKind.QUESTION_TO_YUI.value
+        and state.status == ConversationStateStatus.OPEN.value
+        and state.responded_message_id is None
+        for state in states
+    )
+
+
+def mentioned_deferral_topics(states: list[ConversationState], *, reply_text: str) -> list[str]:
+    """返答に含まれている延期の話題の本文一覧。
+
+    語の一致は「YUI が自分から再開したか」の判定には使わない（誤検出しうる。
+    設計 §4 手順6）。記録だけに使う。
+    """
+    return [
+        state.content
+        for state in states
+        if state.kind == ConversationStateKind.DEFERRAL.value
+        and state.content
+        and state.content in reply_text
+    ]
+
+
+def looks_assertive(text: str) -> bool:
+    """断定的な言い切りに見えるか（弱いヒューリスティック）。
+
+    discrepancy が開いているのに断定していないかを記録するためだけに使う。
+    行動を変える判定には使わない。
+    """
+    return not any(marker in text for marker in _HEDGE_MARKERS)
 
 
 # --- プロンプトへの節 ---------------------------------------------------------

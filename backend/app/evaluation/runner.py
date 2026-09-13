@@ -18,11 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.agent.character_state import create_state
 from app.agent.conversation import ConversationAgent
+from app.agent.conversation_state import detect_question
 from app.agent.memory_store import create_memory, get_or_create_speaker
 from app.agent.reflection import ReflectionParseError
 from app.agent.state_reflection import StateReflectionError
 from app.config import Settings, to_local
-from app.evaluation.scenario import Scenario, StepSpec
+from app.evaluation.scenario import ConversationStateExpectation, Scenario, StepSpec
 from app.evaluation.steps import ReflectOutcome, correct_memory, delete_memory, run_reflection
 from app.llm.base import LLMClient, LLMError
 from app.models import (
@@ -30,6 +31,7 @@ from app.models import (
     CharacterState,
     Conversation,
     ConversationMode,
+    ConversationState,
     Memory,
     Speaker,
     StateStatus,
@@ -234,12 +236,41 @@ def _check_language(reply: str) -> Check | None:
     )
 
 
+def _matches_conversation_state(
+    state: ConversationState, expectation: ConversationStateExpectation
+) -> bool:
+    if expectation.status is not None and state.status != expectation.status:
+        return False
+    if expectation.contains and not all(
+        word in (state.content or "") for word in expectation.contains
+    ):
+        return False
+    if (
+        expectation.followup_needed is not None
+        and state.followup_needed != expectation.followup_needed
+    ):
+        return False
+    if expectation.asked is not None and (state.asked_message_id is not None) != expectation.asked:
+        return False
+    if (
+        expectation.responded is not None
+        and (state.responded_message_id is not None) != expectation.responded
+    ):
+        return False
+    return not (
+        expectation.withdraw_reason is not None
+        and state.withdraw_reason != expectation.withdraw_reason
+    )
+
+
 def _check_turn(
     spec: StepSpec,
     reply: str,
     referenced: list[str],
     referenced_states: list[str],
     previous_replies: list[str],
+    conversation_states: list[ConversationState],
+    run_checks: dict[str, object],
 ) -> list[Check]:
     checks: list[Check] = []
 
@@ -324,6 +355,59 @@ def _check_turn(
                 name="繰り返していない",
                 ok=not repeated,
                 detail="直前までと違う返答" if not repeated else "前と同じ返答をそのまま返した",
+            )
+        )
+
+    if spec.expect_no_new_question:
+        # まだ答えていない相手の質問（question_to_yui）が残っているターンは、
+        # 答えと新しい質問を機械判定で分けられないため対象外にする
+        # （設計 §4 手順6・計画 §7）。ターン完了後に会話状態を読み直すと、
+        # その返答自身が `responded_message_id` を埋めてしまい、常に
+        # 「未応答は無い」に見える（レビューで実測）。実装
+        # （`conversation.py`）が生成前に判定した結果をそのまま使う。
+        if run_checks.get("closing_unresolved_due_to_open_question"):
+            checks.append(
+                Check(
+                    name="新しい質問が無い",
+                    ok=True,
+                    detail="相手の質問が残っているため対象外（人手判定と併用）",
+                )
+            )
+        else:
+            ok = not detect_question(reply)
+            checks.append(
+                Check(
+                    name="新しい質問が無い",
+                    ok=ok,
+                    detail="新しい質問は無い" if ok else "返答に新しい質問が残っている",
+                )
+            )
+
+    for kind, expectations in spec.expect_conversation_states.items():
+        rows = [state for state in conversation_states if state.kind == kind]
+        if not expectations:
+            checks.append(
+                Check(
+                    name=f"会話状態：{kind}",
+                    ok=not rows,
+                    detail="行が無い" if not rows else f"行が {len(rows)} 件ある",
+                )
+            )
+            continue
+        missing = [
+            index
+            for index, expectation in enumerate(expectations)
+            if not any(_matches_conversation_state(row, expectation) for row in rows)
+        ]
+        checks.append(
+            Check(
+                name=f"会話状態：{kind}",
+                ok=not missing,
+                detail=(
+                    "期待どおり"
+                    if not missing
+                    else f"条件 {'、'.join(str(i + 1) for i in missing)} に一致する行が無い"
+                ),
             )
         )
 
@@ -510,11 +594,26 @@ async def run_attempt(
                     referenced_states = await _state_contents(
                         session, result.run.referenced_state_ids
                     )
+                    # v0.2：この相手宛の会話状態（全ステータス。expect_conversation_states
+                    # は resolved・withdrawn も見られるようにするため、open だけに絞らない）。
+                    conversation_states = await _conversation_states_for_speaker(
+                        session,
+                        conversation_id=conversation.id,
+                        target_speaker_id=speakers[step.speaker].id,
+                    )
                     attempt.turns.append(
                         TurnResult(
                             text=step.text,
                             reply=reply,
-                            checks=_check_turn(step, reply, referenced, referenced_states, replies),
+                            checks=_check_turn(
+                                step,
+                                reply,
+                                referenced,
+                                referenced_states,
+                                replies,
+                                conversation_states,
+                                result.run.options.get("checks", {}),
+                            ),
                             referenced=referenced,
                             referenced_states=referenced_states,
                             human_check=step.human_check,
@@ -534,6 +633,24 @@ async def _state_contents(session: AsyncSession, ids: list[int] | None) -> list[
         return []
     stmt = select(CharacterState).where(CharacterState.id.in_(ids)).order_by(CharacterState.id)
     return [state.content for state in (await session.execute(stmt)).scalars()]
+
+
+async def _conversation_states_for_speaker(
+    session: AsyncSession, *, conversation_id: int, target_speaker_id: int
+) -> list[ConversationState]:
+    """その相手宛の会話状態（v0.2）。全ステータスを返す——`expect_conversation_states`
+    は `resolved`／`withdrawn` になった後の状態も見られるようにするため、
+    `status == open` では絞らない。
+    """
+    stmt = (
+        select(ConversationState)
+        .where(
+            ConversationState.conversation_id == conversation_id,
+            ConversationState.target_speaker_id == target_speaker_id,
+        )
+        .order_by(ConversationState.id)
+    )
+    return list((await session.execute(stmt)).scalars())
 
 
 async def _new_conversation(session: AsyncSession) -> Conversation:

@@ -1,0 +1,149 @@
+# 会話理解と修復（計画 docs/plan/v0.2.md §7）。PR2 が必須にする 1〜4・6・8・19。
+# 5・7・9〜18・20〜24 は解釈（LLM）が要るため PR3 以降で追加する。
+
+[[scenario]]
+id = "closing-sleep-ends-without-new-question"
+aspect = "conversation_state"
+description = "終了の合図1：「そろそろ寝るね」の後、新しい質問を出さず短く締めるか。"
+
+[[scenario.steps]]
+kind = "say"
+text = "今日は楽しかった。そろそろ寝るね"
+expect_no_new_question = true
+human_check = "短い言葉で締めくくっているか。話を引き延ばしていないか"
+
+[[scenario]]
+id = "closing-today-is-enough-ends-without-new-question"
+aspect = "conversation_state"
+description = "終了の合図2：「今日はここまでにしよう」の後、新しい質問を出さず短く締めるか。"
+
+[[scenario.steps]]
+kind = "say"
+text = "今日はここまでにしよう"
+expect_no_new_question = true
+human_check = "短い言葉で締めくくっているか。話を引き延ばしていないか"
+
+[[scenario]]
+id = "closing-going-home-ends-without-new-question"
+aspect = "conversation_state"
+description = "終了の合図3：「そろそろ帰るね」の後、新しい質問を出さず短く締めるか。"
+
+[[scenario.steps]]
+kind = "say"
+text = "そろそろ帰るね"
+expect_no_new_question = true
+human_check = "短い言葉で締めくくっているか。話を引き延ばしていないか"
+
+[[scenario]]
+id = "closing-and-request-arrive-together"
+aspect = "conversation_state"
+description = """終了の合図と最後の依頼が同時に来る形（計画 §7 シナリオ4）。
+「〜前に」＋終了語で closing、依頼形で question_to_yui を拾い、依頼に答えつつ
+新しい質問は出さないか。closing はこのターンでは open のまま残る。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "寝る前に明日の集合時間だけ教えて"
+expect_no_new_question = true
+human_check = "集合時間の依頼に答えているか。答え以外の新しい質問を出していないか"
+
+[scenario.steps.expect_conversation_states]
+closing = [{ status = "open" }]
+question_to_yui = [{ status = "open", contains = ["集合時間"] }]
+
+[[scenario]]
+id = "deferred-topic-is-not-brought-up-by-yui"
+aspect = "conversation_state"
+description = """「映画の話は後で」の後に別の話題を2ターン挟んでも、YUI から
+映画の話を持ち出さないか（計画 §7 シナリオ6）。語の一致は記録のみで、
+持ち出したかどうかは人手で読む。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "あ、映画の話はまた今度にしよう"
+
+[scenario.steps.expect_conversation_states]
+deferral = [{ status = "open", contains = ["映画"] }]
+
+[[scenario.steps]]
+kind = "say"
+text = "それより最近、近所に新しいパン屋ができたんだ"
+human_check = "映画の話を自分から持ち出していないか"
+
+[[scenario.steps]]
+kind = "say"
+text = "クロワッサンがすごく美味しかった"
+human_check = "映画の話を自分から持ち出していないか"
+
+[[scenario]]
+id = "future-suggestion-is-not-a-deferral"
+aspect = "conversation_state"
+description = """「今度は映画の話をしよう」は未来の提案であって延期ではない
+（計画 §7 シナリオ8、誤検出の側）。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "今度は映画の話をしよう"
+
+[scenario.steps.expect_conversation_states]
+deferral = []
+
+[[scenario]]
+id = "reported-farewell-is-not-a-closing"
+aspect = "conversation_state"
+description = """「友達に『またね』と言った」は伝聞であって、話者自身の終了の
+合図ではない（計画 §7 シナリオ8、誤検出の側）。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "さっき友達に「またね」と言って別れたんだ"
+
+[scenario.steps.expect_conversation_states]
+closing = []
+
+[[scenario]]
+id = "does-not-repeat-unsolicited-explanation"
+aspect = "conversation_state"
+description = "求められていないのに、同じ説明をそのまま繰り返していないか（計画 §7 シナリオ19前段）。"
+
+[[scenario.memories]]
+key = "camera"
+kind = "about_person"
+content = "開発者は写真を撮るのが好きで、休みの日はカメラを持って出かける"
+certainty = "fact"
+keywords = "写真 カメラ 趣味 休み"
+
+[[scenario.steps]]
+kind = "say"
+text = "私の趣味、覚えてる？"
+expect_memories = ["camera"]
+expect_any = ["写真"]
+
+[[scenario.steps]]
+kind = "say"
+text = "そういえば最近仕事が忙しくてさ"
+expect_not_repeating = true
+human_check = "頼まれていない趣味の説明をもう一度そのまま返していないか"
+
+[[scenario]]
+id = "re-explains-when-asked-again"
+aspect = "conversation_state"
+description = "再説明を求められたときは、言い換えて説明し直すか（計画 §7 シナリオ19後段）。"
+
+[[scenario.memories]]
+key = "trip"
+kind = "experience"
+content = "先週、開発者と近所の川沿いを散歩した"
+certainty = "fact"
+keywords = "散歩 川 週末"
+
+[[scenario.steps]]
+kind = "say"
+text = "先週何して過ごしたか覚えてる？"
+expect_memories = ["trip"]
+expect_any = ["散歩"]
+
+[[scenario.steps]]
+kind = "say"
+text = "ごめん、もう一回説明してくれる？"
+human_check = "同じ言い回しの丸写しではなく、言い換えて説明し直しているか"

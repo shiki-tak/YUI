@@ -18,7 +18,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models import Certainty, MemoryKind, Provenance, SourceKind, StateKind, Visibility
+from app.models import (
+    Certainty,
+    ConversationStateKind,
+    ConversationStateStatus,
+    ConversationStateWithdrawReason,
+    MemoryKind,
+    Provenance,
+    SourceKind,
+    StateKind,
+    Visibility,
+)
 
 # 設計書 ISSUE-006 が挙げている観点。ファイルの分け方と対応させる。
 ASPECTS = {
@@ -27,6 +37,10 @@ ASPECTS = {
     "persona": "人格：口調と「知らないことは正直に言う」が保たれているか",
     "reflection": "振り返り：残すべき経験・約束が候補に含まれるか",
     "repetition": "繰り返し：同じ話を繰り返していないか",
+    # v0.2「会話理解と修復」（docs/plan/v0.2.md）。
+    "conversation_state": (
+        "会話理解：現在の用件・未回答の質問・延期・終了・食い違いを正しく扱えるか"
+    ),
 }
 
 
@@ -109,6 +123,36 @@ class TurnSpec(BaseModel):
     human_check: str | None = None
 
 
+class ConversationStateExpectation(BaseModel):
+    """`expect_conversation_states` の1条件（計画 docs/plan/v0.2.md §7）。
+
+    指定した項目だけを見る。`None` のままの項目は問わない。`contains` は
+    本文にすべて含まれることを求める（AND）。
+    """
+
+    status: str | None = None
+    contains: list[str] = Field(default_factory=list)
+    followup_needed: bool | None = None
+    asked: bool | None = None
+    responded: bool | None = None
+    withdraw_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _check_values(self) -> ConversationStateExpectation:
+        if (
+            self.status is not None
+            and self.status not in {s.value for s in ConversationStateStatus}
+        ):
+            raise ValueError(f"expect_conversation_states の status が不正です: {self.status}")
+        if self.withdraw_reason is not None and self.withdraw_reason not in {
+            r.value for r in ConversationStateWithdrawReason
+        }:
+            raise ValueError(
+                f"expect_conversation_states の withdraw_reason が不正です: {self.withdraw_reason}"
+            )
+        return self
+
+
 class ReflectionSpec(BaseModel):
     """会話の終わりに振り返りを流し、候補を確かめる。"""
 
@@ -164,6 +208,8 @@ _SAY_FIELDS = {
     "expect_any",
     "expect_none",
     "expect_not_repeating",
+    "expect_no_new_question",
+    "expect_conversation_states",
 }
 _REFLECT_FIELDS = {
     "accept",
@@ -224,6 +270,15 @@ class StepSpec(BaseModel):
     expect_any: list[str] = Field(default_factory=list)
     expect_none: list[str] = Field(default_factory=list)
     expect_not_repeating: bool = False
+    # v0.2 PR2（計画 §7）。相手の質問（question_to_yui）が open のときは、
+    # 答えと新しい質問を機械判定で分けられないため対象外にする
+    # （実装側もこの場合は定型へ落とさない。設計 §4 手順6）。
+    expect_no_new_question: bool = False
+    # 会話状態（conversation_states）の条件。kind ごとに1件以上の条件を書く。
+    # 空リストは「その種類の行が無いこと」を意味する。
+    expect_conversation_states: dict[str, list[ConversationStateExpectation]] = Field(
+        default_factory=dict
+    )
     human_check: str | None = None
 
     # reflect
@@ -271,6 +326,10 @@ class StepSpec(BaseModel):
         for word, value in self.expect_provenance.items():
             if value not in known_provenance:
                 raise ValueError(f"expect_provenance が不正です: {word} → {value}")
+        known_state_kinds = {k.value for k in ConversationStateKind}
+        for kind in self.expect_conversation_states:
+            if kind not in known_state_kinds:
+                raise ValueError(f"expect_conversation_states の kind が不正です: {kind}")
         if self.kind == "say" and not self.text:
             raise ValueError("say には text が要ります。")
         if self.kind in {"correct_memory", "delete_memory"} and not self.match:
@@ -355,6 +414,8 @@ class Scenario(BaseModel):
                 or step.expect_similar_marked
                 or step.expect_occurred_at
                 or step.expect_provenance
+                or step.expect_no_new_question
+                or step.expect_conversation_states
             ):
                 return True
         return False

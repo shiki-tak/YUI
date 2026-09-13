@@ -549,22 +549,24 @@ def test_a_reply_that_is_not_japanese_fails() -> None:
 
     spec = StepSpec(kind="say", text="こんばんは")
 
-    ok = _check_turn(spec, "こんばんは。今日はいい天気でしたね。", [], [], [])
+    ok = _check_turn(spec, "こんばんは。今日はいい天気でしたね。", [], [], [], [], {})
     assert all(check.ok for check in ok)
 
-    mixed = _check_turn(spec, "印象に残ったのは什么呢？", [], [], [])
+    mixed = _check_turn(spec, "印象に残ったのは什么呢？", [], [], [], [], {})
     assert [c.ok for c in mixed] == [False]
 
-    whole = _check_turn(spec, "开发者的前辈，晚上好呀。最近我对摄影里的构图特别着迷。", [], [], [])
+    whole = _check_turn(
+        spec, "开发者的前辈，晚上好呀。最近我对摄影里的构图特别着迷。", [], [], [], [], {}
+    )
     assert [c.ok for c in whole] == [False]
 
     # 日本語の漢字は落とさない。日中で共通の字が多いため。
-    kanji = _check_turn(spec, "紅茶を飲みながら開発の話をしました。", [], [], [])
+    kanji = _check_turn(spec, "紅茶を飲みながら開発の話をしました。", [], [], [], [], {})
     assert all(check.ok for check in kanji)
 
     # 一覧に無い字だけで書かれた中国語も落とす。仮名が無く、中国語の句読点を
     # 使っていることで見る。字の一覧だけでは素通り。
-    no_kana = _check_turn(spec, "你好，我很高兴和你聊天。", [], [], [])
+    no_kana = _check_turn(spec, "你好，我很高兴和你聊天。", [], [], [], [], {})
     assert [c.ok for c in no_kana] == [False]
 
     # **仮名が無いことだけでは落とさない**。住所や
@@ -574,7 +576,7 @@ def test_a_reply_that_is_not_japanese_fails() -> None:
         "東京都千代田区丸の内一丁目九番一号",
         "日本国憲法第九条改正反対運動",
     ):
-        checks = _check_turn(spec, kanji_only, [], [], [])
+        checks = _check_turn(spec, kanji_only, [], [], [], [], {})
         assert all(check.ok for check in checks), kanji_only
 
 
@@ -605,7 +607,7 @@ def test_plain_japanese_replies_are_not_flagged() -> None:
         "級友との約束は、実現できたら教えてくださいね。",
     ]
     for reply in actual_replies:
-        checks = _check_turn(spec, reply, [], [], [])
+        checks = _check_turn(spec, reply, [], [], [], [], {})
         assert all(check.ok for check in checks), reply
 
 
@@ -656,3 +658,42 @@ def test_expect_provenance_is_checked_against_the_candidate() -> None:
 
     with pytest.raises(ValueError, match="expect_provenance が不正です"):
         StepSpec(kind="reflect", expect_provenance={"弟": "聞いた話"})
+
+
+def test_expect_no_new_question_uses_the_implementations_own_judgement() -> None:
+    """`expect_no_new_question` の「対象外」分岐は、評価器が会話状態から
+    独自に計算するのではなく、実装（conversation.py）がそのターンで実際に
+    下した判定（`RunRecord.options["checks"]`）をそのまま見る。
+
+    ターン完了後の会話状態には、その返答自身が `question_to_yui.responded`
+    を埋めた後の値しか残っておらず、評価器が独自に「未応答の質問があるか」
+    を計算すると、相手が質問したターンでは常に「無い」に見えてしまい、
+    「対象外」に決して到達できない（codex レビュー v0.2 PR2・Warning 2）。
+    """
+    from app.evaluation.runner import _check_turn
+    from app.evaluation.scenario import StepSpec
+
+    spec = StepSpec(kind="say", text="そろそろ寝るね", expect_no_new_question=True)
+    reply_with_question = "承知しました。ところでそちらはどうでしたか？"
+
+    # 実装が「相手の質問が残っているため対象外」と判定したターンでは、
+    # 返答に質問が残っていても失敗にしない。
+    unresolved = {c.name: c for c in _check_turn(
+        spec, reply_with_question, [], [], [], [],
+        {"closing_unresolved_due_to_open_question": True},
+    )}
+    assert unresolved["新しい質問が無い"].ok
+    assert "対象外" in unresolved["新しい質問が無い"].detail
+
+    # 対象外でなければ、これまでどおり返答そのものを見て判定する。
+    resolved = {c.name: c for c in _check_turn(
+        spec, reply_with_question, [], [], [], [],
+        {"closing_unresolved_due_to_open_question": False},
+    )}
+    assert not resolved["新しい質問が無い"].ok
+
+    reply_without_question = "承知しました。おやすみなさいませ。"
+    ok = {c.name: c for c in _check_turn(
+        spec, reply_without_question, [], [], [], [], {},
+    )}
+    assert ok["新しい質問が無い"].ok
