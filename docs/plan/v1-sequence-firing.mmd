@@ -1,0 +1,67 @@
+---
+config:
+  theme: neutral
+---
+%% docs/plan/v1.md 「11. シーケンス図」(b) 会話の開始 → 発火 → 完了（§4・§5） の元データ。
+%% images/v1-sequence-firing.png はこれを描画したもの。
+%% 更新するには次を実行する:
+%%   npx -y @mermaid-js/mermaid-cli -i docs/plan/v1-sequence-firing.mmd \
+%%       -o images/v1-sequence-firing.png -b white -s 2
+sequenceDiagram
+    autonumber
+    actor Partner as 相手
+    participant UI as 画面
+    participant API as FastAPI
+    participant Agent as ConversationAgent
+    participant Goal as goal_service / opening(新)
+    participant LLM as Ollama
+    participant DB as SQLite
+    participant VV as VOICEVOX
+
+    UI->>API: POST /conversations/open（新）{speaker}
+    API->>DB: Conversation 作成・Speaker 取得
+    Note over API: conversation_locks.hold の内側
+    API->>Agent: open(partner_ids=[speaker.id], now)
+    Agent->>Goal: due_goals（adopted ∧ partner ∧ window_start ≤ today ∧ asked_at IS NULL）
+    Goal->>DB: SELECT … ORDER BY 在籍期間, 最終発火, window_start
+    DB-->>Goal: 該当する目標
+    Agent->>Goal: select_for_firing（相手ごとに1件 → 全体で N=1）
+    alt 0件
+        Agent-->>API: null
+        API-->>UI: opening = null（何も出さず入力を待つ）
+    else 1件
+        Agent->>Goal: candidate_words（原文から時間表現を除いた語）
+        Agent->>Goal: build_question_messages（構造化入力。content は渡さない）
+        Agent->>LLM: chat（1回だけ。PR2 では呼ばない）
+        LLM-->>Agent: 質問文
+        Agent->>Goal: accept_question（候補語を含むか）
+        alt 通らない
+            Note over Agent: FALLBACK_QUESTION（定型）へ差し替え
+        end
+        rect rgb(238,246,238)
+            Note over Agent,DB: 1トランザクション
+            Agent->>DB: UPDATE goals SET asked_at=:now<br/>WHERE id=:id AND state='adopted' AND asked_at IS NULL
+            DB-->>Agent: 更新行数
+            alt 0 行（別の開始が先に取った / 生成中に dropped）
+                Agent-->>API: null（発話しない）
+            else 1 行
+                Agent->>DB: Message(character, "そういえば、…")<br/>goal.asked_message_id<br/>goal_revisions(asked)<br/>run_records(referenced_goal_ids)
+            end
+        end
+        Agent-->>API: OpeningResult
+        API-->>UI: opening（通常の Message）
+        UI->>API: GET /messages/{id}/speech（既存）
+        API->>VV: 合成
+        VV-->>UI: 音声・字幕
+    end
+
+    Partner->>UI: 返事を入力
+    UI->>API: POST /chat（既存）
+    Note over API: conversation_locks.hold の内側
+    API->>Agent: respond(text, now)
+    Agent->>DB: Message(partner) を flush
+    Agent->>Goal: mark_goals_answered（新）
+    Goal->>DB: UPDATE goals SET done, completed_at<br/>WHERE adopted ∧ partner ∧ asked_message_id ∈ この会話<br/>∧ asked_message_id < 今の発言の id（時刻ではなく順序）
+    Goal->>DB: goal_revisions(done)
+    Note over Agent: 以降は v0.1 と同じ：記憶検索 → build_messages → LLM → 返答<br/>respond() は goals を読まない
+    Agent-->>UI: 返答
