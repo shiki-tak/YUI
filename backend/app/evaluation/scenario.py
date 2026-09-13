@@ -210,6 +210,7 @@ _SAY_FIELDS = {
     "expect_not_repeating",
     "expect_no_new_question",
     "expect_conversation_states",
+    "target",
 }
 _REFLECT_FIELDS = {
     "accept",
@@ -279,6 +280,13 @@ class StepSpec(BaseModel):
     expect_conversation_states: dict[str, list[ConversationStateExpectation]] = Field(
         default_factory=dict
     )
+    # expect_conversation_states を見る対象（speakers の key）。省略時は
+    # この say の話者（speaker）と同じ。複数話者のシナリオで「A への質問が
+    # B の発言では変わらないか」のように、**発言した相手とは別の人**に
+    # 適用された状態を確かめたいときに指定する（計画 §7 シナリオ20。
+    # レビュー指摘：target を分けられないと、この形のシナリオが評価器では
+    # 必ず失敗になる）。
+    target: str | None = None
     human_check: str | None = None
 
     # reflect
@@ -467,6 +475,9 @@ class Scenario(BaseModel):
                 item.speaker = default_speaker
             elif item.speaker not in keys:
                 raise ValueError(f"speaker が speakers にありません: {item.speaker}")
+            target = getattr(item, "target", None)
+            if target is not None and target not in keys:
+                raise ValueError(f"target が speakers にありません: {target}")
             for field_name in ("expect_memories", "expect_not_memories"):
                 for key in getattr(item, field_name):
                     if key not in memory_keys:

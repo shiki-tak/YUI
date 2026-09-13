@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -24,15 +25,20 @@ from app.agent.conversation_state import (
     CLOSING_FALLBACK_SENTENCE,
     CLOSING_REINFORCEMENT_INSTRUCTION,
     apply_character_message_rules,
+    apply_interpretation_result,
     apply_partner_message_rules,
     build_conversation_state_section,
     detect_question,
+    discrepancy_offer_ledger,
+    gather_interpretation_context,
     get_open_states,
     has_open_state,
     has_unanswered_question_to_yui,
     looks_assertive,
     mentioned_deferral_topics,
+    select_discrepancy_offers,
 )
+from app.agent.interpretation import InterpretationError, interpret_conversation
 from app.agent.memory_store import RetrievedMemory, search_memories
 from app.config import Settings
 from app.llm.base import ChatMessage, LLMClient, LLMError
@@ -130,9 +136,92 @@ class ConversationAgent:
         conversation_states = await get_open_states(
             session, conversation_id=conversation.id, target_speaker_id=speaker.id
         )
+
+        # 解釈（LLM。設計 §4 手順3・v0.2 PR3）。既定は無効（計画 §9）。
+        # 失敗（例外・timeout・スキーマ違反）は規則の結果だけで進む——
+        # 解決・取消は起こさない（計画 §8）。
+        interpretation_status: dict[str, object] = {
+            "enabled": self._settings.conversation_state_llm,
+            "attempted": False,
+            "applied": False,
+            "error": None,
+            "summary": None,
+        }
+        if self._settings.conversation_state_llm:
+            pending_ledger = await discrepancy_offer_ledger(
+                session, conversation_id=conversation.id, target_speaker_id=speaker.id
+            )
+            context, candidates = await gather_interpretation_context(
+                session,
+                conversation_id=conversation.id,
+                target_speaker_id=speaker.id,
+                current_message=user_message,
+                history=history,
+                memory_items=[(m.memory.id, m.memory.content) for m in memories],
+                open_states=conversation_states,
+                discrepancy_ledger=pending_ledger,
+                context_messages=self._settings.conversation_state_context_messages,
+            )
+            interpretation_status["attempted"] = True
+
+            # 解釈の呼び出し中は書き込みトランザクションを開いたままにしない。
+            # SQLite は書き込みロックを1つしか持てず、相手の発言・規則由来の
+            # 状態を flush しただけの状態で解釈（timeout 既定10秒）を待つと、
+            # 別の会話の /chat や記憶の訂正が database is locked で失敗する
+            # （既存の「生成前に commit する」と同じ理由。レビューで実測）。
+            # 相手の発言由来の状態はここで確定させてよい（計画 §8）。
+            await session.commit()
+            try:
+                result = await asyncio.wait_for(
+                    interpret_conversation(self._llm, context=context),
+                    timeout=self._settings.conversation_state_llm_timeout_seconds,
+                )
+            except TimeoutError:
+                # str(TimeoutError()) は空文字になる（Python 3.11）。timeout の
+                # 秒数を残さないと、失敗の理由が空欄になって分からない
+                # （計画 §8「失敗はログに残す」。レビュー指摘）。
+                interpretation_status["error"] = (
+                    f"timeout ({self._settings.conversation_state_llm_timeout_seconds}s)"
+                )
+            except (LLMError, InterpretationError) as exc:
+                interpretation_status["error"] = str(exc)
+            else:
+                interpretation_status["summary"] = await apply_interpretation_result(
+                    session,
+                    result,
+                    candidates=candidates,
+                    conversation_id=conversation.id,
+                    target_speaker_id=speaker.id,
+                    speaker_id=speaker.id,
+                    current_message=user_message,
+                )
+                interpretation_status["applied"] = True
+                # 解釈の適用は短い書き込みトランザクションで確定させる
+                # （モデルを呼んでいる間だけ開けないようにする、が要点。
+                # ここは DB だけの操作なので開いていても他会話を止めない）。
+                await session.commit()
+                # 解決・取消・作成が反映された状態で節を作る。
+                conversation_states = await get_open_states(
+                    session, conversation_id=conversation.id, target_speaker_id=speaker.id
+                )
+
+        # 食い違いの確認候補（照合待ちでなく、渡す回数の上限に達していない
+        # もの）を選ぶ。渡した ID は、この返答の RunRecord.options に残し、
+        # 次のターンの解釈が「照合待ち」を判定する台帳にする（計画 §4 手順3）。
+        discrepancy_offers = select_discrepancy_offers(
+            await discrepancy_offer_ledger(
+                session, conversation_id=conversation.id, target_speaker_id=speaker.id
+            ),
+            limit=self._settings.conversation_state_confirm_offer_limit,
+            interpretation_ran=bool(interpretation_status["applied"]),
+        )
+        discrepancy_offer_ids = [state.id for state in discrepancy_offers]
+
         window_message_ids = {message.id for message in history} | {user_message.id}
         conversation_state_section = build_conversation_state_section(
-            conversation_states, window_message_ids=window_message_ids
+            conversation_states,
+            window_message_ids=window_message_ids,
+            discrepancy_offers=discrepancy_offers,
         )
 
         messages, system_prompt = prompt_builder.build_messages(
@@ -241,8 +330,12 @@ class ConversationAgent:
 
         # 検査結果は options に checks の鍵で残す（設計 §4 手順6）。生成設定
         # （response.options）を上書きしないよう、コピーへ足す。
+        # `offered_discrepancy_ids` は次のターンの解釈が「照合待ち」を
+        # 判定する台帳そのもの（新しい表を作らない。計画 §4 手順3）。
         options = dict(response.options)
         options["checks"] = checks
+        options["offered_discrepancy_ids"] = discrepancy_offer_ids
+        options["interpretation"] = interpretation_status
 
         run = RunRecord(
             message_id=reply_message.id,

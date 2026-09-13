@@ -596,10 +596,15 @@ async def run_attempt(
                     )
                     # v0.2：この相手宛の会話状態（全ステータス。expect_conversation_states
                     # は resolved・withdrawn も見られるようにするため、open だけに絞らない）。
+                    # `target` を指定していれば、発言した本人（speaker）ではなく
+                    # その相手に適用された状態を見る（計画 §7 シナリオ20：
+                    # 「A への質問が B の発言では変わらないか」は B の say の
+                    # 後に A 宛の状態を見る形にしかならない。レビュー指摘）。
+                    state_target = step.target or step.speaker
                     conversation_states = await _conversation_states_for_speaker(
                         session,
                         conversation_id=conversation.id,
-                        target_speaker_id=speakers[step.speaker].id,
+                        target_speaker_id=speakers[state_target].id,
                     )
                     attempt.turns.append(
                         TurnResult(

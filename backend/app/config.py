@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     memory_retrieval_limit: int = 8
     recent_message_limit: int = 12
 
+    # v0.2 PR3：会話状態の解釈（LLM）。既定は無効（計画 §9・§11 PR5 で判断）。
+    conversation_state_llm: bool = False
+    conversation_state_llm_timeout_seconds: float = 10.0
+    conversation_state_context_messages: int = 6
+    # 食い違いの確認候補を「確かめてよいこと」として渡す回数の上限。
+    conversation_state_confirm_offer_limit: int = 2
+
     # カンマ区切り。.env に JSON を書かせないため文字列で受ける。
     cors_origins: str = "http://localhost:5173"
 

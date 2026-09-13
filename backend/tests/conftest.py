@@ -16,9 +16,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent import ConversationAgent, get_agent
+from app.agent.interpretation import _INSTRUCTION as INTERPRETATION_INSTRUCTION
 from app.agent.reflection import _PICKUP_INSTRUCTION as PICKUP_INSTRUCTION
 from app.agent.state_reflection import _INSTRUCTION as STATE_INSTRUCTION
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import get_session
 from app.llm import get_llm_client
 from app.llm.base import ChatMessage, LLMClient, LLMResponse
@@ -47,6 +48,9 @@ class FakeLLM(LLMClient):
         # して、テストは「選ぶ」側の出力だけを書けばよいようにする。
         self.pickup_scripted: list[str] = []
         self.pickup_default = '[{"content": "会話に出てきた内容", "source_message_id": null}]'
+        # 会話状態の解釈（v0.2 PR3）も別の呼び出し。既定は「何も無い」。
+        self.interpretation_scripted: list[str] = []
+        self.interpretation_default = "{}"
         # 生成中の状態を再現するための門。gate を待たせると応答待ちになる。
         self.entered = asyncio.Event()
         self.gate: asyncio.Event | None = None
@@ -68,6 +72,10 @@ class FakeLLM(LLMClient):
         """記憶の抽出の1段階目（拾う）が返す内容。"""
         self.pickup_scripted.append(text)
 
+    def push_interpretation(self, text: str) -> None:
+        """会話状態の解釈（v0.2 PR3）が返す内容。"""
+        self.interpretation_scripted.append(text)
+
     @property
     def last_system_prompt(self) -> str:
         return self.calls[-1][0].content
@@ -85,6 +93,12 @@ class FakeLLM(LLMClient):
             text = self.state_scripted.pop(0) if self.state_scripted else self.state_default
         elif messages and messages[0].content == PICKUP_INSTRUCTION:
             text = self.pickup_scripted.pop(0) if self.pickup_scripted else self.pickup_default
+        elif messages and messages[0].content == INTERPRETATION_INSTRUCTION:
+            text = (
+                self.interpretation_scripted.pop(0)
+                if self.interpretation_scripted
+                else self.interpretation_default
+            )
         else:
             text = self.scripted.pop(0) if self.scripted else self.default
         return LLMResponse(
@@ -169,6 +183,39 @@ async def client(
                 raise
 
     agent = ConversationAgent(llm=fake_llm, persona=load_persona(), settings=get_settings())
+    app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[get_agent] = lambda: agent
+    app.dependency_overrides[get_llm_client] = lambda: fake_llm
+    app.dependency_overrides[get_speech_client] = lambda: fake_speech
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+        yield http_client
+
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def interpretation_client(
+    session_factory: async_sessionmaker, fake_llm: FakeLLM, fake_speech: FakeSpeech
+) -> AsyncIterator[AsyncClient]:
+    """`client` と同じだが、会話状態の解釈（v0.2 PR3）を有効にする。
+
+    `get_settings()` は `lru_cache` で共有されるため、既定値を変えずに
+    このテストだけ有効にするには、別の `Settings` を作って渡す。
+    """
+
+    async def override_session():
+        async with session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    settings = Settings(conversation_state_llm=True)
+    agent = ConversationAgent(llm=fake_llm, persona=load_persona(), settings=settings)
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_agent] = lambda: agent
     app.dependency_overrides[get_llm_client] = lambda: fake_llm

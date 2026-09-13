@@ -1,5 +1,7 @@
-# 会話理解と修復（計画 docs/plan/v0.2.md §7）。PR2 が必須にする 1〜4・6・8・19。
-# 5・7・9〜18・20〜24 は解釈（LLM）が要るため PR3 以降で追加する。
+# 会話理解と修復（計画 docs/plan/v0.2.md §7）。1〜4・6・8・19 は PR2 が必須に
+# する規則だけのシナリオ。5・7・9〜18・20〜23 は PR3 が追加した、解釈（LLM）
+# が要るシナリオ（`--conversation-state-llm` を付けないと解釈が起きない）。
+# シナリオ24は実モデルでは再現できないため pytest 側で確認する。
 
 [[scenario]]
 id = "closing-sleep-ends-without-new-question"
@@ -147,3 +149,394 @@ expect_any = ["散歩"]
 kind = "say"
 text = "ごめん、もう一回説明してくれる？"
 human_check = "同じ言い回しの丸写しではなく、言い換えて説明し直しているか"
+
+
+# --- v0.2 PR3：解釈（LLM）が要る種類（計画 §7 シナリオ 5・7・9〜18・20〜23） ---
+# `--conversation-state-llm` を付けて流さないと解釈が起きず、機械判定は
+# 「行が無い」側にしか通らない（request/correction/discrepancy/confirmed は
+# 解釈でしか作られない。計画 3節）。シナリオ24（解釈の1回失敗をモックする）
+# は実モデルでは再現できないため pytest 側で確認する
+# （tests/test_interpretation.py の該当テスト）。
+
+[[scenario]]
+id = "closing-reopened-when-partner-continues"
+aspect = "conversation_state"
+description = "終了の合図の後、相手が明示的に続けたら closing が reopened になり、通常どおり応じるか（計画 §7 シナリオ5）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "そろそろ寝るね"
+
+[[scenario.steps]]
+kind = "say"
+text = "あ、やっぱりもう少し話したいことがあった"
+human_check = "終了した雰囲気のまま素っ気なく返していないか。普通に話を続けているか"
+
+[scenario.steps.expect_conversation_states]
+closing = [{ status = "withdrawn", withdraw_reason = "reopened" }]
+
+[[scenario]]
+id = "deferral-reopened-when-topic-is-resumed"
+aspect = "conversation_state"
+description = "延期した話題を相手が明示的に再開したら deferral が reopened になるか（計画 §7 シナリオ7）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "映画の話はまた今度にしよう"
+
+[[scenario.steps]]
+kind = "say"
+text = "やっぱり今、映画の話をしてもいい？"
+human_check = "延期した話題に、普通に応じているか"
+
+[scenario.steps.expect_conversation_states]
+deferral = [{ status = "withdrawn", withdraw_reason = "reopened" }]
+
+[[scenario]]
+id = "question-answered-then-resolved-a"
+aspect = "conversation_state"
+description = "相手の質問に答えた後、次の say で resolved になるか（計画 §7 シナリオ9）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "好きな食べ物ってある？"
+human_check = "質問にきちんと答えているか"
+
+[[scenario.steps]]
+kind = "say"
+text = "そうなんだ"
+
+[scenario.steps.expect_conversation_states]
+question_to_yui = [{ status = "resolved" }]
+
+[[scenario]]
+id = "question-answered-then-resolved-b"
+aspect = "conversation_state"
+description = "相手の質問に答えた後、次の say で resolved になるか（計画 §7 シナリオ10。別の質問文で確認）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "週末って何か予定ある？"
+human_check = "質問にきちんと答えているか"
+
+[[scenario.steps]]
+kind = "say"
+text = "了解"
+
+[scenario.steps.expect_conversation_states]
+question_to_yui = [{ status = "resolved" }]
+
+[[scenario]]
+id = "missed-answer-gets-followup-then-resolved"
+aspect = "conversation_state"
+description = """相手の質問にYUIが答え損ねたら followup_needed になり、
+次の返答で答えれば resolved になって followup_needed が下りるか
+（計画 §7 シナリオ11）。YUIの返答は実モデルに任せるため、答え損ねるかは
+確定しない。答え損ねなければ1つ目の say で resolved になってよい。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "ねえ、明日の集合場所ってどこだっけ？ あと今日すごく疲れたよ"
+human_check = "集合場所の質問に答えているか。答えていなければ、次のやり取りで答え直すか"
+
+[[scenario.steps]]
+kind = "say"
+text = "そうなんだ、お疲れさま"
+human_check = "前の質問への答えが必要なら、ここで答えているか"
+
+[[scenario.steps]]
+kind = "say"
+text = "ありがとう"
+
+[scenario.steps.expect_conversation_states]
+question_to_yui = [{ status = "resolved", followup_needed = false }]
+
+[[scenario]]
+id = "yui-question-clarified-then-answered"
+aspect = "conversation_state"
+description = """YUIの質問に相手が聞き返し、その後で答えたら、聞き返しの後は
+open のまま responded が入り、答えた後の say で resolved になるか
+（計画 §7 シナリオ12）。YUI がどんな質問をするかは実モデルに任せる。"""
+
+[[scenario.steps]]
+kind = "say"
+text = "最近、何か新しいことに挑戦した？"
+human_check = "相手に何か質問を返しているか"
+
+[[scenario.steps]]
+kind = "say"
+text = "え、何のこと？"
+human_check = "聞き返しに答え直しているか"
+
+[[scenario.steps]]
+kind = "say"
+text = "ああ、なるほどね。実は最近ジョギングを始めたよ"
+
+[[scenario]]
+id = "explicit-correction-is-adopted-without-confirmation"
+aspect = "conversation_state"
+description = "明示的な訂正は確認せずに correction を作り、以後は訂正後の内容で扱うか（計画 §7 シナリオ13）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "土曜に映画に行くよ"
+
+[[scenario.steps]]
+kind = "say"
+text = "ごめん、土曜じゃなくて日曜だった"
+human_check = "訂正をそのまま受け止めているか。「本当に日曜ですか？」のように確認し直していないか"
+
+[scenario.steps.expect_conversation_states]
+correction = [{ status = "open", contains = ["日曜"] }]
+discrepancy = []
+
+[[scenario.steps]]
+kind = "say"
+text = "映画、何時からだっけ？"
+expect_any = ["日曜"]
+expect_none = ["土曜"]
+human_check = "日曜の予定として答えているか。土曜のままにしていないか"
+
+[[scenario]]
+id = "correction-does-not-trigger-reconfirmation"
+aspect = "conversation_state"
+description = "訂正した後、同じ古い情報が話題に出ても再確認しない・discrepancy を作らないか（計画 §7 シナリオ14）。"
+
+[[scenario.memories]]
+key = "old-plan"
+kind = "experience"
+content = "開発者は土曜に映画に行く予定だと話していた"
+certainty = "fact"
+keywords = "映画 土曜 予定"
+
+[[scenario.steps]]
+kind = "say"
+text = "そういえば土曜の映画の予定、覚えてる？"
+expect_memories = ["old-plan"]
+
+[[scenario.steps]]
+kind = "say"
+text = "ごめん、土曜じゃなくて日曜だった"
+
+[[scenario.steps]]
+kind = "say"
+text = "映画、楽しみだな"
+human_check = "土曜だったことを蒸し返して確認し直していないか"
+
+[scenario.steps.expect_conversation_states]
+discrepancy = []
+
+[[scenario]]
+id = "ambiguous-discrepancy-is-confirmed-once"
+aspect = "conversation_state"
+description = """訂正かどうか不明な食い違いは、断定せず1回だけ確かめるか
+（計画 §7 シナリオ15）。asked は確認を発話した直後ではなく、次の相手の
+発言を解釈した後の say で確かめる。"""
+
+[[scenario.memories]]
+key = "plan"
+kind = "experience"
+content = "開発者は土曜に映画に行く予定だと話していた"
+certainty = "fact"
+keywords = "映画 土曜 予定"
+
+[[scenario.steps]]
+kind = "say"
+text = "そういえば映画の予定、覚えてる？"
+expect_memories = ["plan"]
+
+[[scenario.steps]]
+kind = "say"
+text = "あの映画、日曜の回がすごく混みそうだね"
+human_check = """土曜と聞いていたのに日曜と言われて、断定せず確かめているか
+（「土曜ではなかったですか？」等）。相手を疑うような言い方になっていないか"""
+
+[[scenario.steps]]
+kind = "say"
+text = "ああ、うん、日曜で合ってるよ"
+
+[scenario.steps.expect_conversation_states]
+discrepancy = [{ asked = true, responded = true }]
+
+[[scenario]]
+id = "unclear-confirmation-response-stays-open"
+aspect = "conversation_state"
+description = "確認への返答が不明確なら、discrepancy は responded が入ったまま open にとどまり、再質問しないか（計画 §7 シナリオ16）。"
+
+[[scenario.memories]]
+key = "plan"
+kind = "experience"
+content = "開発者は土曜に映画に行く予定だと話していた"
+certainty = "fact"
+keywords = "映画 土曜 予定"
+
+[[scenario.steps]]
+kind = "say"
+text = "そういえば映画の予定、覚えてる？"
+expect_memories = ["plan"]
+
+[[scenario.steps]]
+kind = "say"
+text = "あの映画、日曜の回がすごく混みそうだね"
+
+[[scenario.steps]]
+kind = "say"
+text = "さあ、どうだったかな"
+
+[[scenario.steps]]
+kind = "say"
+text = "映画、楽しみだね"
+human_check = "同じ食い違いをもう一度確かめ直していないか"
+
+[scenario.steps.expect_conversation_states]
+discrepancy = [{ status = "open", responded = true }]
+
+[[scenario]]
+id = "no-discrepancy-in-a-plain-conversation"
+aspect = "conversation_state"
+description = "食い違いの無い会話を5ターン続けても discrepancy を作らないか（計画 §7 シナリオ17。過剰確認の側）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "最近、近所に新しいパン屋ができたんだ"
+
+[[scenario.steps]]
+kind = "say"
+text = "クロワッサンがすごく美味しかった"
+
+[[scenario.steps]]
+kind = "say"
+text = "今度は違う種類のパンも試してみようと思う"
+
+[[scenario.steps]]
+kind = "say"
+text = "お店の人も感じが良くてね"
+
+[[scenario.steps]]
+kind = "say"
+text = "また今度、感想を話すね"
+
+[scenario.steps.expect_conversation_states]
+discrepancy = []
+
+[[scenario]]
+id = "bare-acknowledgement-does-not-create-confirmed"
+aspect = "conversation_state"
+description = "「うん」とだけ返す相づちからは confirmed を作らないか（計画 §7 シナリオ18）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "最近、近所に新しいパン屋ができたんだ"
+
+[[scenario.steps]]
+kind = "say"
+text = "うん"
+
+[scenario.steps.expect_conversation_states]
+confirmed = []
+
+[[scenario]]
+id = "question-to-partner-is-isolated-by-speaker"
+aspect = "conversation_state"
+description = "AへのYUIの質問は、Bが発言しても responded も resolved も入らないか（計画 §7 シナリオ20。PR1のpytestと対になる評価器側の確認）。"
+
+[[scenario.speakers]]
+key = "a"
+external_id = "eval-pr3-a"
+display_name = "Aさん"
+
+[[scenario.speakers]]
+key = "b"
+external_id = "eval-pr3-b"
+display_name = "Bさん"
+
+[[scenario.steps]]
+kind = "say"
+speaker = "a"
+text = "最近、近所に新しいパン屋ができたんだ"
+human_check = "Aさんに何か質問を返しているか"
+
+[[scenario.steps]]
+kind = "say"
+speaker = "b"
+text = "私は最近、新しい靴を買ったよ"
+# A への質問は B の発言では変わらないので、B の say の後でも A 宛の
+# 状態を見る（レビュー指摘：省略すると B 宛の状態を見てしまい必ず失敗する）。
+target = "a"
+
+[scenario.steps.expect_conversation_states]
+question_to_partner = [{ status = "open", responded = false }]
+
+[[scenario]]
+id = "discrepancy-not-asked-when-yui-stays-silent-about-it"
+aspect = "conversation_state"
+description = "食い違いを渡してもYUIがそれについて発話しなければ asked は入らず、次の相手の発言でも responded は入らないか（計画 §7 シナリオ21）。"
+
+[[scenario.memories]]
+key = "plan"
+kind = "experience"
+content = "開発者は土曜に映画に行く予定だと話していた"
+certainty = "fact"
+keywords = "映画 土曜 予定"
+
+[[scenario.steps]]
+kind = "say"
+text = "そういえば映画の予定、覚えてる？"
+expect_memories = ["plan"]
+
+[[scenario.steps]]
+kind = "say"
+text = "あの映画、日曜の回がすごく混みそうだね"
+human_check = "食い違いに触れているか、触れていないかを読む（次の判定の材料）"
+
+[[scenario.steps]]
+kind = "say"
+text = "そういえば、最近見た映画の話をしてもいい？"
+human_check = "前の返答が食い違いに触れていなかった場合、asked が入っていないことと合わせて読む"
+
+[[scenario]]
+id = "discrepancy-not-asked-when-yui-asks-about-something-else"
+aspect = "conversation_state"
+description = "食い違いを渡してもYUIが別の話題について質問したら、asked は入らないか（計画 §7 シナリオ23）。"
+
+[[scenario.memories]]
+key = "plan"
+kind = "experience"
+content = "開発者は土曜に映画に行く予定だと話していた"
+certainty = "fact"
+keywords = "映画 土曜 予定"
+
+[[scenario.steps]]
+kind = "say"
+text = "そういえば映画の予定、覚えてる？ あと最近引っ越しを考えてるんだ"
+expect_memories = ["plan"]
+human_check = "映画の予定と引っ越しの話、両方に触れているか"
+
+[[scenario.steps]]
+kind = "say"
+text = "日曜の回、混みそうだよね"
+human_check = "「食い違いを確かめる質問」ではなく「別の話題（引っ越し等）についての質問」だけをしていた場合、asked に入らないことと合わせて読む"
+
+[[scenario]]
+id = "newer-correction-supersedes-the-older-one"
+aspect = "conversation_state"
+description = "「日曜」の訂正の後に「やっぱり月曜」と言われたら、古い correction が superseded になり、新しい行が有効になるか（計画 §7 シナリオ22）。"
+
+[[scenario.steps]]
+kind = "say"
+text = "土曜に映画に行くよ"
+
+[[scenario.steps]]
+kind = "say"
+text = "ごめん、土曜じゃなくて日曜だった"
+
+[[scenario.steps]]
+kind = "say"
+text = "ああ、日曜でもなくて、やっぱり月曜だった"
+human_check = "月曜として受け止め直しているか"
+
+[scenario.steps.expect_conversation_states]
+correction = [
+  { status = "open", contains = ["月曜"] },
+  { status = "withdrawn", withdraw_reason = "superseded", contains = ["日曜"] },
+]

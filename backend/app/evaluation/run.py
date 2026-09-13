@@ -46,6 +46,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--aspect", default=None, help="観点で絞る（memory / grounding / persona / …）"
     )
+    parser.add_argument(
+        "--conversation-state-llm",
+        action="store_true",
+        help=(
+            "会話状態の解釈（LLM）を有効にして流す（v0.2 PR3。既定は無効のまま。"
+            "計画 §7 のシナリオ 5・7・9〜18・20〜24 はこれが無いと解釈が起きない）"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -70,6 +78,8 @@ def _progress(scenario: Scenario, attempt: int, repeat: int) -> None:
 
 async def _run(args: argparse.Namespace, llm: LLMClient) -> Path:
     settings = get_settings()
+    if args.conversation_state_llm:
+        settings = settings.model_copy(update={"conversation_state_llm": True})
     persona = load_persona(args.persona_version)
     scenarios = _select(load_scenarios(args.scenarios), args)
 

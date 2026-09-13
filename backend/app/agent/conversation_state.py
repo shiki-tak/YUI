@@ -5,28 +5,34 @@
 質問も食い違いも解決にならない。解決・取消は解釈（LLM）か開発者の操作でだけ
 起き、規則は「作る」と「応答があった」しか記録しない。
 
-この PR1 では規則（辞書・正規表現）だけを使う。`request` / `confirmed` /
-`correction` / `discrepancy` の作成、解決、取消は解釈でしか起きないため、
-この版の respond() からは呼ばれない。ただし種類ごとの重複制約
-（`can_create_discrepancy`、`create_or_supersede_correction`）はここに置き、
-PR3 が呼び出す形にしておく。
+PR1 は規則（辞書・正規表現）だけを使う。PR3 で解釈（LLM）の呼び出し
+（`interpretation.py`）と、その結果の検証・適用（`apply_interpretation_result`）
+をここに足した。`request` / `confirmed` / `correction` / `discrepancy` の
+作成と、すべての解決・取消は解釈か開発者の操作でしか起きない
+（計画 docs/plan/v0.2.md 3節）。
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.interpretation import InterpretationResult, RefPayload
 from app.models import (
     ConversationState,
     ConversationStateKind,
+    ConversationStateRefKind,
     ConversationStateStatus,
     ConversationStateWithdrawReason,
+    DecisionSource,
     DetectionSource,
     Message,
+    RunRecord,
+    SpeakerKind,
     utcnow,
 )
 
@@ -425,6 +431,81 @@ async def create_or_supersede_correction(
     )
 
 
+async def get_open_request(
+    session: AsyncSession, *, conversation_id: int, target_speaker_id: int | None
+) -> ConversationState | None:
+    """開いている `request`（今の用件）。`ref_kind`／`ref_id` を持たないため、
+    `get_open_state_for_ref` ではなく専用に引く（計画 3節）。
+    """
+    stmt = select(ConversationState).where(
+        ConversationState.conversation_id == conversation_id,
+        ConversationState.kind == ConversationStateKind.REQUEST.value,
+        ConversationState.status == ConversationStateStatus.OPEN.value,
+    )
+    if target_speaker_id is not None:
+        stmt = stmt.where(ConversationState.target_speaker_id == target_speaker_id)
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def create_or_supersede_request(
+    session: AsyncSession,
+    *,
+    conversation_id: int,
+    target_speaker_id: int | None,
+    content: str,
+    source_message_id: int,
+    speaker_id: int | None,
+    decided_by: str,
+) -> ConversationState:
+    """今の用件を採用する。用件が変わっていれば古い行を `superseded` にする
+    （計画 3節：「用件が変わった（新しい request を作り、古いものを
+    superseded）」）。**同じ内容なら作り直さない**——解釈のたびに同じ用件が
+    返ると行が積み上がるため（設計に明記は無いが、`presented` と同じ理由で
+    無駄な行を増やさない判断）。
+    """
+    existing = await get_open_request(
+        session, conversation_id=conversation_id, target_speaker_id=target_speaker_id
+    )
+    truncated = content[:CONTENT_LIMIT]
+    if existing is not None:
+        if existing.content == truncated:
+            return existing
+        await withdraw_state(
+            session,
+            existing,
+            reason=ConversationStateWithdrawReason.SUPERSEDED.value,
+            decided_by=decided_by,
+            resolved_message_id=source_message_id,
+        )
+    return await create_state(
+        session,
+        conversation_id=conversation_id,
+        kind=ConversationStateKind.REQUEST.value,
+        content=truncated,
+        source_message_id=source_message_id,
+        speaker_id=speaker_id,
+        target_speaker_id=target_speaker_id,
+        detected_by=DetectionSource.LLM.value,
+    )
+
+
+async def _has_confirmed(
+    session: AsyncSession, *, conversation_id: int, target_speaker_id: int | None, presented_id: int
+) -> bool:
+    """同じ相手・同じ `presented` への `confirmed` が既にあるか（重複制約。
+    計画 3節）。`confirmed` は解決・取消が無いため、状態を問わず全件を見る。
+    """
+    stmt = select(ConversationState).where(
+        ConversationState.conversation_id == conversation_id,
+        ConversationState.kind == ConversationStateKind.CONFIRMED.value,
+        ConversationState.ref_kind == ConversationStateRefKind.STATE.value,
+        ConversationState.ref_id == presented_id,
+    )
+    if target_speaker_id is not None:
+        stmt = stmt.where(ConversationState.target_speaker_id == target_speaker_id)
+    return (await session.execute(stmt)).scalars().first() is not None
+
+
 # --- respond() から呼ぶ、規則だけの適用 --------------------------------------
 
 
@@ -572,8 +653,8 @@ def has_open_state(states: list[ConversationState], *, kind: str) -> bool:
 
 
 def has_unanswered_question_to_yui(states: list[ConversationState]) -> bool:
-    """まだ答えていない相手の質問があるか（設計 §3・`build_conversation_state_section`
-    と同じ条件：`open` かつ `responded_message_id` が空）。
+    """まだ答えるべき相手の質問があるか（`open` かつ、一度も応答していない
+    か、答え損ねたと判定済み（`followup_needed`）のもの）。
 
     PR1・PR2 は解決を作らないため、一度答えた question_to_yui も `status` は
     `open` のまま残る（PR3 の解釈まで）。`has_open_state(kind=QUESTION_TO_YUI)`
@@ -581,15 +662,19 @@ def has_unanswered_question_to_yui(states: list[ConversationState]) -> bool:
     ずっと真になり、closing の定型への差し替えが実運用でほぼ働かなくなる
     （レビューで実測）。
 
+    **`followup_needed` も「答えるべき質問」に含める。** PR3 で解釈が
+    「答え損ねた」と判定した質問（`responded_message_id` は入っている）を
+    含めないと、closing の定型文がその答えを潰してしまう
+    （計画 §3「答え損ねた質問（次で答える）」。レビュー指摘）。
+
     `status` も明示的に見る。呼び出し元（`conversation.py`）は `get_open_states`
     で絞り込み済みの一覧しか渡さないため実害は無いが、`withdrawn`／`expired`
-    （PR3 以降）を含む一覧を渡す呼び出し元が増えても壊れないようにする
-    （レビュー指摘）。
+    を含む一覧を渡す呼び出し元が増えても壊れないようにする（レビュー指摘）。
     """
     return any(
         state.kind == ConversationStateKind.QUESTION_TO_YUI.value
         and state.status == ConversationStateStatus.OPEN.value
-        and state.responded_message_id is None
+        and (state.responded_message_id is None or state.followup_needed)
         for state in states
     )
 
@@ -628,15 +713,32 @@ RESPONDED_QUESTION_LIMIT = 5
 
 
 def build_conversation_state_section(
-    states: list[ConversationState], *, window_message_ids: set[int]
+    states: list[ConversationState],
+    *,
+    window_message_ids: set[int],
+    discrepancy_offers: list[ConversationState] | None = None,
 ) -> str:
     """「# この会話で」の節（設計 §4 手順5）。
 
-    PR1 の時点では規則だけが作る種類（question_to_yui / question_to_partner /
-    deferral / closing / presented）だけを扱う。`request` / `correction` /
-    `discrepancy`（訂正・確認）は解釈が要るため PR3 で節に足す。
+    `request`／`correction`（解釈が作る）と、`discrepancy` の確認候補
+    （`discrepancy_offers`。呼び出し側が渡す回数の上限とあわせて選ぶ。
+    PR3）を、規則だけの種類（question_to_yui / question_to_partner /
+    deferral / closing / presented）に足す。**訂正は「思い出せること」より
+    前に置く**（設計 §4 手順5の例の並びどおり。記憶より優先すると書く）。
     """
     lines: list[str] = []
+
+    request = next(
+        (state for state in states if state.kind == ConversationStateKind.REQUEST.value), None
+    )
+    if request is not None:
+        lines.append(f"- 相手の今の用件：{request.content}")
+
+    for state in states:
+        if state.kind == ConversationStateKind.CORRECTION.value:
+            lines.append(
+                f"- 相手の訂正（記憶より優先する）：この会話では「{state.content}」として扱う"
+            )
 
     # 生成失敗（503）後に相手が同じ質問を再送すると、規則は重複制約を
     # 置かないため同じ本文の question_to_yui が複数件できうる。節では
@@ -646,12 +748,21 @@ def build_conversation_state_section(
         if (
             state.kind == ConversationStateKind.QUESTION_TO_YUI.value
             and state.responded_message_id is None
+            and not state.followup_needed
             and state.content not in seen_unanswered
         ):
             seen_unanswered.add(state.content)
             lines.append(f"- まだ答えていない相手の質問：「{state.content}」")
-            # responded が入っていて未判定のものは、答え損ねと決まっていない
-            # ので渡さない（followup_needed は PR3 が立てる）。
+
+    seen_followup: set[str] = set()
+    for state in states:
+        if (
+            state.kind == ConversationStateKind.QUESTION_TO_YUI.value
+            and state.followup_needed
+            and state.content not in seen_followup
+        ):
+            seen_followup.add(state.content)
+            lines.append(f"- 答え損ねた相手の質問（次で答える）：「{state.content}」")
 
     seen_waiting: set[str] = set()
     for state in states:
@@ -699,6 +810,11 @@ def build_conversation_state_section(
             "自分から新しい質問や用件を出さず、相手の依頼には答えて短く締める"
         )
 
+    for state in discrepancy_offers or []:
+        lines.append(
+            f"- 確かめてよいこと（一度だけ）：「{state.content}」。断定せず確かめる"
+        )
+
     presented = [
         state
         for state in states
@@ -711,3 +827,591 @@ def build_conversation_state_section(
     if not lines:
         return ""
     return "\n".join(["# この会話で", *lines])
+
+
+# --- 解釈（LLM）への入力集め（v0.2 PR3） ------------------------------------
+#
+# 規則だけでは「作った」「応答があった」までしか分からない。ここから先の
+# 「答えたか」「確認できたか」「明示的な訂正か」は、次の情報を渡して解釈に
+# 決めてもらう：①判定対象の質問とその応答候補、②確認待ちの食い違いと、
+# それを渡したときの YUI の返答、③開いている会話状態、④参照できる記憶。
+
+
+async def find_judgment_candidate(
+    session: AsyncSession, state: ConversationState, *, conversation_id: int
+) -> Message | None:
+    """この質問の、まだ判定していない応答候補（計画 §4 手順3）。
+
+    `responded_message_id` は**最初の**応答しか記録しない（規則は答えの
+    質を判定できないため）。`judged_message_id` が空なら、その最初の応答
+    自体がまだ判定していない候補になる。答え損ねの後に新しい返答が来た
+    場合など、2件目以降の候補は `judged_message_id` より新しい、応答した
+    側の発言を履歴から探す。
+
+    `question_to_yui`（相手が聞き、YUI が答える）は YUI の発言、
+    `question_to_partner`（YUI が聞き、相手が答える）はその相手の発言を見る。
+    """
+    if state.judged_message_id is None:
+        if state.responded_message_id is None:
+            return None
+        return await session.get(Message, state.responded_message_id)
+
+    stmt = select(Message).where(
+        Message.conversation_id == conversation_id, Message.id > state.judged_message_id
+    )
+    if state.kind == ConversationStateKind.QUESTION_TO_YUI.value:
+        stmt = stmt.where(Message.speaker_kind == SpeakerKind.CHARACTER.value)
+    else:
+        stmt = stmt.where(
+            Message.speaker_kind == SpeakerKind.USER.value,
+            Message.speaker_id == state.target_speaker_id,
+        )
+    stmt = stmt.order_by(Message.id.desc()).limit(1)
+    return (await session.execute(stmt)).scalars().first()
+
+
+@dataclass
+class DiscrepancyOffer:
+    """1件の食い違いについて、これまで何回・いつ「確かめてよいこと」として
+    渡したか（計画 3節：渡す回数の上限、照合待ちの扱い）。
+    """
+
+    state: ConversationState
+    offer_count: int
+    # 渡した後、解釈が一度も成功して走っていなければ、渡したときの YUI の
+    # 返答。解釈が成功して走っていれば（確かめられなかった場合も含め）
+    # None——確かめる機会は既にあったので、渡す回数の上限内なら再び渡せる。
+    pending_reply: Message | None
+
+
+async def discrepancy_offer_ledger(
+    session: AsyncSession, *, conversation_id: int, target_speaker_id: int | None
+) -> dict[int, DiscrepancyOffer]:
+    """開いていて未確認（`asked` が空）の食い違いごとに、渡した回数と
+    「直前に渡したばかりか」を、会話の実行記録（`RunRecord.options` の
+    `offered_discrepancy_ids`）から数える。**新しい表は作らない**
+    （計画 §4 手順3：「`RunRecord.options` の記録から引く」）。
+    """
+    unasked = [
+        state
+        for state in await get_open_states(
+            session,
+            conversation_id=conversation_id,
+            target_speaker_id=target_speaker_id,
+            kind=ConversationStateKind.DISCREPANCY.value,
+        )
+        if state.asked_message_id is None
+    ]
+    if not unasked:
+        return {}
+    tracked_ids = {state.id for state in unasked}
+
+    # `options` だけを読む。`RunRecord.system_prompt` は Text で数KB/行あり、
+    # 未確認の食い違いが残る長い会話ではターンごとに全件読み直すことになる
+    # ため、要らない列を取ってこない（レビュー指摘）。
+    stmt = (
+        select(RunRecord.options, Message.id)
+        .join(Message, RunRecord.message_id == Message.id)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(RunRecord.id)
+    )
+    rows = list((await session.execute(stmt)).all())
+
+    counts: dict[int, int] = {}
+    last_offer_index: dict[int, int] = {}
+    for index, (options, _message_id) in enumerate(rows):
+        for state_id in (options or {}).get("offered_discrepancy_ids") or []:
+            if state_id in tracked_ids:
+                counts[state_id] = counts.get(state_id, 0) + 1
+                last_offer_index[state_id] = index
+
+    def pending_message_id(state_id: int) -> int | None:
+        """渡した後、解釈が実際に確かめる機会を一度も得ていなければ、その
+        渡した返答の id を返す（照合待ち）。**「直前の返答だけ」ではない**
+        ——渡した後の解釈が失敗し続ける限り、何ターン後でも照合待ちのまま
+        （計画 §8「例外・timeout・失敗のときは照合待ちを保持し、再提示
+        しない」）。解釈が一度でも成功して走れば（結果に含まれなくても）、
+        確かめる機会はあったとして照合待ちを解く。
+        """
+        index = last_offer_index.get(state_id)
+        if index is None:
+            return None
+        for options, _ in rows[index + 1 :]:
+            if ((options or {}).get("interpretation") or {}).get("applied"):
+                return None
+        return rows[index][1]
+
+    ledger: dict[int, DiscrepancyOffer] = {}
+    for state in unasked:
+        message_id = pending_message_id(state.id)
+        pending_reply = await session.get(Message, message_id) if message_id is not None else None
+        ledger[state.id] = DiscrepancyOffer(
+            state=state, offer_count=counts.get(state.id, 0), pending_reply=pending_reply
+        )
+    return ledger
+
+
+def select_discrepancy_offers(
+    ledger: dict[int, DiscrepancyOffer], *, limit: int, interpretation_ran: bool = False
+) -> list[ConversationState]:
+    """今のターンで新しく「確かめてよいこと」として渡してよい食い違い。
+
+    渡す回数の上限に達したものは除く（計画 3節・8節）。**照合待ち**
+    （直前の返答で渡したばかりで、まだ確かめられていない）ものも、今の
+    ターンの解釈が実際に走って確かめる機会があった場合は除かない——
+    `interpretation_ran` が真のとき、解釈は既にこの食い違いを候補として
+    受け取り、確認できなかったと分かっている（計画 §8「例外・timeout・
+    解析失敗のときだけ照合待ちのまま保持し、再提示しない」。成功して
+    確かめられなかった場合はこの限りではない）。
+    """
+    return [
+        offer.state
+        for offer in ledger.values()
+        if offer.offer_count < limit and (offer.pending_reply is None or interpretation_ran)
+    ]
+
+
+@dataclass
+class InterpretationCandidates:
+    """解釈に渡した候補。結果の ID・kind・target を検証するのに使う
+    （計画 §4 手順3の検証）。"""
+
+    open_states: dict[int, ConversationState] = field(default_factory=dict)
+    judgment_candidates: dict[int, Message] = field(default_factory=dict)
+    pending_discrepancies: dict[int, Message] = field(default_factory=dict)
+    memory_ids: set[int] = field(default_factory=set)
+    message_ids: set[int] = field(default_factory=set)
+
+
+def _format_open_states(states: list[ConversationState]) -> str:
+    """解釈へ渡す「開いている会話状態」の本文。
+
+    `confirmed` はどの操作の対象にもならない（作られるだけで、以後 ID で
+    参照されない）ため出さない。`presented` は返答のたびに増え、解決・
+    取消が無いので開いたまま溜まり続ける——`confirms_presented_id` の
+    候補として直近の一部だけ見せれば足りる（節と同じ上限。他の種類は件数が
+    自然に絞られるため上限を置かない。レビュー指摘：無制限だと長い会話で
+    解釈への入力が肥大する）。
+    """
+    visible = [
+        state
+        for state in states
+        if state.kind != ConversationStateKind.CONFIRMED.value
+    ]
+    presented = [s for s in visible if s.kind == ConversationStateKind.PRESENTED.value]
+    if len(presented) > PRESENTED_LIMIT:
+        drop = set(presented[:-PRESENTED_LIMIT])
+        visible = [state for state in visible if state not in drop]
+    if not visible:
+        return "開いている会話状態: まだありません。"
+    lines = ["開いている会話状態（id・種類・本文）:"]
+    for state in visible:
+        lines.append(f"- [{state.id}] {state.kind}: {state.content}")
+    return "\n".join(lines)
+
+
+def _format_judgment_candidates(candidates: dict[int, tuple[ConversationState, Message]]) -> str:
+    if not candidates:
+        return "判定対象の質問: まだありません。"
+    lines = ["判定対象の質問（id・質問・応答候補）:"]
+    for state_id, (state, message) in candidates.items():
+        lines.append(f"- [{state_id}] 質問「{state.content}」→ 応答候補「{message.content}」")
+    return "\n".join(lines)
+
+
+def _format_pending_discrepancies(pending: dict[int, tuple[ConversationState, Message]]) -> str:
+    if not pending:
+        return "確認待ちの食い違い: まだありません。"
+    lines = ["確認待ちの食い違い（id・内容・直前に確かめようとした返答）:"]
+    for state_id, (state, message) in pending.items():
+        lines.append(f"- [{state_id}] 「{state.content}」→ 直前の返答「{message.content}」")
+    return "\n".join(lines)
+
+
+def _format_memories(memories: list[tuple[int, str]]) -> str:
+    if not memories:
+        return "参照できる記憶: まだありません。"
+    lines = ["参照できる記憶（id・内容）:"]
+    for memory_id, content in memories:
+        lines.append(f"- [{memory_id}] {content}")
+    return "\n".join(lines)
+
+
+def _format_transcript(history: list[Message], current: Message) -> str:
+    """直近の会話。**各行に発言の id を付ける**——`correction`／`discrepancy`
+    が `ref_kind="message"` を返すとき、対象を指すのに使う id は、記憶・
+    会話状態と同じく本文の前に `[id]` として渡す以外に知る手段が無い
+    （レビューで、id が渡っておらず実モデルでは訂正が検証を通れないことを
+    実測）。
+    """
+    lines = ["直近の会話（id・話者・本文）:"]
+    for message in [*history, current]:
+        who = "YUI" if message.speaker_kind == SpeakerKind.CHARACTER.value else "相手"
+        lines.append(f"- [{message.id}] {who}: {message.content}")
+    return "\n".join(lines)
+
+
+async def gather_interpretation_context(
+    session: AsyncSession,
+    *,
+    conversation_id: int,
+    target_speaker_id: int,
+    current_message: Message,
+    history: list[Message],
+    memory_items: list[tuple[int, str]],
+    open_states: list[ConversationState],
+    discrepancy_ledger: dict[int, DiscrepancyOffer],
+    context_messages: int,
+) -> tuple[str, InterpretationCandidates]:
+    """解釈への入力（本文）と、結果の検証に使う候補集合を組み立てる。
+
+    `history` は生成と同じ直近12件だが、解釈の直近文脈は
+    `Settings.conversation_state_context_messages`（計画 §9・既定6）に
+    絞る——生成より短い窓でよいという設計判断で、生成の窓をそのまま流用
+    すると設定を変えても何も変わらなくなる（レビュー指摘）。`ref_kind
+    = "message"` の検証対象も、実際に見せた発言だけに絞る。
+    """
+    recent_history = history[-context_messages:] if context_messages > 0 else history
+    judgment_candidates: dict[int, tuple[ConversationState, Message]] = {}
+    for state in open_states:
+        if state.kind not in {
+            ConversationStateKind.QUESTION_TO_YUI.value,
+            ConversationStateKind.QUESTION_TO_PARTNER.value,
+        }:
+            continue
+        candidate = await find_judgment_candidate(
+            session, state, conversation_id=conversation_id
+        )
+        if candidate is not None:
+            judgment_candidates[state.id] = (state, candidate)
+
+    pending_discrepancies: dict[int, tuple[ConversationState, Message]] = {
+        state_id: (offer.state, offer.pending_reply)
+        for state_id, offer in discrepancy_ledger.items()
+        if offer.pending_reply is not None
+    }
+
+    context = "\n\n".join(
+        [
+            _format_transcript(recent_history, current_message),
+            _format_open_states(open_states),
+            _format_judgment_candidates(judgment_candidates),
+            _format_pending_discrepancies(pending_discrepancies),
+            _format_memories(memory_items),
+        ]
+    )
+
+    candidates = InterpretationCandidates(
+        open_states={state.id: state for state in open_states},
+        judgment_candidates={
+            state_id: message for state_id, (_, message) in judgment_candidates.items()
+        },
+        pending_discrepancies={
+            state_id: message for state_id, (_, message) in pending_discrepancies.items()
+        },
+        memory_ids={memory_id for memory_id, _ in memory_items},
+        message_ids={message.id for message in recent_history} | {current_message.id},
+    )
+    return context, candidates
+
+
+# --- 解釈の結果を検証して適用する（v0.2 PR3） --------------------------------
+
+_WITHDRAW_REASON_KINDS: dict[str, set[str] | None] = {
+    ConversationStateWithdrawReason.REOPENED.value: {
+        ConversationStateKind.DEFERRAL.value,
+        ConversationStateKind.CLOSING.value,
+    },
+    ConversationStateWithdrawReason.CANCELLED.value: {
+        ConversationStateKind.QUESTION_TO_YUI.value,
+        ConversationStateKind.QUESTION_TO_PARTNER.value,
+    },
+    # superseded は `withdrawals` からは受け付けない。置き換え先の新しい
+    # request／correction の作成が検証を通った場合だけ適用するもので
+    # （計画 §4 手順3）、`create_or_supersede_request`／
+    # `create_or_supersede_correction` が置き換え先の作成と同じトランザ
+    # クションで自分で行う。ここで無条件に受け付けると、置き換え先が
+    # 無い（＝ result.request／result.correction が無いか検証で落ちた）の
+    # に有効な訂正・用件だけが消える（レビューで実測）。
+    ConversationStateWithdrawReason.SUPERSEDED.value: set(),
+    # misdetected は検出（規則・解釈）が誤って作った行を取り消すためのもの。
+    # `presented` は YUI が実際にそう言った事実そのもの、`confirmed` は
+    # 一度作ったら参照されない記録、`request` は superseded でしか置き換え
+    # ないため、誤検出の余地・意味が無い（計画 3節の表に取消欄が無い。
+    # レビューで指摘）。
+    ConversationStateWithdrawReason.MISDETECTED.value: {
+        ConversationStateKind.QUESTION_TO_YUI.value,
+        ConversationStateKind.QUESTION_TO_PARTNER.value,
+        ConversationStateKind.DEFERRAL.value,
+        ConversationStateKind.CLOSING.value,
+        ConversationStateKind.DISCREPANCY.value,
+        ConversationStateKind.CORRECTION.value,
+    },
+}
+
+
+def _withdraw_reason_applies(kind: str, reason: str) -> bool:
+    allowed = _WITHDRAW_REASON_KINDS.get(reason)
+    return allowed is None or kind in allowed
+
+
+def _ref_is_valid(payload: RefPayload, candidates: InterpretationCandidates) -> bool:
+    if payload.ref_kind == ConversationStateRefKind.MEMORY.value:
+        return payload.ref_id in candidates.memory_ids
+    if payload.ref_kind == ConversationStateRefKind.MESSAGE.value:
+        return payload.ref_id in candidates.message_ids
+    return False
+
+
+async def apply_interpretation_result(
+    session: AsyncSession,
+    result: InterpretationResult,
+    *,
+    candidates: InterpretationCandidates,
+    conversation_id: int,
+    target_speaker_id: int,
+    speaker_id: int,
+    current_message: Message,
+) -> dict[str, object]:
+    """解釈の結果を検証し、通った項目だけ適用する（計画 §4 手順4・検証）。
+
+    **ID・kind・target が候補の範囲外の項目は、その項目だけ捨てる。**
+    **同じ状態に両立しない操作（answered と unanswered に同じ id）が
+    返ったら、その状態への操作だけ両方捨てる。**
+    """
+    decided_by = DecisionSource.LLM.value
+    summary: dict[str, object] = {
+        "resolved_state_ids": [],
+        "followup_state_ids": [],
+        "withdrawn_state_ids": [],
+        "asked_discrepancy_ids": [],
+        "resolved_discrepancy_ids": [],
+        "created_request": False,
+        "created_correction": False,
+        "created_discrepancy": False,
+        "created_deferral": False,
+        "created_closing": False,
+        "created_confirmed": False,
+        "dropped": [],
+    }
+    dropped: list[str] = summary["dropped"]  # type: ignore[assignment]
+
+    # 両立しない操作は、その状態への操作を**両方とも**捨てる（計画 §4 手順3・
+    # §8：「解決と取消に同じ id」も対象。answered/unanswered だけでなく、
+    # 解決系（answered・resolved_discrepancy）と withdrawals の競合も見る。
+    # 片方が先に適用されて後発が弾かれる「早い者勝ち」にしない
+    # （レビューで、resolved の直後に withdrawn へ上書きされる例を実測）。
+    withdrawal_ids = {withdrawal.state_id for withdrawal in result.withdrawals}
+    resolving_ids = set(result.answered_state_ids) | set(result.resolved_discrepancy_ids)
+    conflicting = (
+        (set(result.answered_state_ids) & set(result.unanswered_state_ids))
+        | (resolving_ids & withdrawal_ids)
+    )
+    for state_id in conflicting:
+        dropped.append(f"両立しない操作が競合: {state_id}")
+
+    for state_id in dict.fromkeys(result.answered_state_ids):
+        if state_id in conflicting:
+            continue
+        candidate = candidates.judgment_candidates.get(state_id)
+        state = candidates.open_states.get(state_id)
+        if candidate is None or state is None:
+            dropped.append(f"answered_state_ids: 判定対象ではない id {state_id}")
+            continue
+        await resolve_state(
+            session, state, resolved_message_id=candidate.id, decided_by=decided_by
+        )
+        state.judged_message_id = candidate.id
+        summary["resolved_state_ids"].append(state_id)  # type: ignore[union-attr]
+
+    for state_id in dict.fromkeys(result.unanswered_state_ids):
+        if state_id in conflicting:
+            continue
+        candidate = candidates.judgment_candidates.get(state_id)
+        state = candidates.open_states.get(state_id)
+        if candidate is None or state is None:
+            dropped.append(f"unanswered_state_ids: 判定対象ではない id {state_id}")
+            continue
+        await mark_followup_needed(
+            session, state, judged_message_id=candidate.id, decided_by=decided_by
+        )
+        summary["followup_state_ids"].append(state_id)  # type: ignore[union-attr]
+
+    for state_id in dict.fromkeys(result.asked_discrepancy_ids):
+        offered_reply = candidates.pending_discrepancies.get(state_id)
+        state = candidates.open_states.get(state_id)
+        if offered_reply is None or state is None:
+            dropped.append(f"asked_discrepancy_ids: 確認待ちではない id {state_id}")
+            continue
+        state.asked_message_id = offered_reply.id
+        state.responded_message_id = current_message.id
+        await session.flush()
+        summary["asked_discrepancy_ids"].append(state_id)  # type: ignore[union-attr]
+
+    correction_ref: tuple[str, int] | None = None
+    if result.correction is not None:
+        if _ref_is_valid(result.correction, candidates):
+            correction_ref = (result.correction.ref_kind, result.correction.ref_id)
+        else:
+            dropped.append("correction: ref が候補にありません")
+
+    for state_id in dict.fromkeys(result.resolved_discrepancy_ids):
+        if state_id in conflicting:
+            continue
+        state = candidates.open_states.get(state_id)
+        if state is None or state.kind != ConversationStateKind.DISCREPANCY.value:
+            dropped.append(f"resolved_discrepancy_ids: 開いている食い違いではない id {state_id}")
+            continue
+        await resolve_state(
+            session, state, resolved_message_id=current_message.id, decided_by=decided_by
+        )
+        summary["resolved_discrepancy_ids"].append(state_id)  # type: ignore[union-attr]
+
+    for withdrawal in result.withdrawals:
+        if withdrawal.state_id in conflicting:
+            continue
+        state = candidates.open_states.get(withdrawal.state_id)
+        if state is None or not _withdraw_reason_applies(state.kind, withdrawal.reason):
+            dropped.append(f"withdrawals: 対象外 id {withdrawal.state_id}")
+            continue
+        await withdraw_state(
+            session,
+            state,
+            reason=withdrawal.reason,
+            decided_by=decided_by,
+            resolved_message_id=current_message.id,
+        )
+        summary["withdrawn_state_ids"].append(withdrawal.state_id)  # type: ignore[union-attr]
+
+    if result.deferral_topic:
+        await create_state(
+            session,
+            conversation_id=conversation_id,
+            kind=ConversationStateKind.DEFERRAL.value,
+            content=result.deferral_topic[:CONTENT_LIMIT],
+            source_message_id=current_message.id,
+            speaker_id=speaker_id,
+            target_speaker_id=target_speaker_id,
+            detected_by=DetectionSource.LLM.value,
+        )
+        summary["created_deferral"] = True
+
+    if result.is_closing and not any(
+        state.kind == ConversationStateKind.CLOSING.value
+        for state in candidates.open_states.values()
+    ):
+        await create_state(
+            session,
+            conversation_id=conversation_id,
+            kind=ConversationStateKind.CLOSING.value,
+            content=current_message.content[:CONTENT_LIMIT],
+            source_message_id=current_message.id,
+            speaker_id=speaker_id,
+            target_speaker_id=target_speaker_id,
+            detected_by=DetectionSource.LLM.value,
+        )
+        summary["created_closing"] = True
+
+    if result.confirms_presented_id is not None:
+        presented = candidates.open_states.get(result.confirms_presented_id)
+        if presented is None or presented.kind != ConversationStateKind.PRESENTED.value:
+            dropped.append("confirms_presented_id: 対象外")
+        elif is_acknowledgement_only(current_message.content):
+            dropped.append("confirms_presented_id: 相づちのみ")
+        elif await _has_confirmed(
+            session,
+            conversation_id=conversation_id,
+            target_speaker_id=target_speaker_id,
+            presented_id=presented.id,
+        ):
+            dropped.append("confirms_presented_id: 重複")
+        else:
+            await create_state(
+                session,
+                conversation_id=conversation_id,
+                kind=ConversationStateKind.CONFIRMED.value,
+                content=presented.content,
+                source_message_id=current_message.id,
+                speaker_id=speaker_id,
+                target_speaker_id=target_speaker_id,
+                ref_kind=ConversationStateRefKind.STATE.value,
+                ref_id=presented.id,
+                detected_by=DetectionSource.LLM.value,
+            )
+            summary["created_confirmed"] = True
+
+    if result.request:
+        # 既存の open な request と同じ内容なら、create_or_supersede_request は
+        # 何も変えずにそれを返す。summary の created_request を「実際に行を
+        # 作った・置き換えた」の意味に保つため、そのケースは False のままに
+        # する（レビュー指摘：常に True だと台帳を読む側が誤読する）。
+        existing_request = next(
+            (
+                state
+                for state in candidates.open_states.values()
+                if state.kind == ConversationStateKind.REQUEST.value
+            ),
+            None,
+        )
+        unchanged = (
+            existing_request is not None
+            and existing_request.content == result.request[:CONTENT_LIMIT]
+        )
+        await create_or_supersede_request(
+            session,
+            conversation_id=conversation_id,
+            target_speaker_id=target_speaker_id,
+            content=result.request,
+            source_message_id=current_message.id,
+            speaker_id=speaker_id,
+            decided_by=decided_by,
+        )
+        summary["created_request"] = not unchanged
+
+    if correction_ref is not None:
+        assert result.correction is not None
+        await create_or_supersede_correction(
+            session,
+            conversation_id=conversation_id,
+            target_speaker_id=target_speaker_id,
+            ref_kind=correction_ref[0],
+            ref_id=correction_ref[1],
+            content=result.correction.content[:CONTENT_LIMIT],
+            source_message_id=current_message.id,
+            speaker_id=speaker_id,
+            decided_by=decided_by,
+        )
+        summary["created_correction"] = True
+
+    if result.discrepancy is not None:
+        discrepancy_ref = (result.discrepancy.ref_kind, result.discrepancy.ref_id)
+        if correction_ref is not None and discrepancy_ref == correction_ref:
+            # 同じ対象を correction と discrepancy の両方が指したら correction を
+            # 優先する（計画 3節）。
+            dropped.append("discrepancy: 同じ対象の correction を優先")
+        elif not _ref_is_valid(result.discrepancy, candidates):
+            dropped.append("discrepancy: ref が候補にありません")
+        elif not await can_create_discrepancy(
+            session,
+            conversation_id=conversation_id,
+            target_speaker_id=target_speaker_id,
+            ref_kind=result.discrepancy.ref_kind,
+            ref_id=result.discrepancy.ref_id,
+        ):
+            dropped.append("discrepancy: 重複制約により作成しない")
+        else:
+            await create_state(
+                session,
+                conversation_id=conversation_id,
+                kind=ConversationStateKind.DISCREPANCY.value,
+                content=result.discrepancy.note[:CONTENT_LIMIT],
+                source_message_id=current_message.id,
+                speaker_id=speaker_id,
+                target_speaker_id=target_speaker_id,
+                ref_kind=result.discrepancy.ref_kind,
+                ref_id=result.discrepancy.ref_id,
+                detected_by=DetectionSource.LLM.value,
+            )
+            summary["created_discrepancy"] = True
+
+    return summary
