@@ -158,6 +158,64 @@ class CandidateStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ConversationStateKind(StrEnum):
+    """v0.2 の会話状態（設計書「6. 会話・自発的行動の流れ」、計画 docs/plan/v0.2.md 3節）。
+
+    request / confirmed / correction / discrepancy は解釈（LLM）でしか作らない。
+    それ以外は規則だけで作る（v0.2 PR1 の範囲）。
+    """
+
+    REQUEST = "request"
+    QUESTION_TO_YUI = "question_to_yui"
+    QUESTION_TO_PARTNER = "question_to_partner"
+    PRESENTED = "presented"
+    CONFIRMED = "confirmed"
+    DEFERRAL = "deferral"
+    CLOSING = "closing"
+    DISCREPANCY = "discrepancy"
+    CORRECTION = "correction"
+
+
+class ConversationStateStatus(StrEnum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+    WITHDRAWN = "withdrawn"
+    # 会話が終わって閉じただけで、解決したという意味ではない（計画 5節）。
+    EXPIRED = "expired"
+
+
+class ConversationStateWithdrawReason(StrEnum):
+    # 相手が延期・終了した話題を明示的に再開した。
+    REOPENED = "reopened"
+    # 相手が取り下げた（質問等）。
+    CANCELLED = "cancelled"
+    # 誤検出。
+    MISDETECTED = "misdetected"
+    # 新しい行に置き換えられた（訂正の再訂正、用件の変化）。
+    SUPERSEDED = "superseded"
+
+
+class ConversationStateRefKind(StrEnum):
+    MEMORY = "memory"
+    MESSAGE = "message"
+    STATE = "state"
+
+
+class DetectionSource(StrEnum):
+    """作成の経路。更新しても変えない（計画 3節）。"""
+
+    RULE = "rule"
+    LLM = "llm"
+
+
+class DecisionSource(StrEnum):
+    """解決・取消の経路。作成の経路とは別に持つ（計画 3節）。"""
+
+    RULE = "rule"
+    LLM = "llm"
+    OPERATOR = "operator"
+
+
 # --- テーブル ---------------------------------------------------------------
 
 
@@ -376,6 +434,73 @@ class CharacterStateRevision(Base):
     after: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ConversationState(Base):
+    """v0.2 の会話状態（設計書「6. 会話・自発的行動の流れ」、計画 docs/plan/v0.2.md 3節）。
+
+    発言があったことと解決したことを分けて持つ。`responded_message_id` は
+    「一度応答があった」だけを示し、`status` を `resolved` にはしない。解決・
+    取消は解釈（LLM）か開発者の操作でだけ起き、規則は作成と応答の記録しか
+    しない。`target_speaker_id` と一致しない相手の発言では、どの遷移も
+    起こさない（v0.2 の検証は1対1に限る）。
+
+    変更履歴の表は作らない。遷移は1段で、根拠・確認・応答・解消の発言 ID を
+    この行が持つため、後から辿れる。
+    """
+
+    __tablename__ = "conversation_states"
+    __table_args__ = (
+        Index("ix_conversation_states_conv_status", "conversation_id", "status"),
+        Index(
+            "ix_conversation_states_conv_ref",
+            "conversation_id",
+            "kind",
+            "ref_kind",
+            "ref_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 誰の発言に由来するか。YUI の返答由来なら NULL。
+    speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+    # 誰に適用するか。別の相手の発言ではこの状態を変えない。
+    target_speaker_id: Mapped[int | None] = mapped_column(ForeignKey("speakers.id"))
+    source_message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    # 対象（食い違い・訂正・確認の相手）。discrepancy/correction は記憶か発言、
+    # confirmed は対象の presented。
+    ref_kind: Mapped[str | None] = mapped_column(String(16))
+    ref_id: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(16), default=ConversationStateStatus.OPEN, nullable=False
+    )
+    withdraw_reason: Mapped[str | None] = mapped_column(String(16))
+    # 実際にその食い違いを確認した YUI の返答（discrepancy だけが使う）。
+    asked_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id"))
+    # 最初に応答した発言。入っていても open でありうる（未判定・聞き返し・不明確）。
+    responded_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id"))
+    # 最後に判定した応答候補。これより新しい応答候補が来たら再判定の対象になる
+    # （v0.2 PR3）。
+    judged_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id"))
+    # 解釈が「応答したが答えていない」と判定した（v0.2 PR3）。
+    followup_needed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 解決・取消・失効を決めた発言。
+    resolved_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id"))
+    # 作成の経路。更新しても変えない。
+    detected_by: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 解決・取消の経路。作成の経路とは別に持つ。
+    decided_by: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class RunRecord(Base):

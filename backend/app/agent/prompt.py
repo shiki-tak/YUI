@@ -89,6 +89,7 @@ def build_system_prompt(
     memories: list[RetrievedMemory],
     speaker: Speaker | None,
     states: list[CharacterState] | None = None,
+    conversation_state_section: str = "",
     now: datetime | None = None,
 ) -> str:
     now = (now or utcnow()).astimezone(JST)
@@ -104,6 +105,9 @@ def build_system_prompt(
     if state_section:
         sections.append(state_section)
         sections.append("")
+    if conversation_state_section:
+        sections.append(conversation_state_section)
+        sections.append("")
     sections.append(build_memory_section(memories))
     return "\n".join(sections)
 
@@ -116,11 +120,17 @@ def build_messages(
     history: list[Message],
     user_text: str,
     states: list[CharacterState] | None = None,
+    conversation_state_section: str = "",
     now: datetime | None = None,
 ) -> tuple[list[ChatMessage], str]:
     """LLM へ渡すメッセージ列と、記録用のシステムプロンプトを返す。"""
     system_prompt = build_system_prompt(
-        persona=persona, memories=memories, speaker=speaker, states=states, now=now
+        persona=persona,
+        memories=memories,
+        speaker=speaker,
+        states=states,
+        conversation_state_section=conversation_state_section,
+        now=now,
     )
     messages: list[ChatMessage] = [ChatMessage(role="system", content=system_prompt)]
     # 相手が複数いる会話では、発言に誰のものかを付ける。付けないと、履歴の

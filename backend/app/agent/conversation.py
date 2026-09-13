@@ -20,6 +20,12 @@ from sqlalchemy.orm import selectinload
 
 from app.agent import prompt as prompt_builder
 from app.agent.character_state import active_states
+from app.agent.conversation_state import (
+    apply_character_message_rules,
+    apply_partner_message_rules,
+    build_conversation_state_section,
+    get_open_states,
+)
 from app.agent.memory_store import RetrievedMemory, search_memories
 from app.config import Settings
 from app.llm.base import LLMClient
@@ -88,6 +94,15 @@ class ConversationAgent:
         session.add(user_message)
         await session.flush()
 
+        # v0.2：規則（辞書・正規表現）だけで会話状態を作る／応答を記録する。
+        # 解釈（LLM）が要る解決・取消は PR3 まで行わない（計画 docs/plan/v0.2.md）。
+        await apply_partner_message_rules(
+            session,
+            conversation_id=conversation.id,
+            message=user_message,
+            speaker_id=speaker.id,
+        )
+
         history = await self._recent_history(session, conversation.id, exclude_id=user_message.id)
         # 記憶検索の時間は生成と分けて残す。どちらが待ち時間の大半かを
         # 見分けられるようにするため。
@@ -104,6 +119,14 @@ class ConversationAgent:
         states = await active_states(session, speaker_id=speaker.id, mode=conversation.mode)
         retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
 
+        conversation_states = await get_open_states(
+            session, conversation_id=conversation.id, target_speaker_id=speaker.id
+        )
+        window_message_ids = {message.id for message in history} | {user_message.id}
+        conversation_state_section = build_conversation_state_section(
+            conversation_states, window_message_ids=window_message_ids
+        )
+
         messages, system_prompt = prompt_builder.build_messages(
             persona=persona,
             memories=memories,
@@ -111,6 +134,7 @@ class ConversationAgent:
             history=history,
             user_text=text,
             states=states,
+            conversation_state_section=conversation_state_section,
         )
 
         # 生成に入る前にトランザクションを閉じる。SQLite は書き込みロックを
@@ -140,6 +164,16 @@ class ConversationAgent:
         )
         session.add(reply_message)
         await session.flush()
+
+        # 返答と同じトランザクションの中で行う（設計 §4 手順7）。相手の
+        # 発言由来の状態は手順1・2の commit（上）で確定済みで、ここで
+        # 作るのは YUI の返答由来の状態だけ。
+        await apply_character_message_rules(
+            session,
+            conversation_id=conversation.id,
+            message=reply_message,
+            target_speaker_id=speaker.id,
+        )
 
         run = RunRecord(
             message_id=reply_message.id,
