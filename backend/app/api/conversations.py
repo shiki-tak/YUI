@@ -5,12 +5,19 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent.character_state import active_states, create_state
+from app.agent.conversation_state import (
+    RESOLVABLE_KINDS,
+    expire_open_states,
+    resolve_state,
+    withdraw_reason_applies,
+    withdraw_state,
+)
 from app.agent.delivery import apply_delivery_state
 from app.agent.memory_store import create_memory
 from app.agent.reflection import ReflectionParseError, extract_candidates, format_transcript
@@ -23,6 +30,10 @@ from app.llm.base import LLMClient, LLMError
 from app.models import (
     CandidateStatus,
     Conversation,
+    ConversationState,
+    ConversationStateKind,
+    ConversationStateStatus,
+    DecisionSource,
     DeliveryState,
     IdealResponse,
     MemoryCandidate,
@@ -40,6 +51,8 @@ from app.schemas import (
     CandidateDecision,
     ConversationDetail,
     ConversationOut,
+    ConversationStateDecision,
+    ConversationStateOut,
     DeliveryUpdate,
     IdealResponseCreate,
     IdealResponseOut,
@@ -241,6 +254,11 @@ async def end_conversation(
         await session.flush()
 
         completed = utcnow()
+        # 開いている会話状態はすべて expired にする（resolved にはしない。
+        # 会話が終わったことと問題が解決したことは別。計画 §5）。抽出が
+        # 失敗した場合はここへ到達しないため、会話状態は開いたまま残る
+        # （既存どおり 503 で再試行できる）。
+        await expire_open_states(session, conversation_id=conversation_id, at=completed)
         await session.execute(
             update(Conversation)
             .where(Conversation.id == conversation_id)
@@ -310,6 +328,107 @@ async def decide_candidate(
     candidate.status = CandidateStatus.ACCEPTED.value
     candidate.accepted_memory_id = memory.id
     return candidate
+
+
+@router.get("/{conversation_id}/states", response_model=list[ConversationStateOut])
+async def list_conversation_states(
+    conversation_id: int,
+    status_: str | None = Query(default=None, alias="status"),
+    kind: str | None = None,
+    target_speaker_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[ConversationState]:
+    """会話状態の一覧（計画 §6）。`status`・`kind`・`target_speaker_id` で絞れる。
+
+    `kind` はカンマ区切りで複数指定できる（例：`kind=correction,discrepancy`。
+    会話終了後の「訂正の候補」表示が使う）。`target_speaker_id` を指定しないと
+    会話にいる全員宛の状態が返る——`/chat` の応答（`ChatResponse
+    .conversation_states`）は話している相手だけに絞っているため、画面側で
+    同じ絞り方をしたい場合はここも指定する（レビュー指摘：絞り方が経路ごとに
+    違うと、複数話者の会話で「誰の未回答質問か」が食い違って見える）。
+    空文字は「指定しない」として扱う（未入力のセレクトボックス等から
+    そのまま渡っても絞り込みが外れないようにする）。
+    """
+    stmt = select(ConversationState).where(
+        ConversationState.conversation_id == conversation_id
+    )
+    if status_:
+        if status_ not in {s.value for s in ConversationStateStatus}:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"status が不正です: {status_}")
+        stmt = stmt.where(ConversationState.status == status_)
+    if kind:
+        kinds = [k.strip() for k in kind.split(",") if k.strip()]
+        known_kinds = {k.value for k in ConversationStateKind}
+        unknown = [k for k in kinds if k not in known_kinds]
+        if unknown:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"kind が不正です: {'、'.join(unknown)}"
+            )
+        stmt = stmt.where(ConversationState.kind.in_(kinds))
+    if target_speaker_id is not None:
+        stmt = stmt.where(ConversationState.target_speaker_id == target_speaker_id)
+    stmt = stmt.order_by(ConversationState.id)
+    return list((await session.execute(stmt)).scalars())
+
+
+@router.post(
+    "/{conversation_id}/states/{state_id}/decide", response_model=ConversationStateOut
+)
+async def decide_conversation_state(
+    conversation_id: int,
+    state_id: int,
+    payload: ConversationStateDecision,
+    session: AsyncSession = Depends(get_session),
+) -> ConversationState:
+    """開発者が会話状態を解決・取消にする（計画 §6）。
+
+    誤検出の是正と、解釈（LLM）を有効にしていない構成での手動解決に使う。
+    `decided_by = operator` にし、作成の経路（`detected_by`）は変えない。
+    """
+    # 会話ロックの内側で行う。解釈（PR3）が同じ行を更新するターンと重なると
+    # 後勝ちになるため（レビュー指摘）、`/chat` と同じロックで直列化する。
+    async with conversation_locks.hold(conversation_id):
+        state = await session.get(ConversationState, state_id)
+        if state is None or state.conversation_id != conversation_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "会話状態が見つかりません。")
+        if state.status != ConversationStateStatus.OPEN.value:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "この会話状態は open ではありません（判断済みか、失効しています）。",
+            )
+
+        if payload.decision == "resolved":
+            # 「解決」の概念がある種類だけに限る（計画 3節の表。レビュー
+            # 指摘：以前はどの種類の resolved も無条件に受け付けていた）。
+            if state.kind not in RESOLVABLE_KINDS:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"「{state.kind}」に解決の概念はありません。",
+                )
+            await resolve_state(
+                session, state, resolved_message_id=None, decided_by=DecisionSource.OPERATOR.value
+            )
+        else:
+            assert payload.withdraw_reason is not None
+            # 解釈（LLM）の経路と同じ検証を通す。種類ごとに使える取消理由は
+            # 決まっており（計画 3節）、operator 操作でも例外にしない
+            # （レビュー指摘：以前は検証無しで `question_to_yui` に `reopened`
+            # のような不整合な組み合わせを受け入れていた。`superseded` は
+            # どの種類にも紐付かないため、この経路では常に拒否される）。
+            if not withdraw_reason_applies(state.kind, payload.withdraw_reason):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"「{state.kind}」に「{payload.withdraw_reason}」は使えません。",
+                )
+            await withdraw_state(
+                session,
+                state,
+                reason=payload.withdraw_reason,
+                decided_by=DecisionSource.OPERATOR.value,
+                resolved_message_id=None,
+            )
+        await session.commit()
+        return state
 
 
 @router.get("/messages/{message_id}", response_model=MessageOut)

@@ -109,12 +109,61 @@ export interface SpeechRun {
   created_at: string;
 }
 
+/**
+ * v0.2 の会話状態：今の用件・未回答の質問・延期・終了・食い違い
+ * （バックエンドの `ConversationState` テーブルに対応。上の `ConversationState`
+ * 型は会話が続けられるかを表す別の概念なので、ここは別名にしている）。
+ */
+export interface ConversationStateRecord {
+  id: number;
+  conversation_id: number;
+  kind:
+    | "request"
+    | "question_to_yui"
+    | "question_to_partner"
+    | "presented"
+    | "confirmed"
+    | "deferral"
+    | "closing"
+    | "discrepancy"
+    | "correction";
+  content: string;
+  speaker_id: number | null;
+  target_speaker_id: number | null;
+  source_message_id: number;
+  ref_kind: "memory" | "message" | "state" | null;
+  ref_id: number | null;
+  status: "open" | "resolved" | "withdrawn" | "expired";
+  withdraw_reason: "reopened" | "cancelled" | "misdetected" | "superseded" | null;
+  asked_message_id: number | null;
+  responded_message_id: number | null;
+  judged_message_id: number | null;
+  followup_needed: boolean;
+  resolved_message_id: number | null;
+  detected_by: "rule" | "llm";
+  decided_by: "rule" | "llm" | "operator" | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * 画面が使う会話状態の種類（バックエンドの
+ * `conversation_state.DISPLAYED_STATE_KINDS` と対応）。`presented`・
+ * `confirmed` は画面のどちらの表示にも使わないので含めない。
+ * `/chat` の応答（`ChatResponse.conversation_states`）はすでにこれで
+ * 絞られているが、`GET /conversations/{id}/states` を自分で呼ぶとき
+ * （保存済みの会話を開くときなど）は明示的に渡す。
+ */
+export const DISPLAYED_STATE_KINDS =
+  "request,question_to_yui,question_to_partner,deferral,closing,correction";
+
 export interface ChatResponse {
   conversation_id: number;
   user_message: Message;
   reply: Message;
   run: RunRecord;
   used_memories: RetrievedMemory[];
+  conversation_states: ConversationStateRecord[];
 }
 
 export type Provenance = "firsthand" | "hearsay" | "unknown";

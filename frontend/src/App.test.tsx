@@ -18,7 +18,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeliveryNotice, DeliveryState } from "./types";
 import App from "./App";
 import { api } from "./api";
-import type { ChatResponse, Conversation, ConversationDetail, Message } from "./types";
+import type {
+  ChatResponse,
+  Conversation,
+  ConversationDetail,
+  ConversationStateRecord,
+  Message,
+} from "./types";
 import { shouldApplyDelivery } from "./types";
 
 function message(id: number, kind: "user" | "character", content: string): Message {
@@ -75,6 +81,7 @@ function chatResponse(): ChatResponse {
       created_at: "2026-09-07T00:00:00Z",
     },
     used_memories: [],
+    conversation_states: [],
   };
 }
 
@@ -94,6 +101,7 @@ beforeEach(() => {
   vi.spyOn(api, "memories").mockResolvedValue([]);
   vi.spyOn(api, "conversations").mockResolvedValue(CONVERSATIONS);
   vi.spyOn(api, "conversation").mockResolvedValue(CONVERSATION_B);
+  vi.spyOn(api, "conversationStates").mockResolvedValue([]);
 });
 
 describe("会話の切り替え", () => {
@@ -186,6 +194,38 @@ describe("履歴の読み込み中", () => {
     // 読み込みが終われば送信できる。
     await act(async () => {
       resolveDetail(CONVERSATION_B);
+    });
+    await screen.findByText("べつの会話の発言");
+    expect(screen.getByPlaceholderText(/話しかける/)).not.toBeDisabled();
+  });
+
+  it("会話状態の取得が遅れている間も送信できない", async () => {
+    // 送信可能になった直後に送ると、その返答の一覧が、開いたときに投げた
+    // 古い取得の遅延応答で上書きされることがある（レビューで実測）。
+    // 両方が確定するまで読み込み中のままにする。
+    let resolveStates: (value: never[]) => void = () => undefined;
+    vi.spyOn(api, "conversation").mockResolvedValue(CONVERSATION_B);
+    vi.spyOn(api, "conversationStates").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStates = resolve;
+        }),
+    );
+
+    render(<App />);
+    await screen.findByText(/人格 YUI/);
+
+    fireEvent.click(screen.getByRole("button", { name: "会話履歴" }));
+    fireEvent.click(await screen.findByRole("button", { name: "開いて続ける" }));
+
+    // 会話状態の取得が終わるまでは、発言も出さず読み込み中のままにする
+    // （両方が確定してから一度に反映する。片方だけ先に出すと、送信直後の
+    // 一覧が遅れて届いた古い取得で上書きされる余地が残る）。
+    expect(screen.getByPlaceholderText(/会話を読み込んでいます/)).toBeDisabled();
+    expect(screen.queryByText("べつの会話の発言")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveStates([]);
     });
     await screen.findByText("べつの会話の発言");
     expect(screen.getByPlaceholderText(/話しかける/)).not.toBeDisabled();
@@ -360,5 +400,113 @@ describe("誰として話すか", () => {
     await screen.findByText("bob の発言");
     // 同じ会話に2人いても、どちらの発言かが順に読める。
     await waitFor(() => expect(shownNames()).toEqual(["shiki", "bob"]));
+  });
+});
+
+function conversationState(
+  overrides: Partial<ConversationStateRecord>,
+): ConversationStateRecord {
+  return {
+    id: 100,
+    conversation_id: 1,
+    kind: "question_to_yui",
+    content: "土曜と日曜、どちらが空いてる？",
+    speaker_id: 1,
+    target_speaker_id: 1,
+    source_message_id: 20,
+    ref_kind: null,
+    ref_id: null,
+    status: "open",
+    withdraw_reason: null,
+    asked_message_id: null,
+    responded_message_id: null,
+    judged_message_id: null,
+    followup_needed: false,
+    resolved_message_id: null,
+    detected_by: "rule",
+    decided_by: null,
+    created_at: "2026-09-07T00:00:00Z",
+    updated_at: "2026-09-07T00:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("v0.2：この会話での表示", () => {
+  it("答えていない質問を、状態の種類の名前を出さずに一文で示す", async () => {
+    vi.spyOn(api, "chat").mockResolvedValue({
+      ...chatResponse(),
+      conversation_states: [conversationState({})],
+    });
+
+    render(<App />);
+    await screen.findByText(/人格 YUI/);
+
+    fireEvent.change(screen.getByPlaceholderText(/話しかける/), {
+      target: { value: "土曜と日曜、どちらが空いてる？" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "送信" }));
+
+    expect(
+      await screen.findByText(/まだ答えていない質問があります/),
+    ).toBeInTheDocument();
+    // 種類の名前（question_to_yui）はどこにも出さない。
+    expect(screen.queryByText(/question_to_yui/)).not.toBeInTheDocument();
+  });
+
+  it("答え損ねた質問は、未回答とは別の一文で示す", async () => {
+    vi.spyOn(api, "chat").mockResolvedValue({
+      ...chatResponse(),
+      conversation_states: [conversationState({ followup_needed: true })],
+    });
+
+    render(<App />);
+    await screen.findByText(/人格 YUI/);
+    fireEvent.change(screen.getByPlaceholderText(/話しかける/), {
+      target: { value: "土曜と日曜、どちらが空いてる？" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "送信" }));
+
+    expect(
+      await screen.findByText(/答えきれていない質問があります/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^まだ答えていない質問/)).not.toBeInTheDocument();
+  });
+});
+
+describe("v0.2：会話終了後の訂正の候補", () => {
+  it("correction・discrepancy を読み取り専用で示し、採用ボタンは付けない", async () => {
+    vi.spyOn(api, "endConversation").mockResolvedValue([]);
+    vi.spyOn(api, "conversationStates").mockImplementation(async (_id, filter) => {
+      if (filter?.kind === "correction,discrepancy") {
+        return [
+          conversationState({
+            id: 200,
+            kind: "correction",
+            content: "日曜",
+            status: "expired",
+          }),
+        ];
+      }
+      return [];
+    });
+    vi.spyOn(api, "chat").mockResolvedValue(chatResponse());
+
+    render(<App />);
+    await screen.findByText(/人格 YUI/);
+
+    fireEvent.change(screen.getByPlaceholderText(/話しかける/), {
+      target: { value: "さきほどの質問" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "送信" }));
+    await screen.findByText("さきほどの返答");
+
+    fireEvent.click(screen.getByRole("button", { name: "終了して振り返る" }));
+    await screen.findByRole("button", { name: /記憶の候補/ });
+
+    expect(await screen.findByText("この会話であった訂正の候補")).toBeInTheDocument();
+    expect(screen.getByText("日曜")).toBeInTheDocument();
+    expect(screen.getByText("明示的な訂正")).toBeInTheDocument();
+    // 読み取り専用。記憶の候補のような採用・却下は付けない。
+    expect(screen.queryByRole("button", { name: "採用" })).not.toBeInTheDocument();
   });
 });

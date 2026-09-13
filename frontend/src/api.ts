@@ -6,6 +6,7 @@ import type {
   DeliveryNotice,
   Conversation,
   ConversationDetail,
+  ConversationStateRecord,
   Health,
   IdealResponse,
   Memory,
@@ -74,6 +75,35 @@ export const api = {
 
   candidates: (conversationId: number) =>
     request<MemoryCandidate[]>(`/conversations/${conversationId}/candidates`),
+
+  // v0.2：今の用件・未回答の質問・延期・終了・食い違い。target_speaker_id を
+  // 指定しないと、会話にいる全員宛の状態が返る（/chat の応答は話している
+  // 相手だけに絞っているため、同じ絞り方にしたい場合は指定する）。
+  conversationStates: (
+    conversationId: number,
+    filter?: { status?: string; kind?: string; target_speaker_id?: number },
+  ) => {
+    const params = new URLSearchParams();
+    if (filter?.status) params.set("status", filter.status);
+    if (filter?.kind) params.set("kind", filter.kind);
+    if (filter?.target_speaker_id !== undefined) {
+      params.set("target_speaker_id", String(filter.target_speaker_id));
+    }
+    const query = params.toString();
+    return request<ConversationStateRecord[]>(
+      `/conversations/${conversationId}/states${query ? `?${query}` : ""}`,
+    );
+  },
+
+  decideConversationState: (
+    conversationId: number,
+    stateId: number,
+    body: { decision: "resolved" | "withdrawn"; withdraw_reason?: string },
+  ) =>
+    request<ConversationStateRecord>(
+      `/conversations/${conversationId}/states/${stateId}/decide`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
 
   // 再読み込みしても採用できるよう、未判断の候補を会話をまたいで取り直す。
   pendingCandidates: () =>

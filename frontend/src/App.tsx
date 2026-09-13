@@ -9,12 +9,18 @@ import { StatePanel } from "./components/StatePanel";
 import type {
   ChatResponse,
   ConversationState,
+  ConversationStateRecord,
   Health,
   MemoryCandidate,
   Message,
   SpeakerRef,
 } from "./types";
-import { SELF_SPEAKER, conversationState, shouldApplyDelivery } from "./types";
+import {
+  DISPLAYED_STATE_KINDS,
+  SELF_SPEAKER,
+  conversationState,
+  shouldApplyDelivery,
+} from "./types";
 import { useSpeechPlayer } from "./useSpeechPlayer";
 
 type Tab = "memories" | "candidates" | "states" | "history";
@@ -35,6 +41,9 @@ export default function App() {
   const [conversation, setConversation] = useState<ConversationState | null>(null);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [candidates, setCandidates] = useState<MemoryCandidate[]>([]);
+  // v0.2：いまの会話で開いている状態（今の用件・未回答の質問・延期・終了・
+  // 訂正）。ChatPanel の「この会話で」表示に使う。
+  const [conversationStates, setConversationStates] = useState<ConversationStateRecord[]>([]);
   const [tab, setTab] = useState<Tab>("memories");
   const [memoryRefresh, setMemoryRefresh] = useState(0);
   const [historyRefresh, setHistoryRefresh] = useState(0);
@@ -117,15 +126,36 @@ export default function App() {
     setMessages([]);
     setLiveEntries({});
     setConversation(null);
+    setConversationStates([]);
     setLoadingConversation(true);
     setHistoryError(null);
     try {
-      const detail = await api.conversation(id);
+      // 会話状態も同じ await の中で待つ。片方だけ先に確定させて送信できる
+      // ようにすると、送信直後の一覧が、開いたときに投げていた古い取得の
+      // 遅延応答で上書きされることがある（レビューで実測）。
+      // /chat の応答（entry.conversation_states）は話している相手だけに
+      // 絞っているため、ここも同じ絞り方にする（レビュー指摘：絞り方が
+      // 経路ごとに違うと、複数話者の会話で表示が食い違う）。
+      const [detail, states] = await Promise.all([
+        api.conversation(id),
+        // 終了済みの会話は expired になっているので、ここでは何も出ない。
+        // 読めなくても会話は開ける。
+        api
+          .conversationStates(id, {
+            status: "open",
+            // 画面が使う種類だけに絞る。presented・confirmed を含む全件は
+            // 会話が長くなるほど肥大する（/chat の同梱と同じ理由）。
+            kind: DISPLAYED_STATE_KINDS,
+            ...(selfSpeakerId !== null ? { target_speaker_id: selfSpeakerId } : {}),
+          })
+          .catch(() => []),
+      ]);
       // 続けて別の会話を開いた場合、遅れて届いたこちらは捨てる。
       if (token !== viewRef.current) return;
       setConversationId(detail.id);
       setMessages(detail.messages);
       setConversation(conversationState(detail));
+      setConversationStates(states);
       // この会話に出てくる相手の名前を出せるようにする。
       void loadSpeakers();
     } catch (e) {
@@ -142,6 +172,7 @@ export default function App() {
     setMessages([]);
     setLiveEntries({});
     setConversation(null);
+    setConversationStates([]);
   }
 
   const pendingCount = candidates.filter((c) => c.status === "pending").length;
@@ -179,6 +210,7 @@ export default function App() {
           messages={messages}
           liveEntries={liveEntries}
           state={conversation}
+          conversationStates={conversationStates}
           loading={loadingConversation}
           speechAvailable={speechAvailable}
           player={player}
@@ -198,6 +230,7 @@ export default function App() {
             setMessages((prev) => [...prev, entry.user_message, entry.reply]);
             setLiveEntries((prev) => ({ ...prev, [entry.reply.id]: entry }));
             setConversation("open");
+            setConversationStates(entry.conversation_states);
             // 新しい会話が作られたときだけ一覧を取り直す。
             if (isNew) setHistoryRefresh((n) => n + 1);
             // 初めて話した相手はこの時点で作られる。ここで対応を覚えておく。
@@ -212,7 +245,13 @@ export default function App() {
             // 終了しても画面からは消さない。読み取り専用に切り替えるだけにして、
             // 何を話した結果の候補なのかを見比べられるようにする。
             // 別の会話へ移っていた場合、いまの表示は終了扱いにしない。
-            if (token === viewRef.current) setConversation("ended");
+            if (token === viewRef.current) {
+              setConversation("ended");
+              // 開いていた状態はすべて expired になった（計画 §5）。
+              // 「この会話で」は今の会話向けの表示なので消す
+              // （訂正・食い違いは会話終了後、記憶の候補欄に出る）。
+              setConversationStates([]);
+            }
             setHistoryRefresh((n) => n + 1);
             refreshCandidates();
             setTab("candidates");
@@ -258,6 +297,8 @@ export default function App() {
           {tab === "candidates" && (
             <CandidatePanel
               candidates={candidates}
+              conversationId={conversationId}
+              conversationEnded={conversation === "ended"}
               onDecided={(updated) => {
                 setCandidates((prev) => prev.filter((c) => c.id !== updated.id));
                 if (updated.status === "accepted") {

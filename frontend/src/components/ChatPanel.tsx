@@ -3,6 +3,7 @@ import { api } from "../api";
 import type {
   ChatResponse,
   ConversationState,
+  ConversationStateRecord,
   Memory,
   Message,
   RetrievedMemory,
@@ -28,6 +29,8 @@ interface Props {
   liveEntries: Record<number, ChatResponse>;
   /** 会話の状態。新しい会話（未作成）は null。 */
   state: ConversationState | null;
+  /** v0.2：いまの会話で開いている状態。「この会話で」の表示に使う。 */
+  conversationStates: ConversationStateRecord[];
   loading: boolean;
   /** 読み上げを使える状態か。エンジンに接続できないときは自動再生しない。 */
   speechAvailable: boolean;
@@ -52,6 +55,7 @@ export function ChatPanel({
   messages,
   liveEntries,
   state,
+  conversationStates,
   loading,
   speechAvailable,
   player,
@@ -214,6 +218,8 @@ export function ChatPanel({
         {busy && <p className="muted center">考えています…</p>}
         <div ref={bottomRef} />
       </div>
+
+      <ConversationStateSummary states={conversationStates} />
 
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
@@ -620,6 +626,56 @@ function IdealForm({ messageId }: { messageId: number }) {
       <button type="button" onClick={save} disabled={!ideal.trim()}>
         記録する
       </button>
+    </div>
+  );
+}
+
+/**
+ * 「この会話で」の小さな表示（計画 §6）。答えを待っている質問・答え損ねた
+ * 質問・延期した話題・終了の合図・有効な訂正。**状態の種類の名前
+ * （question_to_yui 等）は出さず、意味を日本語の一文にする。**
+ */
+function ConversationStateSummary({ states }: { states: ConversationStateRecord[] }) {
+  const open = states.filter((s) => s.status === "open");
+  if (open.length === 0) return null;
+
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const add = (line: string) => {
+    if (!seen.has(line)) {
+      seen.add(line);
+      lines.push(line);
+    }
+  };
+
+  for (const s of open) {
+    if (s.kind === "question_to_yui" && s.followup_needed) {
+      add(`答えきれていない質問があります：「${s.content}」`);
+    } else if (s.kind === "question_to_yui" && s.responded_message_id === null) {
+      add(`まだ答えていない質問があります：「${s.content}」`);
+    } else if (s.kind === "question_to_partner" && s.responded_message_id === null) {
+      add(`こちらから聞いて、答えを待っている質問があります：「${s.content}」`);
+    } else if (s.kind === "deferral") {
+      add(`後回しにした話題があります：${s.content}（自分からは持ち出さない）`);
+    } else if (s.kind === "closing") {
+      add("相手は会話を終えようとしています。");
+    } else if (s.kind === "correction") {
+      add(`訂正があります：この会話では「${s.content}」として扱っています`);
+    }
+  }
+
+  if (lines.length === 0) return null;
+
+  return (
+    <div className="notice conversation-state-summary">
+      <span className="muted small">この会話で：</span>
+      <ul>
+        {lines.map((line) => (
+          <li key={line} className="muted small">
+            {line}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

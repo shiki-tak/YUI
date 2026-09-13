@@ -1,16 +1,24 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { MemoryCandidate } from "../types";
+import type { ConversationStateRecord, MemoryCandidate } from "../types";
 import { CERTAINTY_LABEL, KIND_LABEL } from "../types";
 import { SourceMessage } from "./SourceMessage";
 
 interface Props {
   candidates: MemoryCandidate[];
+  /** 直近に開いた会話。終了後、訂正の候補を読むために使う。 */
+  conversationId: number | null;
+  conversationEnded: boolean;
   onDecided: (candidate: MemoryCandidate) => void;
 }
 
 /** 会話の振り返りで出た記憶候補。採用するまで長期記憶にはしない。 */
-export function CandidatePanel({ candidates, onDecided }: Props) {
+export function CandidatePanel({
+  candidates,
+  conversationId,
+  conversationEnded,
+  onDecided,
+}: Props) {
   const pending = candidates.filter((c) => c.status === "pending");
 
   return (
@@ -29,6 +37,9 @@ export function CandidatePanel({ candidates, onDecided }: Props) {
             <CandidateRow key={candidate.id} candidate={candidate} onDecided={onDecided} />
           ))}
         </div>
+      )}
+      {conversationEnded && conversationId !== null && (
+        <CorrectionCandidates conversationId={conversationId} />
       )}
     </section>
   );
@@ -100,6 +111,60 @@ function CandidateRow({ candidate, onDecided }: RowProps) {
           却下
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * v0.2：会話終了後の訂正の候補（計画 §5・§6）。`correction`（明示的な訂正）と
+ * 未解決の `discrepancy`（訂正か不明な食い違い）を読み取り専用で見せる。
+ * **採用ボタンは付けない**——記憶の訂正は既存の MemoryPanel から行う。
+ * `/end` はすべての開いている状態を `expired` にするため、ここでは
+ * `open`／`expired` の両方を対象にする（`resolved`／`withdrawn` は
+ * 開発者がすでに判断済みなので出さない）。
+ */
+function CorrectionCandidates({ conversationId }: { conversationId: number }) {
+  const [states, setStates] = useState<ConversationStateRecord[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStates(null);
+    api
+      .conversationStates(conversationId, { kind: "correction,discrepancy" })
+      .then((all) => {
+        if (!cancelled) {
+          setStates(all.filter((s) => s.status === "open" || s.status === "expired"));
+          setError(null);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
+  if (error) return null;
+  if (states === null || states.length === 0) return null;
+
+  return (
+    <div className="memory-list correction-candidates">
+      <h3 className="muted small">この会話であった訂正の候補</h3>
+      {states.map((s) => (
+        <div className="memory" key={s.id}>
+          <div className="memory-head">
+            <span className="tag subtle">
+              {s.kind === "correction" ? "明示的な訂正" : "訂正かどうか不明な食い違い"}
+            </span>
+          </div>
+          <p>{s.content}</p>
+          <div className="muted small">
+            <SourceMessage messageId={s.source_message_id} />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

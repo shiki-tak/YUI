@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import ConversationAgent, get_agent
+from app.agent.conversation_state import DISPLAYED_STATE_KINDS, get_open_states
 from app.agent.memory_store import get_or_create_speaker
 from app.agent.turn_lock import conversation_locks
 from app.db import get_session
@@ -15,6 +16,7 @@ from app.persona import Persona, available_versions, load_persona
 from app.schemas import (
     ChatRequest,
     ChatResponse,
+    ConversationStateOut,
     MemoryOut,
     MessageOut,
     RetrievedMemoryOut,
@@ -112,6 +114,22 @@ async def chat(
             conversation.title = payload.text[:40]
         await session.commit()
 
+        # 開いている会話状態（v0.2）。画面の「この会話で」表示に使う
+        # （計画 §6）。返答と同じトランザクションの外で読んでよい
+        # （読み取りのみで、他の書き込みと競合しない）。
+        #
+        # 画面が実際に使う種類だけに絞る。`presented`（返答ごとに1件でき、
+        # 解決・取消が無いので open のまま残る）を含む全件を毎ターン同梱
+        # すると、応答が会話の長さに比例して肥大する（レビューで
+        # 40ターン・44KBを実測）。
+        conversation_states = [
+            state
+            for state in await get_open_states(
+                session, conversation_id=conversation.id, target_speaker_id=speaker.id
+            )
+            if state.kind in DISPLAYED_STATE_KINDS
+        ]
+
     return ChatResponse(
         conversation_id=conversation.id,
         user_message=MessageOut.model_validate(result.user_message),
@@ -124,5 +142,8 @@ async def chat(
                 reason=item.reason,
             )
             for item in result.memories
+        ],
+        conversation_states=[
+            ConversationStateOut.model_validate(state) for state in conversation_states
         ],
     )

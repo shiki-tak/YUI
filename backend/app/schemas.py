@@ -159,12 +159,62 @@ class PersonaOut(BaseModel):
     available_versions: list[str]
 
 
+class ConversationStateOut(ORMModel):
+    """v0.2 の会話状態（今の用件・未回答の質問・延期・終了・食い違い）。"""
+
+    id: int
+    conversation_id: int
+    kind: str
+    content: str
+    speaker_id: int | None
+    target_speaker_id: int | None
+    source_message_id: int
+    ref_kind: str | None
+    ref_id: int | None
+    status: str
+    withdraw_reason: str | None
+    asked_message_id: int | None
+    responded_message_id: int | None
+    judged_message_id: int | None
+    followup_needed: bool
+    resolved_message_id: int | None
+    detected_by: str
+    decided_by: str | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class ConversationStateDecision(BaseModel):
+    """開発者による解決・取消。`decided_by = operator` になる。
+
+    `detected_by`（規則／解釈のどちらが作ったか）は変えない。誤検出の是正と、
+    解釈を有効にしていない構成での手動解決に使う（計画 §6）。
+    """
+
+    decision: Literal["resolved", "withdrawn"]
+    withdraw_reason: Literal["reopened", "cancelled", "misdetected", "superseded"] | None = None
+
+    @model_validator(mode="after")
+    def _require_reason_for_withdrawal(self) -> ConversationStateDecision:
+        if self.decision == "withdrawn" and self.withdraw_reason is None:
+            raise ValueError("withdrawn には withdraw_reason が要ります。")
+        if self.decision == "resolved" and self.withdraw_reason is not None:
+            raise ValueError("resolved に withdraw_reason は指定できません。")
+        return self
+
+
 class ChatResponse(BaseModel):
     conversation_id: int
     user_message: MessageOut
     reply: MessageOut
     run: RunRecordOut
     used_memories: list[RetrievedMemoryOut]
+    # 開いている会話状態（v0.2）。既存のクライアントを壊さないよう既定は空。
+    # **画面が使う種類だけ**（`conversation_state.DISPLAYED_STATE_KINDS`）。
+    # `presented`・`confirmed` は含めない——全件を毎ターン返すと、会話が
+    # 長くなるほど応答が肥大する（レビューで実測）。全件が要る場合は
+    # `GET /conversations/{id}/states` を使う。
+    conversation_states: list[ConversationStateOut] = Field(default_factory=list)
 
 
 class DeliveryUpdate(BaseModel):

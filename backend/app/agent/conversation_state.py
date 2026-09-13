@@ -703,6 +703,25 @@ def looks_assertive(text: str) -> bool:
     return not any(marker in text for marker in _HEDGE_MARKERS)
 
 
+# --- 画面へ渡す種類（v0.2 PR4） ----------------------------------------------
+
+# `presented`（返答ごとに1件でき、解決・取消が無いので open のまま残る）と
+# `confirmed`（作られるだけで参照されない）は、画面のどちらの表示にも使わない
+# （`ChatPanel` の「この会話で」、`CandidatePanel` の訂正の候補）。全件を
+# `/chat` の応答へ同梱すると、会話が長くなるほど応答が肥大する（レビューで
+# 40ターン・44KBを実測）。画面が実際に使う種類だけに絞る。
+DISPLAYED_STATE_KINDS = frozenset(
+    {
+        ConversationStateKind.REQUEST.value,
+        ConversationStateKind.QUESTION_TO_YUI.value,
+        ConversationStateKind.QUESTION_TO_PARTNER.value,
+        ConversationStateKind.DEFERRAL.value,
+        ConversationStateKind.CLOSING.value,
+        ConversationStateKind.CORRECTION.value,
+    }
+)
+
+
 # --- プロンプトへの節 ---------------------------------------------------------
 
 PRESENTED_LIMIT = 5  # 節に出す presented の件数上限（本文の長さ上限は CONTENT_LIMIT）
@@ -1117,7 +1136,21 @@ async def gather_interpretation_context(
 
 # --- 解釈の結果を検証して適用する（v0.2 PR3） --------------------------------
 
-_WITHDRAW_REASON_KINDS: dict[str, set[str] | None] = {
+# 「解決」の概念がある種類（計画 3節の表：`request` は「解決は無い」、
+# `presented`／`confirmed`／`deferral`／`closing`／`correction` は解決の
+# 欄が無く取消でしか終わらない）。開発者の手動操作
+# （`POST /conversations/{id}/states/{state_id}/decide`）が `resolved` を
+# 受け付けてよい種類をここに限定する（v0.2 PR4 レビュー指摘：以前は
+# `decide` がどの種類の `resolved` も無条件に受け付けていた）。
+RESOLVABLE_KINDS = frozenset(
+    {
+        ConversationStateKind.QUESTION_TO_YUI.value,
+        ConversationStateKind.QUESTION_TO_PARTNER.value,
+        ConversationStateKind.DISCREPANCY.value,
+    }
+)
+
+WITHDRAW_REASON_KINDS: dict[str, set[str] | None] = {
     ConversationStateWithdrawReason.REOPENED.value: {
         ConversationStateKind.DEFERRAL.value,
         ConversationStateKind.CLOSING.value,
@@ -1150,8 +1183,16 @@ _WITHDRAW_REASON_KINDS: dict[str, set[str] | None] = {
 }
 
 
-def _withdraw_reason_applies(kind: str, reason: str) -> bool:
-    allowed = _WITHDRAW_REASON_KINDS.get(reason)
+def withdraw_reason_applies(kind: str, reason: str) -> bool:
+    """この種類にこの取消理由が使えるか（計画 3節の表のとおり）。
+
+    解釈（LLM）の `withdrawals` だけでなく、開発者の手動操作
+    （`POST /conversations/{id}/states/{state_id}/decide`）からも呼ぶ。
+    経路によって許す組み合わせを変えない（レビュー指摘：operator 経路が
+    この検証を通さず、`question_to_yui` に `reopened` のような不整合な
+    組み合わせを受け入れていた）。
+    """
+    allowed = WITHDRAW_REASON_KINDS.get(reason)
     return allowed is None or kind in allowed
 
 
@@ -1271,7 +1312,7 @@ async def apply_interpretation_result(
         if withdrawal.state_id in conflicting:
             continue
         state = candidates.open_states.get(withdrawal.state_id)
-        if state is None or not _withdraw_reason_applies(state.kind, withdrawal.reason):
+        if state is None or not withdraw_reason_applies(state.kind, withdrawal.reason):
             dropped.append(f"withdrawals: 対象外 id {withdrawal.state_id}")
             continue
         await withdraw_state(
