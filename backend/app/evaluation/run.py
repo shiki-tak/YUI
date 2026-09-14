@@ -126,6 +126,7 @@ async def _run(args: argparse.Namespace, llm: LLMClient) -> Path:
         },
         repeat=args.repeat,
         started_at=started_at,
+        conversation_state_llm=settings.conversation_state_llm,
     )
 
 

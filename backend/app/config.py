@@ -75,12 +75,23 @@ class Settings(BaseSettings):
     memory_retrieval_limit: int = 8
     recent_message_limit: int = 12
 
-    # v0.2 PR3：会話状態の解釈（LLM）。既定は無効（計画 §9・§11 PR5 で判断）。
+    # v0.2 PR3：会話状態の解釈（LLM）。既定は無効のまま
+    # （計画 §9・§11 PR5 で判断。docs/result/v0.2.md に測定と根拠を記録）。
+    # 待ち時間が1ターンあたり+77%〜+184%（測定条件で変動）増えるうえ、
+    # 実モデル（qwen3.5:9b）では判定精度が実用に耐えない
+    # （食い違いの検出・連続する訂正が特に弱い）。
     conversation_state_llm: bool = False
     conversation_state_llm_timeout_seconds: float = 10.0
     conversation_state_context_messages: int = 6
     # 食い違いの確認候補を「確かめてよいこと」として渡す回数の上限。
     conversation_state_confirm_offer_limit: int = 2
+    # 1ターン全体（解釈＋生成＋再生成1回）の時間上限の候補（計画 §9）。
+    # 解釈を有効にした実測（平均11.9〜12.0秒・最大12.7〜14.3秒、測定回で変動）
+    # に対して十分な余裕が
+    # あることを確認した（v0.2 PR5）。**まだ何も強制しない**——解釈が既定で
+    # 無効なので、実際にこの値に迫る場面が今は無い。解釈を有効化するときに
+    # 上限処理を作るための記録値。
+    turn_time_budget_seconds: float = 45.0
 
     # カンマ区切り。.env に JSON を書かせないため文字列で受ける。
     cors_origins: str = "http://localhost:5173"

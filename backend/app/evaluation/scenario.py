@@ -215,6 +215,7 @@ _SAY_FIELDS = {
 _REFLECT_FIELDS = {
     "accept",
     "accept_contains",
+    "accept_limit",
     "accept_key",
     "accept_states",
     "expect_kinds",
@@ -293,6 +294,17 @@ class StepSpec(BaseModel):
     accept: bool = False
     # 本文にこの語を含む候補だけ採用する。空なら出た候補をすべて採用する。
     accept_contains: list[str] = Field(default_factory=list)
+    # accept_contains に当たる候補の件数が、これとちょうど一致しなければ、
+    # 「先頭から」でも「上限まで」でもなく、何も採用せず手順そのものを
+    # 失敗として記録する（is_spec_error、モデル呼び出しの失敗とは区別する）。
+    # 抽出は同じ会話から似た内容の候補を複数出しうるため（例：「コーヒーが
+    # 好き」と「コーヒーの香りが良い」が両方「コーヒー」を含む）、後で
+    # correct_memory／delete_memory の match が対象を一意に選べなくなる
+    # （ISSUE-035）。候補の順序はモデルの出力順でシナリオからは決まらない
+    # ため、件数が合わないときにどちらを採用するか選ばず、必ず止める
+    # （第3回レビューで「先頭から N 件採用」は同じ非決定性を隠すだけだと
+    # 指摘された）。
+    accept_limit: int | None = Field(default=None, gt=0)
     # 採用した記憶に付ける名前。後の say の expect_memories で、
     # 「振り返りで作った記憶が実際に渡ったか」を指せるようにする。
     accept_key: str | None = None
@@ -344,6 +356,8 @@ class StepSpec(BaseModel):
             raise ValueError(f"{self.kind} には match が要ります。")
         if self.kind == "correct_memory" and not self.content:
             raise ValueError("correct_memory には content が要ります。")
+        if self.accept_limit is not None and not self.accept:
+            raise ValueError("accept_limit は accept と一緒に指定してください。")
         return self
 
 

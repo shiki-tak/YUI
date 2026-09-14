@@ -11,13 +11,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from app.config import BACKEND_ROOT, get_settings
-from app.evaluation.report import build_markdown
+from app.evaluation.report import build_markdown, write_report
 from app.evaluation.runner import run_scenarios
 from app.evaluation.scenario import Scenario, ScenarioError, load_scenarios
 from app.persona import load_persona
@@ -247,6 +248,7 @@ async def test_report_keeps_what_is_needed_to_compare_versions(fake_llm: FakeLLM
         options={"temperature": 0.8},
         repeat=1,
         started_at=datetime.now(UTC),
+        conversation_state_llm=False,
     )
     # 版を並べて比べるのに要るもの。
     assert persona.version in markdown
@@ -255,6 +257,134 @@ async def test_report_keeps_what_is_needed_to_compare_versions(fake_llm: FakeLLM
     # 人が読む欄が残っている（自動判定だけで合格としない）。
     assert "自動判定" in markdown
     assert "1 / 1" in markdown
+
+
+async def test_report_shows_whether_interpretation_was_enabled(fake_llm: FakeLLM) -> None:
+    """解釈（LLM）の有無で結果が大きく変わるため、レポート単体でどちらの
+    構成の測定かが分かるようにする（v0.2 PR5 レビュー指摘：以前はログから
+    判別できなかった）。
+    """
+    fake_llm.push("写真ですね。")
+    persona = load_persona()
+    results = await run_scenarios(
+        [_scenario()], llm=fake_llm, persona=persona, settings=get_settings()
+    )
+    enabled = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=True,
+    )
+    disabled = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=False,
+    )
+    assert "有効" in enabled
+    assert "無効" in disabled
+
+
+async def test_report_keeps_candidates_visible_even_when_reflection_fails(
+    fake_llm: FakeLLM,
+) -> None:
+    """accept_limit のガードで振り返りが失敗しても、候補の中身は md からも
+    読める（第8回レビュー指摘：runner.py 側は候補を保持していたが、md への
+    出力だけ `continue` で捨てていた。件数だけでは、どの言い回しが余計に
+    一致したのか md だけ読んでも追えなかった）。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "accept-limit-mismatch-report",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "say", "text": "コーヒーが好きなんだ"},
+                {
+                    "kind": "reflect",
+                    "accept": True,
+                    "accept_contains": ["コーヒー"],
+                    "accept_limit": 1,
+                },
+            ],
+        }
+    )
+    fake_llm.push("素敵ですね。")
+    fake_llm.push(
+        '[{"kind":"about_person","content":"開発者はコーヒーが好き","certainty":"fact",'
+        '"provenance":"firsthand","keywords":"コーヒー","about_partner":true},'
+        '{"kind":"impression","content":"YUI は開発者のコーヒーの香りを評価している",'
+        '"certainty":"inference","provenance":"firsthand","keywords":"コーヒー",'
+        '"about_partner":false}]'
+    )
+    persona = load_persona()
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=persona, settings=get_settings()
+    )
+    markdown = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=False,
+    )
+    assert "対象を一意に選べません" in markdown
+    assert "開発者はコーヒーが好き" in markdown
+    assert "YUI は開発者のコーヒーの香りを評価している" in markdown
+
+
+async def test_report_json_machine_summary_matches_markdown_headline(
+    fake_llm: FakeLLM, tmp_path: Path
+) -> None:
+    """report.json の machine_passed／machine_total は、report.md の
+    「自動判定を通った試行」見出しと同じ数を指す（第8回レビュー指摘：
+    scenarios を素朴に合計すると人手専用シナリオが混ざり、md の見出しと
+    別の数字が出て、実在しない食い違いに見えていた）。
+    """
+    human_only_scenario = Scenario.model_validate(
+        {
+            "id": "human-only",
+            "aspect": "persona",
+            "steps": [{"kind": "say", "text": "こんにちは", "human_check": "自然か"}],
+        }
+    )
+    fake_llm.push("こんにちは。")
+    fake_llm.push("写真ですね。")
+    persona = load_persona()
+    results = await run_scenarios(
+        [human_only_scenario, _scenario()],
+        llm=fake_llm,
+        persona=persona,
+        settings=get_settings(),
+    )
+    report_path = write_report(
+        tmp_path,
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=False,
+    )
+    payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert f"{payload['machine_passed']} / {payload['machine_total']}" in report_path.read_text(
+        encoding="utf-8"
+    )
+    by_id = {s["id"]: s for s in payload["scenarios"]}
+    assert by_id["human-only"]["human_only"] is True
+    assert by_id[_scenario().id]["human_only"] is False
 
 
 async def test_unwanted_memory_is_detected(fake_llm: FakeLLM) -> None:
@@ -344,6 +474,157 @@ async def test_steps_run_reflection_acceptance_and_restart(fake_llm: FakeLLM) ->
     assert attempt.ok, [c.detail for t in attempt.turns for c in t.checks if not c.ok]
     # 再起動後の返答に、採用した記憶が渡っている。
     assert any("採用:" in ref for ref in attempt.turns[-1].referenced)
+
+
+async def test_correct_memory_raises_when_match_is_ambiguous(session_factory) -> None:
+    """`match` に当たる記憶が複数あると、対象を一意に選べないとして止める
+    （ISSUE-035）。合否が抽出結果の言い回しに左右される「測る道具の穴」を塞ぐ。
+    """
+    from app.agent.memory_store import create_memory
+    from app.evaluation.steps import AmbiguousMemoryMatchError, correct_memory
+    from app.models import MemoryKind
+
+    async with session_factory() as session:
+        await create_memory(
+            session, kind=MemoryKind.ABOUT_PERSON.value, content="開発者はコーヒーが好き"
+        )
+        await create_memory(
+            session,
+            kind=MemoryKind.IMPRESSION.value,
+            content="YUI は開発者のコーヒーの香りを評価している",
+        )
+        await session.commit()
+
+        with pytest.raises(AmbiguousMemoryMatchError, match="2件"):
+            await correct_memory(session, match="コーヒー", content="開発者は紅茶が好き")
+
+
+async def test_ambiguous_match_is_recorded_as_a_failed_action_not_a_crash(
+    fake_llm: FakeLLM,
+) -> None:
+    """評価器全体は止めず、失敗した手順として記録する（ISSUE-035）。
+
+    「全体は止めない」の肝は、曖昧な手順の**後**も残りの手順が実行される
+    ことなので、`correct_memory` の後に `say` を1つ足し、そのターンが
+    実際に実行されて `attempt.turns` に積まれることまで確かめる
+    （レビュー指摘：曖昧な手順が最後の手順だと、続きが無いことを
+    見分けられない）。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "ambiguous-correction",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "say", "text": "コーヒーが好きなんだ"},
+                {"kind": "reflect", "accept": True},
+                {"kind": "correct_memory", "match": "コーヒー", "content": "開発者は紅茶が好き"},
+                {"kind": "say", "text": "それはそうと、最近どう？"},
+            ],
+        }
+    )
+    fake_llm.push("素敵ですね。")
+    fake_llm.push(
+        '[{"kind":"about_person","content":"開発者はコーヒーが好き","certainty":"fact",'
+        '"provenance":"firsthand","keywords":"コーヒー","about_partner":true},'
+        '{"kind":"impression","content":"YUI は開発者のコーヒーの香りを評価している",'
+        '"certainty":"inference","provenance":"firsthand","keywords":"コーヒー",'
+        '"about_partner":false}]'
+    )
+    fake_llm.push("元気にしていますよ。")
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert not attempt.ok
+    assert not attempt.action_checks[0].ok
+    assert "一意に選べません" in attempt.action_checks[0].detail
+    # 曖昧な手順の後の say が、実行されずに飛ばされていない。
+    assert len(attempt.turns) == 2
+    assert attempt.turns[-1].reply == "元気にしていますよ。"
+
+
+async def test_accept_limit_accepts_when_count_matches(fake_llm: FakeLLM) -> None:
+    """`accept_contains` で絞った件数が `accept_limit` と一致すれば採用する。"""
+    scenario = Scenario.model_validate(
+        {
+            "id": "accept-limit-match",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "say", "text": "コーヒーが好きなんだ"},
+                {
+                    "kind": "reflect",
+                    "accept": True,
+                    "accept_contains": ["コーヒーが好き"],
+                    "accept_limit": 1,
+                },
+            ],
+        }
+    )
+    fake_llm.push("素敵ですね。")
+    fake_llm.push(
+        '[{"kind":"about_person","content":"開発者はコーヒーが好き","certainty":"fact",'
+        '"provenance":"firsthand","keywords":"コーヒー","about_partner":true},'
+        '{"kind":"impression","content":"YUI は開発者のコーヒーの香りを評価している",'
+        '"certainty":"inference","provenance":"firsthand","keywords":"コーヒー",'
+        '"about_partner":false}]'
+    )
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert attempt.ok, [r.error for r in attempt.reflections if r.error]
+    reflection = attempt.reflections[0]
+    assert any("採用した記憶 1 件" in c for c in reflection.candidates)
+
+
+async def test_accept_limit_fails_loudly_when_count_does_not_match(fake_llm: FakeLLM) -> None:
+    """`accept_contains` に一致する候補が `accept_limit` と違えば、先頭から
+    黙って選ばず、手順そのものを失敗として記録する（第3回レビュー指摘：
+    件数の上限だけでは、どの候補が採用されるかが抽出結果の順序に依存した
+    ままで、ISSUE-035 の対象非決定性が「例外」から「黙って違う候補を
+    採用する」へ形を変えるだけになっていた）。
+    """
+    scenario = Scenario.model_validate(
+        {
+            "id": "accept-limit-mismatch",
+            "aspect": "memory",
+            "steps": [
+                {"kind": "say", "text": "コーヒーが好きなんだ"},
+                {
+                    "kind": "reflect",
+                    "accept": True,
+                    "accept_contains": ["コーヒー"],
+                    "accept_limit": 1,
+                },
+            ],
+        }
+    )
+    fake_llm.push("素敵ですね。")
+    fake_llm.push(
+        '[{"kind":"about_person","content":"開発者はコーヒーが好き","certainty":"fact",'
+        '"provenance":"firsthand","keywords":"コーヒー","about_partner":true},'
+        '{"kind":"impression","content":"YUI は開発者のコーヒーの香りを評価している",'
+        '"certainty":"inference","provenance":"firsthand","keywords":"コーヒー",'
+        '"about_partner":false}]'
+    )
+
+    results = await run_scenarios(
+        [scenario], llm=fake_llm, persona=load_persona(), settings=get_settings()
+    )
+    attempt = results[0].attempts[0]
+    assert not attempt.ok
+    assert attempt.reflections[0].error is not None
+    assert "2 件" in attempt.reflections[0].error
+    assert "対象を一意に選べません" in attempt.reflections[0].error
+    # 候補の中身は失敗時も残る（何が余計に一致したのか後から追えるように）。
+    assert len(attempt.reflections[0].candidates) == 2
+    # accept_limit のガードは accept_contains の前提（一致する候補の件数）が
+    # 満たせなかった失敗であり、モデル呼び出しの失敗（failed_to_run）には
+    # 数えない（第4回レビュー指摘：件数不一致による失敗が「モデルの呼び出しに
+    # 失敗した」件数に混ざり、成功条件(7)の根拠を汚していた）。
+    assert results[0].failed_to_run == 0
 
 
 async def test_steps_can_correct_a_memory_between_conversations(

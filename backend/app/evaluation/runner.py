@@ -24,7 +24,13 @@ from app.agent.reflection import ReflectionParseError
 from app.agent.state_reflection import StateReflectionError
 from app.config import Settings, to_local
 from app.evaluation.scenario import ConversationStateExpectation, Scenario, StepSpec
-from app.evaluation.steps import ReflectOutcome, correct_memory, delete_memory, run_reflection
+from app.evaluation.steps import (
+    AmbiguousMemoryMatchError,
+    ReflectOutcome,
+    correct_memory,
+    delete_memory,
+    run_reflection,
+)
 from app.llm.base import LLMClient, LLMError
 from app.models import (
     Base,
@@ -72,6 +78,11 @@ class ReflectionResult:
     checks: list[Check] = field(default_factory=list)
     human_check: str | None = None
     error: str | None = None
+    # `error` が accept_contains／accept_limit の前提（一致する候補の件数）
+    # を満たせなかった失敗で、モデル呼び出し・出力の読み取りの失敗では
+    # ないことを示す。ScenarioResult.failed_to_run はモデル起因の失敗だけを
+    # 数える。
+    is_spec_error: bool = False
 
     @property
     def ok(self) -> bool:
@@ -125,12 +136,21 @@ class ScenarioResult:
 
     @property
     def failed_to_run(self) -> int:
-        """モデルの呼び出しなどで実行できなかった試行。"""
+        """モデルの呼び出しなどで実行できなかった試行。
+
+        accept_contains／accept_limit の前提が満たせなかった失敗
+        （`is_spec_error`）はここに数えない。数えてしまうと、抽出結果の
+        揺れなどが「モデルの呼び出しに失敗した」件数に混ざり、成功条件(7)
+        （更新が失敗しても返答は返る）の根拠が汚れる（第4回レビュー指摘）。
+        """
         return sum(
             1
             for attempt in self.attempts
             if any(turn.error for turn in attempt.turns)
-            or any(reflection.error for reflection in attempt.reflections)
+            or any(
+                reflection.error and not reflection.is_spec_error
+                for reflection in attempt.reflections
+            )
         )
 
     @property
@@ -509,13 +529,24 @@ async def run_attempt(
 
                     if step.kind in {"correct_memory", "delete_memory"}:
                         assert step.match is not None
-                        if step.kind == "correct_memory":
-                            assert step.content is not None
-                            changed = await correct_memory(
-                                session, match=step.match, content=step.content
+                        try:
+                            if step.kind == "correct_memory":
+                                assert step.content is not None
+                                changed = await correct_memory(
+                                    session, match=step.match, content=step.content
+                                )
+                            else:
+                                changed = await delete_memory(session, match=step.match)
+                        except AmbiguousMemoryMatchError as exc:
+                            # 測る道具の穴（ISSUE-035）。対象を一意に選べない
+                            # シナリオの数字は指示文の効果の根拠に使えないため、
+                            # 実行を止めずに失敗として記録し、書き間違いだと
+                            # 分かるようにする。
+                            attempt.actions.append(f"{step.kind}: {step.match} → {exc}")
+                            attempt.action_checks.append(
+                                Check(name=f"{step.kind} の実行", ok=False, detail=str(exc))
                             )
-                        else:
-                            changed = await delete_memory(session, match=step.match)
+                            continue
                         detail = (
                             f"記憶 #{changed.id}「{changed.content}」"
                             if changed
@@ -694,7 +725,17 @@ async def _reload_memory_keys(session: AsyncSession, scenario: Scenario) -> dict
 def _check_reflection(step: StepSpec, outcome: ReflectOutcome) -> ReflectionResult:
     """振り返りの結果を判定する。"""
     if outcome.error:
-        return ReflectionResult(error=outcome.error)
+        # 候補の中身は失敗時も残す。件数だけでは、どの言い回しが余計に
+        # 一致したのかを後から追えない（第4回レビュー指摘）。
+        return ReflectionResult(
+            error=outcome.error,
+            is_spec_error=outcome.is_spec_error,
+            candidates=[
+                f"[{c.kind}／{c.provenance}／対象 {c.subject_speaker_id}／根拠 "
+                f"#{c.source_message_id}] {c.content}"
+                for c in outcome.candidates
+            ],
+        )
 
     candidates = outcome.candidates
     result = ReflectionResult(

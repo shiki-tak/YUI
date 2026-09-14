@@ -35,6 +35,7 @@ def build_markdown(
     options: dict[str, Any],
     repeat: int,
     started_at: datetime,
+    conversation_state_llm: bool,
 ) -> str:
     lines: list[str] = ["# 評価用会話の結果", ""]
     lines += [
@@ -45,6 +46,10 @@ def build_markdown(
         f"| モデル | {model} |",
         f"| モデルの版 | {model_digest or '不明'} |",
         f"| 生成設定 | {_escape(json.dumps(options, ensure_ascii=False))} |",
+        # v0.2 PR5：解釈（LLM）の有無で結果が大きく変わるため、レポート単体で
+        # どちらの構成の測定かが分かるようにする（レビュー指摘：以前は
+        # ログから判別できなかった）。
+        f"| 会話状態の解釈（LLM） | {'有効' if conversation_state_llm else '無効'} |",
         f"| 試行回数 | 各シナリオ {repeat} 回 |",
         "",
         "自動判定は、機械で確かめられる観点だけを見ている。口調・着眼点・"
@@ -122,6 +127,12 @@ def build_markdown(
                 lines.append(f"- {label}")
                 if reflection.error:
                     lines.append(f"  - **失敗：{_escape(reflection.error)}**")
+                    # 候補の中身は失敗時も残す。件数だけでは、どの言い回しが
+                    # 余計に一致したのかを md だけ読んでも追えない
+                    # （レビュー指摘：runner.py 側は候補を保持していたが、
+                    # md への出力だけここで捨てていた）。
+                    for candidate in reflection.candidates:
+                        lines.append(f"  - 候補：{_escape(candidate)}")
                     continue
                 if reflection.candidates:
                     for candidate in reflection.candidates:
@@ -149,6 +160,7 @@ def write_report(
     options: dict[str, Any],
     repeat: int,
     started_at: datetime,
+    conversation_state_llm: bool,
 ) -> Path:
     """Markdown と JSON を書き出し、Markdown の位置を返す。
 
@@ -163,21 +175,30 @@ def write_report(
         options=options,
         repeat=repeat,
         started_at=started_at,
+        conversation_state_llm=conversation_state_llm,
     )
     report_path = directory / "report.md"
     report_path.write_text(markdown, encoding="utf-8")
 
+    machine_results = [r for r in results if not r.human_only]
     payload = {
         "started_at": started_at.isoformat(timespec="seconds"),
         "persona_version": persona.version,
         "model": model,
         "model_digest": model_digest,
         "options": options,
+        "conversation_state_llm": conversation_state_llm,
         "repeat": repeat,
+        # report.md の「自動判定を通った試行」見出しと同じ集計（人手専用の
+        # シナリオを除く）。json から scenarios を素朴に合計すると、人手専用
+        # シナリオが混ざって md の数字と食い違う（レビュー指摘）。
+        "machine_passed": sum(r.passed for r in machine_results),
+        "machine_total": sum(r.total for r in machine_results),
         "scenarios": [
             {
                 "id": result.scenario.id,
                 "aspect": result.scenario.aspect,
+                "human_only": result.human_only,
                 "passed": result.passed,
                 "total": result.total,
                 "attempts": [asdict(attempt) for attempt in result.attempts],

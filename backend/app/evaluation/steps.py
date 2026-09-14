@@ -48,6 +48,14 @@ class ReflectOutcome:
     states: list[CharacterState] = field(default_factory=list)
     accepted_states: list[CharacterState] = field(default_factory=list)
     error: str | None = None
+    # モデル呼び出し・出力の読み取りの失敗ではなく、accept_contains が指す
+    # べき候補の件数が accept_limit の前提を満たさなかった失敗であることを
+    # 示す（原因はシナリオの書き間違いとは限らず、抽出結果の揺れのことも
+    # ある）。runner.py の failed_to_run はモデル起因の失敗だけを数える
+    # ため、この区別が無いと、この種の失敗が「実行できなかった試行」に
+    # 混ざり、成功条件(7)（更新が失敗しても返答は返る）の根拠指標を汚す
+    # （第4回レビュー指摘）。
+    is_spec_error: bool = False
 
 
 async def run_reflection(
@@ -103,11 +111,28 @@ async def run_reflection(
         await session.commit()
         return outcome
 
-    for candidate in candidates:
-        if step.accept_contains and not any(
-            word in candidate.content for word in step.accept_contains
-        ):
-            continue
+    matched = [
+        candidate
+        for candidate in candidates
+        if not step.accept_contains
+        or any(word in candidate.content for word in step.accept_contains)
+    ]
+    if step.accept_limit is not None and len(matched) != step.accept_limit:
+        # 件数で確実に絞る（ISSUE-035）。ここで「先頭から accept_limit 件」を
+        # 黙って採用すると、どの候補が先に来るかは抽出結果の順序（シナリオ
+        # からは決まらない）次第になり、対象を一意に選べない問題が「例外」
+        # から「黙って違う候補を採用する」へ形を変えるだけになる
+        # （レビュー指摘）。件数が期待と違えば、手順そのものを失敗として
+        # 記録し、評価を続けさせない。
+        outcome.error = (
+            f"reflect: accept_contains に一致する候補が {len(matched)} 件"
+            f"（accept_limit={step.accept_limit} 件を期待）。対象を一意に選べません。"
+        )
+        outcome.is_spec_error = True
+        await session.commit()
+        return outcome
+
+    for candidate in matched:
         memory = await create_memory(
             session,
             kind=candidate.kind,
@@ -174,11 +199,36 @@ async def _conversation_messages(session: AsyncSession, conversation_id: int) ->
     return list((await session.execute(stmt)).scalars())
 
 
+class AmbiguousMemoryMatchError(RuntimeError):
+    """`match` に当たる記憶が複数あり、どれを指しているか決まらない
+    （ISSUE-035）。`ORDER BY` を足しただけでは、選ばれるのが「1件目」に
+    なるだけで、それが意図した記憶とは限らない。原因は `match` の書き方
+    とは限らず、抽出結果の揺れで想定と違う記憶が複数採用されたことでも
+    起きる——どちらにせよ対象を一意に選べない以上、選ばずに止める。
+    他の手順（`expect_memories` 等）と同じ「書き間違いは実行前に止める」
+    方針の系統だが、こちらは記憶が実際に作られるまで対象を特定できない
+    ため、実行時にしか検出できない。
+    """
+
+    def __init__(self, match: str, count: int) -> None:
+        super().__init__(f"「{match}」に当たる記憶が{count}件あり、対象を一意に選べません。")
+        self.match = match
+        self.count = count
+
+
 async def _find_memory(session: AsyncSession, match: str) -> Memory | None:
-    stmt = select(Memory).where(
-        Memory.status == MemoryStatus.ACTIVE.value, Memory.content.contains(match)
+    # id 順に決定的に選ぶ（ISSUE-035）。複数件あるときは、シナリオの
+    # `match` が曖昧だとして止める——どれが選ばれるかが実行のたびに変わり、
+    # 合否が抽出結果の言い回しに左右されていた（v0.1 回帰測定で実測）。
+    stmt = (
+        select(Memory)
+        .where(Memory.status == MemoryStatus.ACTIVE.value, Memory.content.contains(match))
+        .order_by(Memory.id)
     )
-    return (await session.execute(stmt)).scalars().first()
+    found = list((await session.execute(stmt)).scalars())
+    if len(found) > 1:
+        raise AmbiguousMemoryMatchError(match, len(found))
+    return found[0] if found else None
 
 
 async def correct_memory(session: AsyncSession, *, match: str, content: str) -> Memory | None:

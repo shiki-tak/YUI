@@ -1,2 +1,2 @@
 - [表層規則の誤検出は会話全体に残る](project_surface_regex_false_positives.md) — conversation_state.py の検出器を触る diff は誤検出側の文で実測。open 判定は responded も見る
-- [評価器と実装の状態判定のずれ](project_evaluator_state_mismatch.md) — runner.py の会話状態チェックは時点・話者・条件が実装とずれる。FakeLLM で run_scenarios を実際に流す
+- [評価器と実装・シナリオ・記録のずれ](project_evaluator_state_mismatch.md) — evaluation/ を触る diff は同梱 TOML を FakeLLM で流し、記録の数字は logs/evals の report.json で再計算。記録が書く実装の機序（上限の有無）も grep で確かめる

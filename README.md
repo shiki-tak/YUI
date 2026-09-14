@@ -3,13 +3,15 @@
 同じ人格と記憶を持つ AI VTuber キャラクター。普段は開発者と会話し、YouTube では視聴者と交流し、
 その経験を次の話題選びや行動に反映することを目指します。
 
-設計は [docs/design/ai_vtuber_architecture.md](docs/design/ai_vtuber_architecture.md) にあります（目的・設定・現在地、人格の構成要素と実装機構の対応、版の計画と完了条件、並行トラック、評価方針を1冊にまとめています）。人格の構成要素と参考研究は [docs/design/components-of-artificial-personhood.md](docs/design/components-of-artificial-personhood.md)、次に着手する v0.2 の詳細設計は [docs/plan/v0.2.md](docs/plan/v0.2.md) にあります。
+設計は [docs/design/ai_vtuber_architecture.md](docs/design/ai_vtuber_architecture.md) にあります（目的・設定・現在地、人格の構成要素と実装機構の対応、版の計画と完了条件、並行トラック、評価方針を1冊にまとめています）。人格の構成要素と参考研究は [docs/design/components-of-artificial-personhood.md](docs/design/components-of-artificial-personhood.md)、v0.2 の詳細設計と PR 計画は [docs/plan/v0.2.md](docs/plan/v0.2.md)、その測定と判断の記録は [docs/result/v0.2.md](docs/result/v0.2.md) にあります。
 
-## いまの状態：v0.1（会話・継続性の基盤）が実装済み
+## いまの状態：v0.1・v0.2（縮小版）が実装済み
 
 設定した人格で会話し、再起動を越えて過去の経験を使って答え、記憶を訂正・削除でき、
 相手ごとに記憶を分け、用意した画像のキャラクターが声と口パクで返答する状態までを
 実装しています。実モデルで測定済みですが、揺れと既知の失敗があります（設計書 §8.1）。
+v0.2（会話理解と修復）も実装済みですが、解釈（LLM）は待ち時間と精度の理由で
+既定無効の「縮小版」です（設計書 §8.2、[docs/result/v0.2.md](docs/result/v0.2.md)）。
 
 文字会話・記憶
 
@@ -32,10 +34,17 @@
 - 読み上げている本文をそのまま出す字幕
 - 待ち時間の計測（記憶検索・生成・合成・再生開始までを区間ごとに記録）
 
+会話理解と修復（v0.2、縮小版）
+
+- 未回答の質問・提示済みの内容・延期や終了の意思は規則だけで検出し、会話状態として保持（既定構成で動く）
+- **現在の用件・訂正の受け入れ・食い違いの確認は、解釈（LLM）が要る。** 既定は解釈を無効にしているため、出荷時の構成ではこの3つは動かない
+- 画面に会話状態の小さな表示（PR4）
+- 解釈（LLM）は既定無効：待ち時間が+77%〜+184%増えるうえ、実モデルでの判定精度（特に訂正の受け入れ・食い違いの検出）が実用に耐えない（測定は下記）
+
 実装の記録は [docs/result/phase1.md](docs/result/phase1.md)、
 [docs/result/phase2.md](docs/result/phase2.md)、
-[docs/result/phase3.md](docs/result/phase3.md)、残っている課題は
-[docs/issues/issues.md](docs/issues/issues.md) にあります。
+[docs/result/phase3.md](docs/result/phase3.md)、[docs/result/v0.2.md](docs/result/v0.2.md)、
+残っている課題は [docs/issues/issues.md](docs/issues/issues.md) にあります。
 
 ## これからの版
 
@@ -44,8 +53,8 @@
 | 版 | 到達目標 |
 | --- | --- |
 | v0.1（実装済み） | 会話・継続性の基盤。人格・記憶・訂正・話者分離・音声 |
-| **v0.2（次に着手）** | 会話理解と修復。現在の用件、未回答の質問、共有理解、延期・終了の意思を扱い、誤解を修復する |
-| v0.3 | 感情の推移。出来事を YUI なりに受け取り、短期の感情が文脈に沿って変化・持続する |
+| v0.2（実装済み・縮小版） | 会話理解と修復。現在の用件、未回答の質問、共有理解、延期・終了の意思を扱い、誤解を修復する。解釈（LLM）は待ち時間と精度の理由で既定無効（[docs/result/v0.2.md](docs/result/v0.2.md)） |
+| **v0.3（次に着手の判断待ち）** | 感情の推移。出来事を YUI なりに受け取り、短期の感情が文脈に沿って変化・持続する |
 | v0.4 | 関心・好み・自己理解。経験から関心や暫定的な好み・自己理解が育ち、会話へ反映される |
 | v0.5 | 継続する動機と活動。自分の疑問・約束・活動を保持し、探索・進捗・達成・断念を扱う |
 | v0.6 | 状況に応じた自発性。発話候補と発話機会を分離し、適切な相手・文脈・タイミングで発話を選ぶ |
@@ -66,7 +75,7 @@ backend/    FastAPI。人格・記憶・会話進行・振り返り・実行記�
 frontend/   React + TypeScript + Vite。開発用の操作画面
 dev.sh      開発用のプロセスをまとめて起動する
 docs/design/   設計書と研究調査
-docs/plan/     次に着手する版の詳細設計と PR 計画
+docs/plan/     各版の詳細設計と PR 計画（現時点では v0.2 のみ。次の版が決まり次第追加）
 docs/result/   実装記録
 docs/issues/   残っている課題
 docs/review/   レビュー結果と対応（codex／claude）
