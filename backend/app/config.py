@@ -19,7 +19,7 @@ def to_local(value: datetime) -> datetime:
     SQLite は timezone を落として返すため、読み戻した値は timezone を持たない。
     そのまま astimezone を呼ぶと、実行環境の時刻として解釈される。保存は UTC
     なので、UTC を補ってから直す。補わないと、日本時間の 9/8 00:30 の発言が
-    9/7 の発言として扱われる（フェーズ3再レビューの指摘2）。
+    9/7 の発言として扱われる（v0.1 レビューの指摘）。
     """
     aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     return aware.astimezone(LOCAL_TZ)
@@ -55,12 +55,12 @@ class Settings(BaseSettings):
     speech_enabled: bool = True
     # 読み上げの読み替え。「表記:カタカナの読み:アクセント位置」を「,」で並べる。
     # 合成に渡す文章は変えず、エンジン側の辞書で発音だけを直す。字幕と読み上げを
-    # 同じ文字列に保つため（フェーズ2の完了条件）。
+    # 同じ文字列に保つため（v0.1 の完了条件）。
     # 既定のままだと YUI は「ワイユウアイ」と読まれる。
     speech_readings: str = "YUI:ユイ:2"
 
     # 固定人格。personas/<版>.toml を読む。版を増やして比較できるようにし、
-    # 生成に使った版は実行記録に残す（設計書フェーズ3の3A）。
+    # 生成に使った版は実行記録に残す（人格の版管理。v0.1）。
     persona_version: str = "2026-09-07.1"
     persona_dir: str = "personas"
 

@@ -131,7 +131,7 @@ async def _sole_partner(session: AsyncSession, conversation_id: int) -> Speaker 
     """その会話にひとりだけいる相手。複数いれば None を返す。
 
     「最後に話した人」を相手として扱うと、複数の相手がいる会話で、別人の
-    情報をその人のものとして保存する（フェーズ3全体レビューの指摘1）。
+    情報をその人のものとして保存する（v0.1 レビューの指摘）。
     """
     stmt = (
         select(Speaker)
@@ -212,7 +212,7 @@ async def end_conversation(
             # モデルを呼んでいる間は、書き込みのトランザクションを開かない。
             # 開いたまま待つと、別の会話の書き込みが「database is locked」で
             # 失敗する。抽出はここでは保存せず、すべて成功してからまとめて
-            # 保存する（フェーズ3全体レビューの指摘4・5）。
+            # 保存する（v0.1 レビューの指摘）。
             candidates = await extract_candidates(
                 session,
                 llm=llm,

@@ -49,7 +49,7 @@ export default function App() {
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [historyError, setHistoryError] = useState<string | null>(null);
   // いま誰として話すか。同じ会話へ別の相手を入れて、記憶を別々に持てて
-  // いるかを確かめられるようにする（設計書フェーズ3の3C）。
+  // いるかを確かめられるようにする（v0.1）。
   const [speaker, setSpeaker] = useState<SpeakerRef>(SELF_SPEAKER);
   // 相手の識別子（source/external_id）と、保存された speaker id の対応。
   // 記憶検索を会話と同じ条件で行うために使う。

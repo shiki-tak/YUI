@@ -15,8 +15,8 @@ __all__ = ["ChatMessage", "LLMClient", "LLMError", "LLMResponse", "get_llm_clien
 def get_llm_client() -> LLMClient:
     """通常の推論に使うクライアント。
 
-    フェーズ5A でクラウド、並行改善（学習）で MLX を足すときは、ここで
-    用途に応じた LLMClient を返すようにする。
+    クラウド分析（設計書 §3.2）、並行改善（学習）で MLX を足すときは、
+    ここで用途に応じた LLMClient を返すようにする。
     """
     settings = get_settings()
     return OllamaClient(

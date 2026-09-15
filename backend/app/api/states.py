@@ -1,4 +1,4 @@
-"""可変状態の API（ISSUE-015・016 / 設計書フェーズ3の3B）。
+"""可変状態の API（ISSUE-015・016 / v0.1）。
 
 関心と関係性を、候補から採用まで開発者が確認できるようにする。固定人格は
 ここでは触れない。人格は版として管理し、日常の更新で上書きしない。
@@ -150,7 +150,7 @@ async def decide_state(
             state.content = payload.content
         # 根拠が会話単位しかない状態に、その会話から採用された記憶を結び付ける。
         # 候補の時点では記憶がまだ採用されておらず、記憶IDを持てないため
-        # （フェーズ3再レビューの指摘1）。
+        # （v0.1 レビューの指摘）。
         if not state.basis_memory_ids and state.source_conversation_id is not None:
             stmt = select(Memory).where(
                 Memory.source_conversation_id == state.source_conversation_id,

@@ -6,7 +6,7 @@ metadata:
 ---
 
 `backend/app/evaluation/` の変更は、実装・同梱シナリオ（`backend/evals/scenarios/*.toml`）・
-記録（`docs/result/*.md`）のどれかと突き合わせが抜けた状態で出てくることが v0.2 で 7 回続いた（2026-09-14 時点）。
+記録（`docs/result/*.md`）のどれかと突き合わせが抜けた状態で出てくることが v0.2 で 10 回続いた（2026-09-15 時点）。
 - PR2 1回目：`has_open_state(kind=question_to_yui)` で見て、実装の `responded_message_id is None` と食い違う
 - PR2 2回目：ターン**後**の状態で `has_unanswered_question_to_yui` を再判定し、返答自身が `responded` を埋めた後なので「対象外」分岐に到達しない → `run.options["checks"]` をそのまま使う形に修正
 - PR3：`target_speaker_id = say の話者` で絞るため、A 宛の状態を B の say の後に見るシナリオ 20 が常に「行が無い」
@@ -51,6 +51,12 @@ metadata:
   `README.md` の機能箇条書きが、既定で無効な経路（`request`／`correction`／
   `discrepancy` は `apply_interpretation_result` 経由でしか作られない）を
   「実装済み」として書いた。数字ではなく**到達範囲**の書き過ぎ
+- v0.2→v0.3 判断点の記録（2026-09-15、`docs/result/v0.2.md`）：§2.4 の「終了・延期の意思を無視した発話が
+  固定シナリオで 0件」を closing 系 12/12・延期系 9/9 の**機械判定**だけで「満たす」と書いた。
+  ログ 141036 の json を `detect_question` に通すと、closing 系 12 本のうち 3 本の返答が
+  「寝るね」の直後に質問文（「どんな一日だったのでしょうか？」等）を含むのに `新しい質問が無い`＝○
+  （質問が返答の途中の文にあると拾わない）。延期系は同梱 TOML の description 自身が
+  「持ち出したかどうかは人手で読む」と書き、`human_check` は空のまま。**機械の数字で人手の条件を「満たす」と書く**形
 
 **Why:** 評価器は PR の受け入れ条件（§7 のシナリオを 3 回）そのもの。評価器側の誤判定は
 「実装が悪い」と読まれて無駄な修正を誘発するか、逆に人手判定で片付けられて欠陥を隠す。
@@ -93,6 +99,9 @@ pytest は ID や返答を直接埋め込むため、この種の不一致は py
   `request`／`correction`／`discrepancy` は規則では一切作られない。
   6回目（実装の機序）・7回目（極値・全称）・9回目（既定無効の機能）と、
   **記録が実装の到達範囲を実際より広く書く**形は繰り返し出ている
+- 判断点・完了の記録が「0件」「満たす」と書く条件は、対応する同梱 TOML の `description`／`human_check` に
+  「人手で読む」が無いか、`report.json` の `human_check` が空でないかを見る。機械判定が○でも
+  返答本文に「？」があれば `detect_question` に通して、途中の文の質問を拾えているか確かめる
 - 「曖昧さ・非決定性を塞いだ」と書く修正は、塞いだのが**検出**なのか**原因**なのかを分ける。
   候補の選び方が LLM の出力順に残っていれば、検出器が無言になるぶん前より悪い
 関連：[[surface-regex-false-positives]]

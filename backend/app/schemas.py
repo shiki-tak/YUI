@@ -140,7 +140,7 @@ class ChatRequest(BaseModel):
     conversation_id: int | None = None
     speaker: SpeakerRef = SpeakerRef()
     # 固定人格の版。省略すると設定の版を使う。同じ会話へ別の版で答えさせて
-    # 比べられるようにする（設計書フェーズ3の3A）。用意されている版だけを許す。
+    # 比べられるようにする（人格の版管理。v0.1）。用意されている版だけを許す。
     persona_version: str | None = Field(default=None, max_length=64)
 
 
@@ -310,7 +310,7 @@ class CandidateDecision(BaseModel):
 
     誰についての記憶か（subject_speaker_id）と、どうやって知ったか
     （provenance）も直せる。モデルの分類は確実ではないため、採用の時点で
-    人が直せる経路を残す（設計書フェーズ3の3C）。
+    人が直せる経路を残す（v0.1）。
     """
 
     decision: Literal["accept", "reject"]

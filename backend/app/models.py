@@ -42,10 +42,10 @@ class Base(DeclarativeBase):
 
 
 class SourceKind(StrEnum):
-    """入力元。フェーズ6A（YouTube接続）で youtube が増える。
+    """入力元。YouTube接続（並行トラック）で youtube が増える。
 
-    ローカルの入力は現在は文字だけ。マイク入力はフェーズ10で追加する。
-    その場合も文字起こしを同じ入力受付へ送るため、この列は文字入力と同じ扱いになる。
+    ローカルの入力は現在は文字だけ。マイク入力（並行トラック。whisper.cpp）を
+    足す場合も文字起こしを同じ入力受付へ送るため、この列は文字入力と同じ扱いになる。
     """
 
     LOCAL_TEXT = "local_text"
@@ -53,7 +53,7 @@ class SourceKind(StrEnum):
 
 
 class ConversationMode(StrEnum):
-    """会話モード。stream では公開可能な記憶だけを参照する（フェーズ6A）。"""
+    """会話モード。stream では公開可能な記憶だけを参照する（YouTube接続。並行トラック）。"""
 
     LOCAL = "local"
     STREAM = "stream"
@@ -65,9 +65,9 @@ class SpeakerKind(StrEnum):
 
 
 class DeliveryState(StrEnum):
-    """発話の状態。フェーズ1の文字会話では generated → completed のみ。
+    """発話の状態。文字会話（v0.1）では generated → completed のみ。
 
-    フェーズ2で音声再生の playing・aborted を使い、生成しただけの文章と
+    音声再生（v0.1）の playing・aborted を使い、生成しただけの文章と
     実際に話し終えた内容を混同しないようにする。
     """
 
@@ -91,12 +91,12 @@ class Certainty(StrEnum):
 
 
 class Provenance(StrEnum):
-    """その内容をどうやって知ったか（設計書フェーズ3の3C）。
+    """その内容をどうやって知ったか（v0.1）。
 
     「AさんがBさんの好みを話した」を、Bさん本人の発言と区別する。事実か
     推測かを表す certainty とは別の軸で、こちらは情報の入手経路を表す。
 
-    観察（画像）や調査（検索）はフェーズ5で扱う。ここでは会話から知る2つと、
+    観察（画像）や調査（検索）は並行トラックで扱う。ここでは会話から知る2つと、
     判断できない場合だけを持つ。分類できないものを、どちらかへ寄せない。
     """
 
@@ -125,10 +125,10 @@ class StateKind(StrEnum):
     固定人格（口調・価値観・自己設定）は personas/<版>.toml にあり、ここでは
     扱わない。ここに置くのは、経験によって変わっていくものだけ。
 
-    目標（次に感想を聞く、一緒に調べる）はフェーズ4の担当なので、まだ持たない。
-    ただし「候補 → 開発者が採用 → 根拠を残す」という流れは同じ形にしてあり、
-    フェーズ4では kind を1つ増やし、実行条件・期限・完了条件の列を足せば足りる
-    ようにしている。
+    目標（次に感想を聞く、一緒に調べる）は v0.5〜v0.6 で設計し直す予定で、まだ
+    持たない。「候補 → 開発者が採用 → 根拠を残す」という流れは記憶・状態と
+    揃えてあるので、目標を追加するときも同じ形（kind を1つ増やし、実行条件・
+    期限・完了条件の列を足す）に乗せられるはずだが、これは未検証の見込みである。
     """
 
     # YUI 自身の関心・好み。相手の好みとは別に持つ。
@@ -395,7 +395,7 @@ class CharacterState(Base):
     basis_memory_ids: Mapped[list[int] | None] = mapped_column(JSON)
     # 上の根拠が「暫定」かどうか。採用のときに、その会話から採用済みの記憶を
     # 自動で並べたものは暫定になる。後から採用された記憶が抜けているため、
-    # 完全に特定した根拠として扱わない（フェーズ3再々レビューの指摘1）。
+    # 完全に特定した根拠として扱わない（v0.1 レビューの指摘）。
     basis_is_provisional: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0", nullable=False
     )
@@ -516,7 +516,7 @@ class RunRecord(Base):
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     model_digest: Mapped[str | None] = mapped_column(String(128))
     # 生成に使った固定人格の版（personas/<版>.toml）。版を変えた前後を
-    # 同じ会話例で比べられるようにする（設計書フェーズ3の3A）。
+    # 同じ会話例で比べられるようにする（人格の版管理。v0.1）。
     # system_prompt も引き続き残す。版の定義を後から書き換えても、
     # そのとき実際に渡した文面は変わらないため。
     persona_version: Mapped[str | None] = mapped_column(String(64))
@@ -539,8 +539,8 @@ class RunRecord(Base):
 class SpeechRun(Base):
     """音声合成の実行記録。
 
-    設計書フェーズ2の実装内容6「送信から音声の再生開始までの時間を測り、
-    待ち時間の大きい部分を確認する」に使う。合成用データの作成と音声生成を
+    設計書 §9「文脈構築、LLM、検索、TTS、再生開始までの時間を分けて計測し、
+    実測でボトルネックを選ぶ」に使う。合成用データの作成と音声生成を
     分けて残し、音声そのものの長さとも区別する。
 
     1 つの発言を聞き直すたびに 1 行増える。同じ文章の合成にかかる時間が
@@ -568,7 +568,7 @@ class SpeechRun(Base):
 
 
 class IdealResponse(Base):
-    """理想の返答。並行改善（学習）の教師データと、フェーズ3の比較評価に使う。"""
+    """理想の返答。並行改善（学習）の教師データと、v0.1 の比較評価に使う。"""
 
     __tablename__ = "ideal_responses"
 

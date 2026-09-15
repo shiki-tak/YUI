@@ -41,10 +41,10 @@ v0.2（会話理解と修復）も実装済みですが、解釈（LLM）は待�
 - 画面に会話状態の小さな表示（PR4）
 - 解釈（LLM）は既定無効：待ち時間が+77%〜+184%増えるうえ、実モデルでの判定精度（特に訂正の受け入れ・食い違いの検出）が実用に耐えない（測定は下記）
 
-実装の記録は [docs/result/phase1.md](docs/result/phase1.md)、
-[docs/result/phase2.md](docs/result/phase2.md)、
-[docs/result/phase3.md](docs/result/phase3.md)、[docs/result/v0.2.md](docs/result/v0.2.md)、
+実装の記録は [docs/result/v0.2.md](docs/result/v0.2.md)、
 残っている課題は [docs/issues/issues.md](docs/issues/issues.md) にあります。
+v0.1 の実装記録（旧フェーズ1〜3の記録）の要点は設計書 §8.1 にあり、
+個々の測定値・数表の原文は git 履歴に残しています（`git log --diff-filter=D -- docs/result/phase1.md`）。
 
 ## これからの版
 

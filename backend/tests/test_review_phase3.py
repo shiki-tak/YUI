@@ -1,7 +1,8 @@
-"""フェーズ3全体レビューの指摘に対する再発検知。
+"""v0.1 レビューの指摘に対する再発検知。
 
-対象は docs/review/codex/phase3_review.md の指摘1〜5。どれも「別の経路に
-同じ問題が残っていた」形なので、経路ごとに固定する。
+対象は旧 docs/review/codex/phase3_review.md の指摘1〜5
+（`b1afd20` で削除済み。原文は git 履歴：`git log --diff-filter=D -- docs/review/codex/phase3_review.md`）。
+どれも「別の経路に同じ問題が残っていた」形なので、経路ごとに固定する。
 """
 
 from __future__ import annotations
