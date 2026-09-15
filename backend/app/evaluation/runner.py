@@ -6,12 +6,18 @@
 合否を1つの数字にまとめない。同じシナリオを複数回流し、機械で判定できる
 観点は「通った回数／試行回数」で出す。生成の揺れと本当の失敗を区別するため
 （設計書「複数回の実モデル評価で通常の生成の揺れと区別する」）。
+
+**解釈（LLM）を有効にして測るときは、他の評価・ハーネスを同じ Ollama で
+並行させない。** 同時実行にすると解釈の呼び出しがキューで待たされ、timeout
+が多発する（実測で6回中4回）。timeout は返答を止めないため結果は出るが、
+判定の誤りと区別できない数字になる（ISSUE-047）。
 """
 
 from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -66,10 +72,21 @@ class TurnResult:
     referenced_states: list[str] = field(default_factory=list)
     human_check: str | None = None
     error: str | None = None
+    # 解釈（LLM）の実行記録（`RunRecord.options["interpretation"]` の写し）。
+    # 解釈の失敗は設計どおり握りつぶされて返答は返るため、これを残さないと
+    # 「0/3 が timeout だったのか判定の誤りだったのか」を後から分けられない
+    # （ISSUE-047）。解釈が無効な実行では None のまま。
+    interpretation: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None and all(check.ok for check in self.checks)
+
+    @property
+    def interpretation_failed(self) -> bool:
+        """解釈を試みて失敗した（timeout・解析失敗・スキーマ違反）。"""
+        status = self.interpretation or {}
+        return bool(status.get("attempted")) and status.get("error") is not None
 
 
 @dataclass
@@ -653,6 +670,7 @@ async def run_attempt(
                             referenced=referenced,
                             referenced_states=referenced_states,
                             human_check=step.human_check,
+                            interpretation=result.run.options.get("interpretation"),
                         )
                     )
                     replies.append(reply)

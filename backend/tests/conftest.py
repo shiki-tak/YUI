@@ -50,6 +50,8 @@ class FakeLLM(LLMClient):
         self.pickup_default = '[{"content": "会話に出てきた内容", "source_message_id": null}]'
         # 会話状態の解釈（v0.2 PR3）も別の呼び出し。既定は「何も無い」。
         self.interpretation_scripted: list[str] = []
+        # 解釈の呼び出しだけを遅らせる（timeout の経路を測るため。ISSUE-047）。
+        self.interpretation_delay: float = 0.0
         self.interpretation_default = "{}"
         # 生成中の状態を再現するための門。gate を待たせると応答待ちになる。
         self.entered = asyncio.Event()
@@ -94,6 +96,8 @@ class FakeLLM(LLMClient):
         elif messages and messages[0].content == PICKUP_INSTRUCTION:
             text = self.pickup_scripted.pop(0) if self.pickup_scripted else self.pickup_default
         elif messages and messages[0].content == INTERPRETATION_INSTRUCTION:
+            if self.interpretation_delay:
+                await asyncio.sleep(self.interpretation_delay)
             text = (
                 self.interpretation_scripted.pop(0)
                 if self.interpretation_scripted
@@ -182,17 +186,33 @@ async def client(
                 await session.rollback()
                 raise
 
-    agent = ConversationAgent(llm=fake_llm, persona=load_persona(), settings=get_settings())
+    # 解釈（LLM）は**明示的に無効**にする。規則だけの振る舞いを固定するための
+    # fixture で、解釈ありは `interpretation_client` が受け持つ。既定値
+    # （2026-09-16 に `True` へ変更）に依存させると、既定を動かすたびに
+    # 規則のテストが壊れる。
+    #
+    # 別インスタンスを作らずに共有の `get_settings()` を書き換えて戻すのは、
+    # `main.settings` と**同じオブジェクトであること**に依存しているテストが
+    # あるため（`test_delivery.py` は `main.settings.speech_enabled` を
+    # monkeypatch し、それが agent 側に効くことを前提にしている）。
+    settings = get_settings()
+    previous_llm_flag = settings.conversation_state_llm
+    settings.conversation_state_llm = False
+    agent = ConversationAgent(llm=fake_llm, persona=load_persona(), settings=settings)
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_agent] = lambda: agent
     app.dependency_overrides[get_llm_client] = lambda: fake_llm
     app.dependency_overrides[get_speech_client] = lambda: fake_speech
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as http_client:
-        yield http_client
-
-    app.dependency_overrides.clear()
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+            yield http_client
+    finally:
+        # 共有の `Settings` を書き換えているので、例外で抜けても必ず戻す。
+        # 戻し損ねると以後のテストが無効の構成のまま走る。
+        app.dependency_overrides.clear()
+        settings.conversation_state_llm = previous_llm_flag
 
 
 @pytest_asyncio.fixture
@@ -201,8 +221,8 @@ async def interpretation_client(
 ) -> AsyncIterator[AsyncClient]:
     """`client` と同じだが、会話状態の解釈（v0.2 PR3）を有効にする。
 
-    `get_settings()` は `lru_cache` で共有されるため、既定値を変えずに
-    このテストだけ有効にするには、別の `Settings` を作って渡す。
+    既定は 2026-09-16 に `True` になったが、どちらの fixture も既定に依存せず
+    明示的に指定する——既定を動かしてもテストの意図がずれないようにするため。
     """
 
     async def override_session():

@@ -12,24 +12,39 @@ from httpx import AsyncClient
 
 from app.agent.conversation_state import (
     CLOSING_FALLBACK_SENTENCE,
+    InterpretationCandidates,
+    _format_open_states,
+    apply_interpretation_result,
     build_conversation_state_section,
     can_create_discrepancy,
     create_or_supersede_correction,
     create_state,
     detect_closing,
+    detect_correction_marker,
     detect_deferral_topic,
     detect_question,
     detect_request_question,
+    gather_interpretation_context,
     get_open_states,
     is_acknowledgement_only,
 )
+from app.agent.interpretation import (
+    CorrectionPayload,
+    InterpretationResult,
+    WithdrawalPayload,
+)
 from app.models import (
+    Conversation,
     ConversationState,
     ConversationStateKind,
     ConversationStateRefKind,
     ConversationStateStatus,
     ConversationStateWithdrawReason,
     DecisionSource,
+    DetectionSource,
+    Message,
+    Speaker,
+    SpeakerKind,
 )
 from tests.conftest import FakeLLM
 
@@ -81,6 +96,28 @@ def test_detect_deferral_topic_requires_topic_and_sentence_ending() -> None:
     # で Enter が改行になるため、通常操作で複数行の発言が届く。コード
     # レビューで「今日は疲れた\n映画の話はまた今度」の取りこぼしを実測）。
     assert detect_deferral_topic("今日は疲れた\n映画の話はまた今度") == "映画"
+
+
+def test_detect_deferral_topic_keeps_demonstratives_whole() -> None:
+    """指示語（その／あの／この）＋「話／件」は、`topic` の非貪欲マッチが
+    「そ」＋「の話」のように壊れた1文字を返さない（ISSUE-043）。
+
+    「その」は「そ」＋「の」で構成されるため、`_DEFERRAL_RE` 単独では
+    非貪欲マッチが最短一致（1文字）を優先し、続く「の話」を任意グループの
+    リテラル一致に譲ってしまう。指示語を1文字に壊すのではなく、フルの
+    語をそのまま content にする。
+    """
+    assert detect_deferral_topic("その話はまた今度にしよう") == "その話"
+    assert detect_deferral_topic("あの話はまた今度にしよう") == "あの話"
+    assert detect_deferral_topic("この話はまた今度にしよう") == "この話"
+    # 「件」でも同様。
+    assert detect_deferral_topic("その件はまた今度にしよう") == "その件"
+    # 指示語の直後に具体的な語が続く場合は、既存どおり一般パターンで
+    # 「の話」を剥ぎ取る（指示語専用パターンは「その／あの／この」の直後が
+    # 「話／件」で終わる場合にしか一致しない）。
+    assert detect_deferral_topic("この前の話はまた今度にしよう") == "この前"
+    # 対照：具体的な話題（指示語ではない）は既存どおり「の話」を剥ぎ取る。
+    assert detect_deferral_topic("写真の話はまた今度にしよう") == "写真"
 
 
 def test_detect_closing_requires_sentence_ending_form() -> None:
@@ -979,3 +1016,425 @@ async def test_discrepancy_open_records_whether_reply_looks_assertive(
         await client.get(f"/api/conversations/messages/{hedged_turn.json()['reply']['id']}/run")
     ).json()
     assert hedged_run["options"]["checks"]["discrepancy_possibly_assertive"] is False
+
+
+# --- 解釈への入力：訂正の対象を見せる（ISSUE-044） ----------------------------
+
+
+def test_open_states_prompt_shows_correction_target() -> None:
+    """訂正・食い違いは対象（ref）付きで解釈に見せる（ISSUE-044）。
+
+    `create_or_supersede_correction` は (ref_kind, ref_id) の完全一致で旧訂正を
+    探す。対象が見えないと、同じ事実を訂正し直す発言で解釈が別の対象（直前の
+    発言）を指し、superseded が起きない（実モデルで 3 回中 2 回、月曜の訂正は
+    作られるのに日曜が open のまま残った）。対象を持たない種類は従来どおり。
+    """
+    correction = ConversationState(
+        id=7,
+        conversation_id=1,
+        kind=ConversationStateKind.CORRECTION.value,
+        content="日曜",
+        source_message_id=2,
+        ref_kind=ConversationStateRefKind.MESSAGE.value,
+        ref_id=1,
+        status=ConversationStateStatus.OPEN.value,
+        detected_by=DetectionSource.LLM.value,
+    )
+    presented = ConversationState(
+        id=8,
+        conversation_id=1,
+        kind=ConversationStateKind.PRESENTED.value,
+        content="日曜ですね",
+        source_message_id=3,
+        status=ConversationStateStatus.OPEN.value,
+        detected_by=DetectionSource.RULE.value,
+    )
+    text = _format_open_states([correction, presented])
+    assert "- [7] correction（対象: message 1）: 日曜" in text
+    assert "- [8] presented: 日曜ですね" in text
+
+
+async def test_interpretation_candidates_accept_open_correction_target(session_factory) -> None:
+    """開いている訂正の対象は、直近の窓の外でも有効な ref として受け付ける
+    （ISSUE-044）。
+
+    `_ref_is_valid` は message の ref を直近の窓＋今の発言に限る。元の発言が
+    窓から出た後に同じ事実を訂正し直すと、解釈が正しく元の対象を指しても検証で
+    捨てられ、superseded が起きない。解釈に見せた対象は受け付ける。
+    """
+    async with session_factory() as session:
+        speaker = Speaker(source="local_text", external_id="dev", display_name="開発者")
+        conversation = Conversation()
+        session.add_all([speaker, conversation])
+        await session.flush()
+
+        texts = [
+            "土曜に映画に行くよ",
+            "土曜ですね",
+            "ごめん、土曜じゃなくて日曜だった",
+            "日曜ですね",
+            "映画館は混むかな",
+            "週末は混みますね",
+            "ああ、日曜でもなくて、やっぱり月曜だった",
+        ]
+        messages: list[Message] = []
+        for index, text in enumerate(texts):
+            is_user = index % 2 == 0
+            message = Message(
+                conversation_id=conversation.id,
+                speaker_kind=SpeakerKind.USER.value if is_user else SpeakerKind.CHARACTER.value,
+                speaker_id=speaker.id if is_user else None,
+                content=text,
+            )
+            session.add(message)
+            messages.append(message)
+        await session.flush()
+        original, current = messages[0], messages[-1]
+
+        await create_state(
+            session,
+            conversation_id=conversation.id,
+            kind=ConversationStateKind.CORRECTION.value,
+            content="日曜",
+            source_message_id=messages[2].id,
+            speaker_id=speaker.id,
+            target_speaker_id=speaker.id,
+            ref_kind=ConversationStateRefKind.MESSAGE.value,
+            ref_id=original.id,
+            detected_by=DetectionSource.LLM.value,
+        )
+        open_states = await get_open_states(
+            session, conversation_id=conversation.id, target_speaker_id=speaker.id
+        )
+        history = messages[:-1]
+        context, candidates = await gather_interpretation_context(
+            session,
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            current_message=current,
+            history=history,
+            memory_items=[],
+            open_states=open_states,
+            discrepancy_ledger={},
+            context_messages=2,
+        )
+
+    # 元の発言は直近2件の窓の外にある
+    assert original.id not in {message.id for message in history[-2:]}
+    # それでも、開いている訂正の対象として受け付ける・解釈にも見せる
+    assert original.id in candidates.message_ids
+    assert f"（対象: message {original.id}）" in context
+
+
+async def _correction_fixture(session):
+    """土曜→日曜の訂正が1件開いている会話。
+
+    返り値は (speaker, conversation, messages, correction)。
+    """
+    speaker = Speaker(source="local_text", external_id="dev", display_name="開発者")
+    conversation = Conversation()
+    session.add_all([speaker, conversation])
+    await session.flush()
+    messages: list[Message] = []
+    for text, is_user in [
+        ("土曜に映画に行くよ", True),
+        ("土曜ですね", False),
+        ("ごめん、土曜じゃなくて日曜だった", True),
+        ("日曜ですね、覚えておきます", False),
+        ("ああ、日曜でもなくて、やっぱり月曜だった", True),
+    ]:
+        message = Message(
+            conversation_id=conversation.id,
+            speaker_kind=SpeakerKind.USER.value if is_user else SpeakerKind.CHARACTER.value,
+            speaker_id=speaker.id if is_user else None,
+            content=text,
+        )
+        session.add(message)
+        messages.append(message)
+    await session.flush()
+    correction = await create_state(
+        session,
+        conversation_id=conversation.id,
+        kind=ConversationStateKind.CORRECTION.value,
+        content="日曜",
+        source_message_id=messages[2].id,
+        speaker_id=speaker.id,
+        target_speaker_id=speaker.id,
+        ref_kind=ConversationStateRefKind.MESSAGE.value,
+        ref_id=messages[0].id,
+        detected_by=DetectionSource.LLM.value,
+    )
+    return speaker, conversation, messages, correction
+
+
+def _candidates_for(
+    states: list[ConversationState], messages: list[Message]
+) -> InterpretationCandidates:
+    return InterpretationCandidates(
+        open_states={state.id: state for state in states},
+        message_ids={message.id for message in messages},
+    )
+
+
+async def test_explicit_supersede_replaces_older_correction(session_factory) -> None:
+    """同じ事実の訂正し直しは、解釈が置き換える訂正を `withdrawals`（superseded）で
+    名指しし、同じ結果に検証を通った新しい correction があるときだけ置き換える
+    （ISSUE-044）。
+
+    実モデルは2回目の訂正で元の対象（土曜の発言）ではなく直前の発言や YUI の
+    復唱を指すため、`(ref_kind, ref_id)` の一致では旧訂正が残る。source を辿って
+    「同じ事実」と推測する経路は、同じ発言に含まれていた別の事実の訂正まで
+    消すため置かない（レビューで再現）。
+    """
+    async with session_factory() as session:
+        speaker, conversation, messages, old = await _correction_fixture(session)
+        current = messages[-1]
+        result = InterpretationResult(
+            correction=CorrectionPayload(
+                ref_kind=ConversationStateRefKind.MESSAGE.value,
+                ref_id=messages[3].id,  # YUI の復唱を指した（元の対象ではない）
+                content="月曜",
+            ),
+            withdrawals=[WithdrawalPayload(state_id=old.id, reason="superseded")],
+        )
+        summary = await apply_interpretation_result(
+            session,
+            result,
+            candidates=_candidates_for([old], messages),
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            speaker_id=speaker.id,
+            current_message=current,
+        )
+        await session.refresh(old)
+        assert old.status == ConversationStateStatus.WITHDRAWN.value
+        assert old.withdraw_reason == ConversationStateWithdrawReason.SUPERSEDED.value
+        assert summary["created_correction"] is True
+        assert summary["withdrawn_state_ids"] == [old.id]
+        open_corrections = await get_open_states(
+            session,
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            kind=ConversationStateKind.CORRECTION.value,
+        )
+        assert [state.content for state in open_corrections] == ["月曜"]
+
+
+async def test_supersede_without_replacement_is_dropped(session_factory) -> None:
+    """置き換え先の correction が無い superseded は受け付けない（有効な訂正が
+    無言で消えないため。従来どおり）。"""
+    async with session_factory() as session:
+        speaker, conversation, messages, old = await _correction_fixture(session)
+        result = InterpretationResult(
+            withdrawals=[WithdrawalPayload(state_id=old.id, reason="superseded")],
+        )
+        summary = await apply_interpretation_result(
+            session,
+            result,
+            candidates=_candidates_for([old], messages),
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            speaker_id=speaker.id,
+            current_message=messages[-1],
+        )
+        await session.refresh(old)
+        assert old.status == ConversationStateStatus.OPEN.value
+        assert summary["withdrawn_state_ids"] == []
+        assert any("withdrawals" in item for item in summary["dropped"])
+
+
+async def test_supersede_only_applies_to_corrections(session_factory) -> None:
+    """新しい correction があっても、correction 以外の状態への superseded は
+    受け付けない（質問や延期が訂正の置き換えとして消えないため）。"""
+    async with session_factory() as session:
+        speaker, conversation, messages, old = await _correction_fixture(session)
+        question = await create_state(
+            session,
+            conversation_id=conversation.id,
+            kind=ConversationStateKind.QUESTION_TO_YUI.value,
+            content="何時から？",
+            source_message_id=messages[2].id,
+            speaker_id=speaker.id,
+            target_speaker_id=speaker.id,
+        )
+        result = InterpretationResult(
+            correction=CorrectionPayload(
+                ref_kind=ConversationStateRefKind.MESSAGE.value,
+                ref_id=messages[2].id,
+                content="月曜",
+            ),
+            withdrawals=[WithdrawalPayload(state_id=question.id, reason="superseded")],
+        )
+        summary = await apply_interpretation_result(
+            session,
+            result,
+            candidates=_candidates_for([old, question], messages),
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            speaker_id=speaker.id,
+            current_message=messages[-1],
+        )
+        await session.refresh(question)
+        await session.refresh(old)
+        assert question.status == ConversationStateStatus.OPEN.value
+        # 名指しされていない旧訂正も、ref が違うので置き換わらない（推測しない）
+        assert old.status == ConversationStateStatus.OPEN.value
+        assert summary["created_correction"] is True
+        assert summary["withdrawn_state_ids"] == []
+
+
+async def test_memory_ref_colliding_with_withdrawn_state_id_is_dropped(session_factory) -> None:
+    """同じ番号を「取り消す状態の id」と「記憶の ref_id」の両方に使った出力は、
+    どちらも適用しない（ISSUE-044 の残件で観測した、状態行の [N] を memory N と
+    書く取り違え）。記憶と状態は id の空間が重なるため、偶然一致した記憶に
+    訂正が付き、さらに旧訂正が消える経路を塞ぐ。"""
+    async with session_factory() as session:
+        speaker, conversation, messages, old = await _correction_fixture(session)
+        candidates = _candidates_for([old], messages)
+        # 取り違えが実害になる条件：同じ番号の記憶が今回の候補に載っている
+        candidates.memory_ids.add(old.id)
+        result = InterpretationResult(
+            correction=CorrectionPayload(
+                ref_kind=ConversationStateRefKind.MEMORY.value,
+                ref_id=old.id,
+                content="月曜",
+            ),
+            withdrawals=[WithdrawalPayload(state_id=old.id, reason="superseded")],
+        )
+        summary = await apply_interpretation_result(
+            session,
+            result,
+            candidates=candidates,
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            speaker_id=speaker.id,
+            current_message=messages[-1],
+        )
+        await session.refresh(old)
+        assert old.status == ConversationStateStatus.OPEN.value
+        assert summary["created_correction"] is False
+        assert summary["superseded_correction_ids"] == []
+        assert any("取り違え" in item for item in summary["dropped"])
+
+
+async def test_memory_ref_colliding_with_a_cancelled_state_id_is_kept(session_factory) -> None:
+    """同じ番号でも、取消の理由が `superseded` でなければ訂正を捨てない。
+
+    取り違えが観測されたのは旧訂正の置き換え（`superseded`）のときだけ。
+    `cancelled` 等まで含めてガードすると、**正当な訂正を捨てる**——質問の状態 N
+    を取り消しつつ記憶 N を訂正する場合、新しい DB では状態と記憶の id が同じ
+    番号から始まるため偶然一致しやすい（レビューで再現）。
+    """
+    async with session_factory() as session:
+        speaker, conversation, messages, old = await _correction_fixture(session)
+        candidates = _candidates_for([old], messages)
+        candidates.memory_ids.add(old.id)
+        result = InterpretationResult(
+            correction=CorrectionPayload(
+                ref_kind=ConversationStateRefKind.MEMORY.value,
+                ref_id=old.id,
+                content="月曜",
+            ),
+            withdrawals=[WithdrawalPayload(state_id=old.id, reason="cancelled")],
+        )
+        summary = await apply_interpretation_result(
+            session,
+            result,
+            candidates=candidates,
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            speaker_id=speaker.id,
+            current_message=messages[-1],
+        )
+        assert summary["created_correction"] is True
+        assert not any("取り違え" in item for item in summary["dropped"])
+
+
+async def test_duplicate_withdrawals_apply_once(session_factory) -> None:
+    """同じ (state_id, reason) が重複して返っても 1 回だけ適用し、記録も 1 件。"""
+    async with session_factory() as session:
+        speaker, conversation, messages, old = await _correction_fixture(session)
+        result = InterpretationResult(
+            correction=CorrectionPayload(
+                ref_kind=ConversationStateRefKind.MESSAGE.value,
+                ref_id=messages[3].id,
+                content="月曜",
+            ),
+            withdrawals=[
+                WithdrawalPayload(state_id=old.id, reason="superseded"),
+                WithdrawalPayload(state_id=old.id, reason="superseded"),
+            ],
+        )
+        summary = await apply_interpretation_result(
+            session,
+            result,
+            candidates=_candidates_for([old], messages),
+            conversation_id=conversation.id,
+            target_speaker_id=speaker.id,
+            speaker_id=speaker.id,
+            current_message=messages[-1],
+        )
+        assert summary["withdrawn_state_ids"] == [old.id]
+        assert summary["superseded_correction_ids"] == [old.id]
+
+
+# --- 言い直しの語を事実として渡す（ISSUE-048） -------------------------------
+
+
+def test_detect_correction_marker_finds_explicit_rewording() -> None:
+    """明示的な言い直しの語だけを拾う（ISSUE-048）。
+
+    語の有無だけを見て、訂正かどうかの判断はしない。判断は解釈の側に残す。
+    """
+    assert detect_correction_marker("ごめん、土曜じゃなくて日曜だった") == "じゃなくて"
+    assert detect_correction_marker("すみません、間違えました") == "間違え"
+    assert detect_correction_marker("ああ、日曜でもなくて、やっぱり月曜だった") == "やっぱり"
+    # 内容が食い違っていても、言い直しの語が無ければ None。
+    assert detect_correction_marker("あの映画、日曜の回がすごく混みそうだね") is None
+    assert detect_correction_marker("クロワッサンがすごく美味しかった") is None
+
+
+async def test_interpretation_context_states_whether_a_rewording_marker_exists(
+    session_factory,
+) -> None:
+    """解釈への入力に、言い直しの語の有無を**事実として**添える（ISSUE-048）。
+
+    指示文で「語が無ければ discrepancy」と書くだけでは、実モデルは記憶と
+    食い違う発言を 8/8 で `correction` にした。同じ入力にこの1行を足すと
+    discrepancy 側へ変わる（実測）。語の有無は規則で決まるので、LLM に
+    探させずコードが判定して渡す。
+    """
+    async with session_factory() as session:
+        speaker = Speaker(source="local_text", external_id="dev", display_name="開発者")
+        conversation = Conversation()
+        session.add_all([speaker, conversation])
+        await session.flush()
+
+        async def context_for(text: str) -> str:
+            message = Message(
+                conversation_id=conversation.id,
+                speaker_kind=SpeakerKind.USER.value,
+                speaker_id=speaker.id,
+                content=text,
+            )
+            session.add(message)
+            await session.flush()
+            context, _ = await gather_interpretation_context(
+                session,
+                conversation_id=conversation.id,
+                target_speaker_id=speaker.id,
+                current_message=message,
+                history=[],
+                memory_items=[],
+                open_states=[],
+                discrepancy_ledger={},
+                context_messages=6,
+            )
+            return context
+
+        implicit = await context_for("あの映画、日曜の回がすごく混みそうだね")
+        assert "言い直しの語" in implicit
+        assert "**含まれていない**" in implicit
+
+        explicit = await context_for("ごめん、土曜じゃなくて日曜だった")
+        assert "言い直しの語「じゃなくて」が含まれている" in explicit

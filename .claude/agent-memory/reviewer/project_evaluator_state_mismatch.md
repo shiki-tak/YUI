@@ -51,12 +51,38 @@ metadata:
   `README.md` の機能箇条書きが、既定で無効な経路（`request`／`correction`／
   `discrepancy` は `apply_interpretation_result` 経由でしか作られない）を
   「実装済み」として書いた。数字ではなく**到達範囲**の書き過ぎ
+- ISSUE-044/045 の再測定記録（2026-09-15）：同じ表の行を**別の実行**から引いていた。
+  scratchpad の `eval_clean`（4シナリオ、08:54 UTC 開始）は `newer-correction` が **1/3**、
+  `eval_clean2`（同シナリオのみ、09:02 開始）が 2/3。記録は 2/3 だけ書き、他の行（3/3・3/3・状態3/3）は
+  `eval_clean` から引いた。数字（4.4 vs 4.6 秒）も
+  `docs/result`／`config.py` と `issues.md` で食い違い、所要時間はどのログにも残っていない。
+  （訂正：このとき「`harness3.db` が `eval_clean` の窓の中」とも書いたが、`eval_clean/report.md` の mtime は
+  08:58:57 完了、`harness3.db` は 08:59:52 開始で重ならない。窓の終わりは `started_at` ではなく
+  `report.md` の mtime か `run.log` の end で見る）
+- ISSUE-044 最終版（2026-09-15）：記録の数字は**すべてログと一致した**（`eval_final` 09:19:25 開始、
+  q-a 3/3・missed 2/3・explicit 0/3（状態は 3/3）・newer 2/3。`eval_clean` newer 1/3、`eval_clean2` 2/3、
+  修正前 `eval_044_045` 0/3・0/3、対照 `eval_control` q-a 3/3）。同梱 TOML 2 本を FakeLLM
+  （対象を見せる行を読んで superseded を名指しする台本）で `run_scenarios` に流し、両方通ることも確認
 - v0.2→v0.3 判断点の記録（2026-09-15、`docs/result/v0.2.md`）：§2.4 の「終了・延期の意思を無視した発話が
   固定シナリオで 0件」を closing 系 12/12・延期系 9/9 の**機械判定**だけで「満たす」と書いた。
   ログ 141036 の json を `detect_question` に通すと、closing 系 12 本のうち 3 本の返答が
   「寝るね」の直後に質問文（「どんな一日だったのでしょうか？」等）を含むのに `新しい質問が無い`＝○
   （質問が返答の途中の文にあると拾わない）。延期系は同梱 TOML の description 自身が
   「持ち出したかどうかは人手で読む」と書き、`human_check` は空のまま。**機械の数字で人手の条件を「満たす」と書く**形
+- ISSUE-047（2026-09-15）：記録の数字（解釈 21 回成功・3.9/6.9/9.2 秒・timeout 強制 3/3・6 試行の 2 ターン目内訳）は
+  **すべて `report.json` と一致**した（summary の `created_*`・`dropped` まで突き合わせ）。ただし根拠の `report.json` は
+  session の scratchpad（`eval_047_normal`／`eval_047_timeout`）にしか無く、`logs/evals` にも無い。記録にログ ID も無い。
+  ISSUE-048 の「5/5」「8 回の内訳」は実モデルへの直接 probe で成果物ゼロ。ISSUE-044 の所要時間（ハーネスの標準出力のみ）に続き
+  **根拠が揮発する場所にしか無い**形が 3 回目。評価器の新しい集計（失敗理由の表）は `_escape` を通していないので、
+  生出力を含む `InterpretationError` の文（`text[:200]`、整形 JSON の改行）で表が壊れる——新しい表を足す diff は
+  改行・`|` を含む error で `build_markdown` を流す
+
+- 既定 True 転換（2026-09-16）：記録・config は timeout 30 秒の理由を「10 秒では同時実行下で timeout 多発」「単独実行は
+  3.9〜9.2 秒（`eval_047_normal`、指示文を伸ばす**前**）」と書いたが、scratchpad には同じ最終コードを 10 秒で流した
+  `eval_048_after`（18/63 timeout）・`after2`（22/63）・`short`（16/63）が**時刻の重ならない単独実行**で残っていて
+  記録に一切出てこない。30 秒の `eval_048_t30` は最大 12.0 秒で、単独でも 10 秒を超える。根拠ログは 4 本とも scratchpad
+  のみ（`logs/evals` に無い。揮発する場所 4 回目）。**timeout を伸ばす diff は、伸ばす前の値で流した同じコードのログを
+  全部並べ、単独か同時かを `started_at`／`report.md` mtime で確かめる**
 
 **Why:** 評価器は PR の受け入れ条件（§7 のシナリオを 3 回）そのもの。評価器側の誤判定は
 「実装が悪い」と読まれて無駄な修正を誘発するか、逆に人手判定で片付けられて欠陥を隠す。
@@ -102,6 +128,9 @@ pytest は ID や返答を直接埋め込むため、この種の不一致は py
 - 判断点・完了の記録が「0件」「満たす」と書く条件は、対応する同梱 TOML の `description`／`human_check` に
   「人手で読む」が無いか、`report.json` の `human_check` が空でないかを見る。機械判定が○でも
   返答本文に「？」があれば `detect_question` に通して、途中の文の質問を拾えているか確かめる
+- 修正後の実行が**複数**あるときは、記録が引いていない方の `report.md` も開く（悪い方が落とされる）。
+  「単独実行」は、同じ時間帯の他の成果物（harness の DB の `created_at`、他の report の `started_at`）と
+  並べて裏取りする
 - 「曖昧さ・非決定性を塞いだ」と書く修正は、塞いだのが**検出**なのか**原因**なのかを分ける。
   候補の選び方が LLM の出力順に残っていれば、検出器が無言になるぶん前より悪い
 関連：[[surface-regex-false-positives]]

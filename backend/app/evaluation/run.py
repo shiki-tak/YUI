@@ -46,12 +46,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--aspect", default=None, help="観点で絞る（memory / grounding / persona / …）"
     )
+    # 既定が `True` になった（2026-09-16）ので、有効化だけでなく**無効化**も
+    # できないと、設計書 §8.1 の基準（解釈なしの回帰）を CLI から再現できない。
     parser.add_argument(
         "--conversation-state-llm",
-        action="store_true",
+        dest="conversation_state_llm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "会話状態の解釈（LLM）を有効にして流す（v0.2 PR3。既定は無効のまま。"
-            "計画 §7 のシナリオ 5・7・9〜18・20〜24 はこれが無いと解釈が起きない）"
+            "会話状態の解釈（LLM）の有無を上書きする（v0.2 PR3）。"
+            "省略時は設定の既定（現在は有効）。`--no-conversation-state-llm` で"
+            "解釈なしの構成を再現できる。計画 §7 のシナリオ 5・7・9〜18・"
+            "20〜24 は解釈が無いと起きない。"
+            "**解釈ありで測るときは、他の評価を同じ Ollama で並行させない**"
         ),
     )
     return parser.parse_args(argv)
@@ -78,8 +85,10 @@ def _progress(scenario: Scenario, attempt: int, repeat: int) -> None:
 
 async def _run(args: argparse.Namespace, llm: LLMClient) -> Path:
     settings = get_settings()
-    if args.conversation_state_llm:
-        settings = settings.model_copy(update={"conversation_state_llm": True})
+    if args.conversation_state_llm is not None:
+        settings = settings.model_copy(
+            update={"conversation_state_llm": args.conversation_state_llm}
+        )
     persona = load_persona(args.persona_version)
     scenarios = _select(load_scenarios(args.scenarios), args)
 

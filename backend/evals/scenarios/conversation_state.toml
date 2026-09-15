@@ -232,11 +232,23 @@ aspect = "conversation_state"
 description = """相手の質問にYUIが答え損ねたら followup_needed になり、
 次の返答で答えれば resolved になって followup_needed が下りるか
 （計画 §7 シナリオ11）。YUIの返答は実モデルに任せるため、答え損ねるかは
-確定しない。答え損ねなければ1つ目の say で resolved になってよい。"""
+確定しない。答え損ねなければ1つ目の say で resolved になってよい。
+集合場所は記憶として投入しておく。投入しないと YUI は「知らない」としか
+答えられず、答え損ねの判定ではなく前提の欠落を測ることになる（ISSUE-045）。
+質問は**文末**に置く。規則（`detect_request_question`）は文末しか見ないため、
+「〜どこだっけ？ あと疲れたよ」の形だと `question_to_yui` 自体が作られず、
+解釈にも質問を作る欄が無い（ISSUE-046）。気を逸らす「疲れた」は前に置く。"""
+
+[[scenario.memories]]
+key = "meeting-place"
+kind = "promise"
+content = "明日の集合場所は駅前の噴水の前"
+certainty = "fact"
+keywords = "明日 集合場所 駅前 噴水 待ち合わせ"
 
 [[scenario.steps]]
 kind = "say"
-text = "ねえ、明日の集合場所ってどこだっけ？ あと今日すごく疲れたよ"
+text = "今日すごく疲れたよ。あと、明日の集合場所ってどこだっけ？"
 human_check = "集合場所の質問に答えているか。答えていなければ、次のやり取りで答え直すか"
 
 [[scenario.steps]]

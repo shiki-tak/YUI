@@ -27,7 +27,16 @@ _VALID_REF_KINDS = {"memory", "message"}
 
 
 class InterpretationError(RuntimeError):
-    """解釈の結果を読み取れなかった。呼び出し側は規則の結果だけで進む。"""
+    """解釈の結果を読み取れなかった。呼び出し側は規則の結果だけで進む。
+
+    `kind` は失敗を数えるための安定した鍵（ISSUE-047）。メッセージには
+    モデルの生出力が入るため、そのまま集計の鍵にすると、同じ種類の失敗が
+    出力の差だけで別々に数えられ、改行や `|` がレポートの表を壊す。
+    """
+
+    def __init__(self, message: str, *, kind: str = "unknown") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 _INSTRUCTION = """あなたは会話ログから、今の会話状態を解釈する担当です。
@@ -54,15 +63,26 @@ JSON オブジェクトだけを出力してください。説明文やコード
 守ること:
 - id は渡された候補に載っているものだけを使う。無ければ空配列・null にする。
   `ref_kind="message"` の `ref_id` は「直近の会話」の行頭に付いている
-  `[id]`（発言そのものの id）を使う。「参照できる記憶」の `[id]` とは別。
+  `[id]`（発言そのものの id）か、「開いている会話状態」の「（対象: message N）」
+  の N を使う。「参照できる記憶」の `[id]` とは別。状態自体の `[id]` を
+  ref_id に書かない。
 - reopened は延期・終了の状態にだけ、cancelled は質問にだけ、superseded は
   用件・訂正にだけ使う。
 - 強度や自信度は答えない。分からなければ null・空配列のままにする。
 - 相づち（「うん」「はい」等の短い相づちだけの発言）からは confirms_presented_id
   を出さない。
 - is_closing は今の発言だけで判断する。過去に終了しかけたことは無視する。
-- correction は相手が明示的に訂正した場合だけ（「土曜じゃなくて日曜」等）。
-  訂正かどうか不明なら correction ではなく discrepancy を使う。
+- correction と discrepancy を同じ対象に同時に出さない。「直近の会話」の末尾に
+  **言い直しの語は含まれていない**と書かれていたら discrepancy にする（相手は
+  訂正すると言っていない）。語が含まれている場合は、その語が本当に言い直しを
+  指しているかを見て決める。食い違いが無ければどちらも null。
+- 開いている correction と**同じ事実**を訂正し直す発言（「日曜でもなくて月曜」等）
+  では、新しい correction を出すと同時に、置き換える古い correction の id を
+  withdrawals に {"state_id": その id, "reason": "superseded"} として出す。
+  新しい correction が無い superseded は受け付けない。
+- 応答候補が「分からない」「その情報は無い」と明示的に答えている場合は
+  answered_state_ids に含める。答え直す材料が無いので、unanswered にしても
+  次の返答で答えられない。
 """
 
 
@@ -124,21 +144,26 @@ def parse_interpretation(text: str) -> InterpretationResult:
     match = _JSON_OBJECT.search(text)
     if not match:
         raise InterpretationError(
-            f"解釈の結果にJSONオブジェクトが見つかりませんでした: {text[:200]}"
+            f"解釈の結果にJSONオブジェクトが見つかりませんでした: {text[:200]}",
+            kind="json_not_found",
         )
     try:
         raw = json.loads(match.group(0))
     except json.JSONDecodeError as exc:
         raise InterpretationError(
-            f"解釈の結果をJSONとして読み取れませんでした: {text[:200]}"
+            f"解釈の結果をJSONとして読み取れませんでした: {text[:200]}",
+            kind="json_decode",
         ) from exc
     if not isinstance(raw, dict):
-        raise InterpretationError("解釈の結果がオブジェクトではありませんでした。")
+        raise InterpretationError(
+            "解釈の結果がオブジェクトではありませんでした。", kind="not_an_object"
+        )
     try:
         return InterpretationResult.model_validate(raw)
     except ValidationError as exc:
         raise InterpretationError(
-            f"解釈の結果を読み取れませんでした（{exc.error_count()}件）: {text[:200]}"
+            f"解釈の結果を読み取れませんでした（{exc.error_count()}件）: {text[:200]}",
+            kind="schema",
         ) from exc
 
 

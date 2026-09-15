@@ -61,6 +61,10 @@ from app.models import (
 from app.persona import Persona
 
 
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
 @dataclass
 class ReplyResult:
     user_message: Message
@@ -145,11 +149,19 @@ class ConversationAgent:
         # 解釈（LLM。設計 §4 手順3・v0.2 PR3）。既定は無効（計画 §9）。
         # 失敗（例外・timeout・スキーマ違反）は規則の結果だけで進む——
         # 解決・取消は起こさない（計画 §8）。
+        # `latency_ms` は呼び出し単体の時間（成功・失敗にかかわらず残す）。
+        # これが無いと、0/3 のシナリオが timeout で落ちたのか判定を誤ったのか
+        # を後から分けられない（ISSUE-047）。timeout との余裕も測れない。
         interpretation_status: dict[str, object] = {
             "enabled": self._settings.conversation_state_llm,
             "attempted": False,
             "applied": False,
             "error": None,
+            # 失敗を数えるための安定した鍵（ISSUE-047）。`error` の本文はモデルの
+            # 生出力を含むため、集計の鍵にすると同じ種類の失敗が別々に数えられ、
+            # 改行や `|` がレポートの表を壊す。
+            "error_kind": None,
+            "latency_ms": None,
             "summary": None,
         }
         if self._settings.conversation_state_llm:
@@ -176,6 +188,7 @@ class ConversationAgent:
             # （既存の「生成前に commit する」と同じ理由。レビューで実測）。
             # 相手の発言由来の状態はここで確定させてよい（計画 §8）。
             await session.commit()
+            interpretation_started = time.perf_counter()
             try:
                 result = await asyncio.wait_for(
                     interpret_conversation(self._llm, context=context),
@@ -188,9 +201,14 @@ class ConversationAgent:
                 interpretation_status["error"] = (
                     f"timeout ({self._settings.conversation_state_llm_timeout_seconds}s)"
                 )
+                interpretation_status["error_kind"] = "timeout"
+                interpretation_status["latency_ms"] = _elapsed_ms(interpretation_started)
             except (LLMError, InterpretationError) as exc:
                 interpretation_status["error"] = str(exc)
+                interpretation_status["error_kind"] = getattr(exc, "kind", "llm_error")
+                interpretation_status["latency_ms"] = _elapsed_ms(interpretation_started)
             else:
+                interpretation_status["latency_ms"] = _elapsed_ms(interpretation_started)
                 interpretation_status["summary"] = await apply_interpretation_result(
                     session,
                     result,

@@ -84,6 +84,35 @@ _DEFERRAL_RE = re.compile(
     r"[。.！!]*\s*$"
 )
 
+# 指示語（その／あの／この）＋「話／件」は `_DEFERRAL_RE` を単独では通せない
+# （ISSUE-043）。`topic` の非貪欲マッチが最短一致を優先するため、「その話」の
+# 「そ」だけを topic として取り、続く「の話」を任意グループのリテラル一致に
+# 譲ってしまう（「その」自体が「そ」＋「の」で構成されているため）。
+# `_DEFERRAL_RE` 側を直接直す（`topic` の最小長を2文字にする等）と、「写真の話」
+# のように「の話」を剥ぎ取って `topic="写真"` にする既存の正常系まで壊れる
+# （「写真」の直後の「の話」が拾えなくなる）。指示語＋話／件は topic を剥ぎ取る
+# 対象がそもそも無い（指す先は文脈にしかない）ので、フルの語を content として
+# 残す別パターンを優先的に試す。
+_DEFERRAL_DEMONSTRATIVE_RE = re.compile(
+    r"(?P<topic>(?:その|あの|この)(?:話|件))は\s*"
+    r"(また今度|また後で|後で|あとで)"
+    r"(ね|にする|にします|にしよう|にしようね|にしますね|話そう|話します)?"
+    r"[。.！!]*\s*$"
+)
+
+# 明示的な言い直しの語（ISSUE-048）。解釈へ「今回の発言にこの語があるか」を
+# 事実として渡し、correction と discrepancy の取り違えを減らす。語の有無だけを
+# 見て、訂正かどうかの判断はしない（「やっぱり」は言い直し以外でも使う）。
+_CORRECTION_MARKERS = (
+    "じゃなくて",
+    "ではなく",
+    "じゃなく",
+    "間違え",
+    "訂正",
+    "やっぱり",
+    "やっぱ",
+)
+
 # 終了：文末の定型句に限る。「ありがとう」等の単独の発言では検出しない。
 # **最後の文全体**に対して fullmatch する（`^`〜`$`）。「そろそろ」等の前置きは
 # 任意だが、それ以外の内容が混ざった文（「明日は実家に帰ります」「12時に寝る」）
@@ -161,12 +190,38 @@ def detect_request_question(text: str) -> bool:
     return detect_question(stripped) or bool(_REQUEST_ENDING_RE.search(stripped))
 
 
+def detect_correction_marker(text: str) -> str | None:
+    """明示的な言い直しの語があれば、その語を返す。無ければ None。
+
+    解釈（LLM）へ**事実として渡す**ために使う（ISSUE-048）。実モデルは、
+    記憶と食い違う発言を `correction`（明示的な訂正）と `discrepancy`
+    （訂正かどうか不明な食い違い）のどちらにするかで倒れやすく、指示文で
+    「言い直しの語が無ければ discrepancy」と書いても 8/8 で correction へ
+    寄った。**同じ入力に「言い直しの語は無い」と事実を添えると 6/6 で
+    discrepancy 側へ変わる**（実測）。語の有無は規則で機械的に決まるので、
+    LLM に探させず、コードが判定して渡す（設計 §10「決定的に判定できるものは
+    コード」）。
+
+    ここで見るのは語の有無だけで、訂正かどうかの判断はしない。「やっぱり」の
+    ように、言い直し以外でも使う語を含む——判断は解釈の側に残す。
+    """
+    for marker in _CORRECTION_MARKERS:
+        if marker in text:
+            return marker
+    return None
+
+
 def detect_deferral_topic(text: str) -> str | None:
     """延期の文末があれば、話題らしき語を返す。無ければ None。
 
-    判定は最後の文だけを見る（前の文を topic が飲み込まないため）。
+    判定は最後の文だけを見る（前の文を topic が飲み込まないため）。指示語
+    （その／あの／この）＋「話／件」は専用パターンを先に試す（ISSUE-043）。
     """
-    match = _DEFERRAL_RE.search(_last_sentence(text))
+    last = _last_sentence(text)
+    demonstrative = _DEFERRAL_DEMONSTRATIVE_RE.search(last)
+    if demonstrative:
+        return demonstrative.group("topic")
+    match = _DEFERRAL_RE.search(last)
     if not match:
         return None
     topic = match.group("topic").strip("、, 　")
@@ -400,6 +455,18 @@ async def create_or_supersede_correction(
 ) -> ConversationState:
     """訂正を採用する。同じ対象に有効な訂正があれば `superseded` にしてから
     新しい行を作る（計画 3節）。
+
+    「同じ対象」は `(ref_kind, ref_id)` の完全一致だけで見る。解釈（LLM）が
+    同じ事実の訂正し直しで元の対象ではなく「その事実が最後に言われた発言」
+    （直前の相手の発言や YUI の復唱）を指すことは実測で分かっているが、
+    「その発言を指したら同じ事実」と**構造から推測して**置き換えると、
+    同じ発言に含まれていた別の事実の訂正まで消す（「日曜だった。場所は
+    駅前ね」の後の「駅前じゃなくてカフェ」で日曜の訂正が消える。レビューで
+    再現）。相手が明示した訂正を無言で失うのは、古い訂正が重複して残るより
+    悪い。置き換える対象は解釈に **`withdrawals`（`superseded`）で明示させ**、
+    `apply_interpretation_result` が新しい訂正の存在を確かめてから取り消す
+    （ISSUE-044）。名指しが誤っていれば別の訂正が消える——`cancelled`／
+    `misdetected` で質問・延期を消すのと同じ度合いで解釈を信用している。
     """
     existing = await get_open_state_for_ref(
         session,
@@ -1025,7 +1092,14 @@ def _format_open_states(states: list[ConversationState]) -> str:
         return "開いている会話状態: まだありません。"
     lines = ["開いている会話状態（id・種類・本文）:"]
     for state in visible:
-        lines.append(f"- [{state.id}] {state.kind}: {state.content}")
+        # 訂正・食い違いは「どの発言・記憶を対象にしたか」を一緒に見せる。
+        # `create_or_supersede_correction` は (ref_kind, ref_id) の完全一致で
+        # 旧訂正を探すため、対象が見えないと、同じ事実を訂正し直す発言で解釈が
+        # 別の対象（直前の発言）を指し、superseded が起きない（ISSUE-044）。
+        target = ""
+        if state.ref_kind is not None and state.ref_id is not None:
+            target = f"（対象: {state.ref_kind} {state.ref_id}）"
+        lines.append(f"- [{state.id}] {state.kind}{target}: {state.content}")
     return "\n".join(lines)
 
 
@@ -1067,6 +1141,16 @@ def _format_transcript(history: list[Message], current: Message) -> str:
     for message in [*history, current]:
         who = "YUI" if message.speaker_kind == SpeakerKind.CHARACTER.value else "相手"
         lines.append(f"- [{message.id}] {who}: {message.content}")
+    # 言い直しの語の有無を**事実として**添える（ISSUE-048）。指示文で
+    # 「語が無ければ discrepancy」と書くだけでは実モデルが correction へ
+    # 倒れる（8/8）が、この1行を足すと discrepancy 側へ変わる（6/6）。
+    marker = detect_correction_marker(current.content)
+    lines.append("")
+    if marker is None:
+        listed = "」「".join(_CORRECTION_MARKERS)
+        lines.append(f"相手の最後の発言に、言い直しの語（「{listed}」）は**含まれていない**。")
+    else:
+        lines.append(f"相手の最後の発言に、言い直しの語「{marker}」が含まれている。")
     return "\n".join(lines)
 
 
@@ -1120,6 +1204,19 @@ async def gather_interpretation_context(
         ]
     )
 
+    # 開いている訂正・食い違いの対象は、直近の窓の外にあっても指せる必要がある
+    # （同じ事実の訂正し直しは元の対象を指す。ISSUE-044）。解釈に見せた対象は
+    # 検証でも受け付ける。見せていないものは従来どおり受け付けない。
+    ref_message_ids = {
+        state.ref_id
+        for state in open_states
+        if state.ref_kind == ConversationStateRefKind.MESSAGE.value and state.ref_id is not None
+    }
+    ref_memory_ids = {
+        state.ref_id
+        for state in open_states
+        if state.ref_kind == ConversationStateRefKind.MEMORY.value and state.ref_id is not None
+    }
     candidates = InterpretationCandidates(
         open_states={state.id: state for state in open_states},
         judgment_candidates={
@@ -1128,8 +1225,10 @@ async def gather_interpretation_context(
         pending_discrepancies={
             state_id: message for state_id, (_, message) in pending_discrepancies.items()
         },
-        memory_ids={memory_id for memory_id, _ in memory_items},
-        message_ids={message.id for message in recent_history} | {current_message.id},
+        memory_ids={memory_id for memory_id, _ in memory_items} | ref_memory_ids,
+        message_ids=(
+            {message.id for message in recent_history} | {current_message.id} | ref_message_ids
+        ),
     )
     return context, candidates
 
@@ -1159,13 +1258,16 @@ WITHDRAW_REASON_KINDS: dict[str, set[str] | None] = {
         ConversationStateKind.QUESTION_TO_YUI.value,
         ConversationStateKind.QUESTION_TO_PARTNER.value,
     },
-    # superseded は `withdrawals` からは受け付けない。置き換え先の新しい
+    # superseded は `withdrawals` からは原則受け付けない。置き換え先の新しい
     # request／correction の作成が検証を通った場合だけ適用するもので
     # （計画 §4 手順3）、`create_or_supersede_request`／
     # `create_or_supersede_correction` が置き換え先の作成と同じトランザ
     # クションで自分で行う。ここで無条件に受け付けると、置き換え先が
     # 無い（＝ result.request／result.correction が無いか検証で落ちた）の
     # に有効な訂正・用件だけが消える（レビューで実測）。
+    # 例外：`apply_interpretation_result` は、同じ結果に検証を通った新しい
+    # correction があるときだけ、correction への superseded を受け付ける
+    # （ISSUE-044。同じ事実の訂正し直しで対象の発言が変わる場合の置き換え）。
     ConversationStateWithdrawReason.SUPERSEDED.value: set(),
     # misdetected は検出（規則・解釈）が誤って作った行を取り消すためのもの。
     # `presented` は YUI が実際にそう言った事実そのもの、`confirmed` は
@@ -1225,6 +1327,7 @@ async def apply_interpretation_result(
         "resolved_state_ids": [],
         "followup_state_ids": [],
         "withdrawn_state_ids": [],
+        "superseded_correction_ids": [],
         "asked_discrepancy_ids": [],
         "resolved_discrepancy_ids": [],
         "created_request": False,
@@ -1291,7 +1394,30 @@ async def apply_interpretation_result(
 
     correction_ref: tuple[str, int] | None = None
     if result.correction is not None:
-        if _ref_is_valid(result.correction, candidates):
+        # 取り違えが観測されたのは `superseded`（旧訂正の置き換え）のときだけ
+        # なので、ガードもそこに限る。**`cancelled` 等まで含めると、正当な訂正を
+        # 捨てる**——質問 state N を取り消しつつ記憶 N を訂正する場合、新しい DB
+        # では state と memory の id が同じ番号から始まるため偶然一致しやすく、
+        # 相手が明示した訂正だけが消えて取消が残る（レビューで再現）。
+        superseded_ids = {
+            withdrawal.state_id
+            for withdrawal in result.withdrawals
+            if withdrawal.reason == "superseded"
+        }
+        if (
+            result.correction.ref_kind == ConversationStateRefKind.MEMORY.value
+            and result.correction.ref_id in superseded_ids
+        ):
+            # 同じ番号を「置き換える訂正の id」と「記憶の id」の両方に使っている。
+            # 実測で、状態行の [N] を `memory N` と書く出力があり（ISSUE-044 の
+            # 残件）、偶然一致した記憶に訂正が付き、さらに旧訂正が消える。
+            # この曖昧な参照のときは correction を適用しない。correction が
+            # 無くなるので、下の superseded も弾かれる。
+            dropped.append(
+                "correction: ref_id が superseded の state_id と同じ番号"
+                "（記憶と状態の取り違え）"
+            )
+        elif _ref_is_valid(result.correction, candidates):
             correction_ref = (result.correction.ref_kind, result.correction.ref_id)
         else:
             dropped.append("correction: ref が候補にありません")
@@ -1308,11 +1434,33 @@ async def apply_interpretation_result(
         )
         summary["resolved_discrepancy_ids"].append(state_id)  # type: ignore[union-attr]
 
-    for withdrawal in result.withdrawals:
+    # 同じ (state_id, reason) が重複して返っても1回だけ適用する。
+    unique_withdrawals = {
+        (withdrawal.state_id, withdrawal.reason): withdrawal for withdrawal in result.withdrawals
+    }
+    for withdrawal in unique_withdrawals.values():
         if withdrawal.state_id in conflicting:
             continue
         state = candidates.open_states.get(withdrawal.state_id)
-        if state is None or not withdraw_reason_applies(state.kind, withdrawal.reason):
+        # 訂正の置き換えは、解釈が `superseded` で置き換える訂正を名指しし、
+        # **同じ結果に検証を通った新しい correction がある**ときだけ受け付ける
+        # （ISSUE-044。計画 §4 手順3「置き換え先の作成が検証を通った場合だけ」）。
+        # 置き換え先が無い superseded は従来どおり弾く。同じ事実の訂正し直しで
+        # 解釈が元の対象と別の発言を指すため、`(ref_kind, ref_id)` の一致だけ
+        # では置き換わらない。構造からの推測（source を辿る等）は別の事実の
+        # 訂正を巻き込むので行わない。**名指しが誤っていれば別の訂正が消える**
+        # ——HEAD（superseded を全拒否）では起きなかった損失で、cancelled／
+        # misdetected で質問・延期を消すのと同じだけ解釈を信用している。
+        # 置き換えは `superseded_correction_ids` で `RunRecord.options` から追える。
+        explicit_supersede = (
+            withdrawal.reason == ConversationStateWithdrawReason.SUPERSEDED.value
+            and state is not None
+            and state.kind == ConversationStateKind.CORRECTION.value
+            and correction_ref is not None
+        )
+        if state is None or not (
+            explicit_supersede or withdraw_reason_applies(state.kind, withdrawal.reason)
+        ):
             dropped.append(f"withdrawals: 対象外 id {withdrawal.state_id}")
             continue
         await withdraw_state(
@@ -1323,6 +1471,8 @@ async def apply_interpretation_result(
             resolved_message_id=current_message.id,
         )
         summary["withdrawn_state_ids"].append(withdrawal.state_id)  # type: ignore[union-attr]
+        if explicit_supersede:
+            summary["superseded_correction_ids"].append(withdrawal.state_id)  # type: ignore[union-attr]
 
     if result.deferral_topic:
         await create_state(

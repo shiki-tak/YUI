@@ -14,6 +14,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from app.evaluation.runner import ScenarioResult
@@ -24,6 +25,58 @@ from app.persona import Persona
 def _escape(text: str) -> str:
     """表のセルに入れる。改行と縦棒だけ潰す。"""
     return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _interpretation_summary(results: list[ScenarioResult]) -> list[str]:
+    """解釈（LLM）の失敗と所要時間（ISSUE-047）。
+
+    解釈の失敗は設計どおり握りつぶされ、返答は返る。上の「実行できなかった
+    試行」には数えられないため、別枠で出さないと 0/3 の内訳が timeout か
+    判定の誤りかを分けられない。解釈が無効な実行では何も出さない。
+    """
+    turns = [
+        turn
+        for result in results
+        for attempt in result.attempts
+        for turn in attempt.turns
+        if (turn.interpretation or {}).get("attempted")
+    ]
+    if not turns:
+        return []
+
+    failed = [turn for turn in turns if turn.interpretation_failed]
+    reasons: dict[str, int] = {}
+    for turn in failed:
+        status = turn.interpretation or {}
+        # 集計の鍵は `error_kind`（timeout / json_not_found / json_decode /
+        # not_an_object / schema / llm_error）。`error` の本文にはモデルの生出力が
+        # 入るため、鍵にすると同じ種類の失敗が出力の差だけで別々に数えられ、
+        # 改行や `|` が表を壊す（ISSUE-047 のレビュー指摘）。
+        key = str(status.get("error_kind") or "不明")
+        reasons[key] = reasons.get(key, 0) + 1
+
+    latencies = [
+        ms
+        for turn in turns
+        if isinstance(ms := (turn.interpretation or {}).get("latency_ms"), int)
+    ]
+    lines = [
+        f"解釈（LLM）を試みたターン：**{len(turns)}**、"
+        f"うち失敗：**{len(failed)}**"
+        "（失敗しても返答は返るため、上の「実行できなかった試行」には入らない）。",
+        "",
+    ]
+    if reasons:
+        lines += ["| 失敗の理由 | 回数 |", "| --- | ---: |"]
+        lines += [f"| {_escape(reason)} | {count} |" for reason, count in sorted(reasons.items())]
+        lines.append("")
+    if latencies:
+        lines += [
+            f"解釈の所要時間（呼び出し単体）：最小 {min(latencies) / 1000:.1f}s ／ "
+            f"中央 {median(latencies) / 1000:.1f}s ／ 最大 {max(latencies) / 1000:.1f}s。",
+            "",
+        ]
+    return lines
 
 
 def build_markdown(
@@ -73,6 +126,9 @@ def build_markdown(
         f"実行できなかった試行：**{sum(r.failed_to_run for r in results)}**"
         "（モデルの呼び出しや出力の読み取りに失敗したもの）。",
         "",
+    ]
+    lines += _interpretation_summary(results)
+    lines += [
         "| シナリオ | 観点 | 判定 |",
         "| --- | --- | --- |",
     ]

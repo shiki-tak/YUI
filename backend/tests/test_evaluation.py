@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import BACKEND_ROOT, get_settings
+from app.config import BACKEND_ROOT, Settings, get_settings
 from app.evaluation.report import build_markdown, write_report
 from app.evaluation.runner import run_scenarios
 from app.evaluation.scenario import Scenario, ScenarioError, load_scenarios
@@ -978,3 +978,178 @@ def test_expect_no_new_question_uses_the_implementations_own_judgement() -> None
         spec, reply_without_question, [], [], [], [], {},
     )}
     assert ok["新しい質問が無い"].ok
+
+
+async def test_report_counts_interpretation_failures_separately(fake_llm: FakeLLM) -> None:
+    """解釈（LLM）の失敗と所要時間を報告に出す（ISSUE-047）。
+
+    解釈の失敗は設計どおり握りつぶされて返答は返るため、「実行できなかった
+    試行」には数えられない。別枠で出さないと、0/3 のシナリオが timeout で
+    落ちたのか判定を誤ったのかを後から分けられない。
+    """
+    fake_llm.push("写真ですね。")
+    # 解釈がスキーマ違反を返す（JSON として読めない）。
+    fake_llm.push_interpretation("これは JSON ではありません")
+    persona = load_persona()
+    results = await run_scenarios(
+        [_scenario()],
+        llm=fake_llm,
+        persona=persona,
+        settings=Settings(conversation_state_llm=True),
+    )
+    turn = results[0].attempts[0].turns[0]
+    assert turn.interpretation is not None
+    assert turn.interpretation["attempted"] is True
+    assert turn.interpretation["error"] is not None
+    assert turn.interpretation_failed is True
+    # 失敗しても返答は返り、「実行できなかった試行」には数えない。
+    assert results[0].failed_to_run == 0
+
+    markdown = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=True,
+    )
+    assert "解釈（LLM）を試みたターン" in markdown
+    assert "うち失敗：**1**" in markdown
+    # 理由は例外の種別で丸める。`error` の本文はモデルの生出力を含むため、
+    # 鍵にすると同じ種類の失敗が別々に数えられ、改行や `|` が表を壊す。
+    assert "| json_not_found | 1 |" in markdown
+
+
+async def test_report_records_interpretation_latency(fake_llm: FakeLLM) -> None:
+    """成功した解釈の所要時間も残す。timeout との余裕を測れるようにするため
+    （ISSUE-047。本書の記録では「呼び出し単体の時間は測っていない」とされて
+    いた）。"""
+    fake_llm.push("写真ですね。")
+    fake_llm.push_interpretation("{}")
+    persona = load_persona()
+    results = await run_scenarios(
+        [_scenario()],
+        llm=fake_llm,
+        persona=persona,
+        settings=Settings(conversation_state_llm=True),
+    )
+    turn = results[0].attempts[0].turns[0]
+    assert turn.interpretation["applied"] is True
+    assert turn.interpretation["error"] is None
+    assert isinstance(turn.interpretation["latency_ms"], int)
+    assert turn.interpretation_failed is False
+
+    markdown = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=True,
+    )
+    assert "解釈の所要時間（呼び出し単体）" in markdown
+
+
+async def test_report_omits_interpretation_summary_when_disabled(fake_llm: FakeLLM) -> None:
+    """解釈が無効な実行では、解釈の集計そのものを出さない（無関係な 0 件の
+    行でレポートを埋めない）。"""
+    fake_llm.push("写真ですね。")
+    persona = load_persona()
+    # 既定は 2026-09-16 に `True` になったので、無効の構成は明示して作る。
+    results = await run_scenarios(
+        [_scenario()],
+        llm=fake_llm,
+        persona=persona,
+        settings=Settings(conversation_state_llm=False),
+    )
+    markdown = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=False,
+    )
+    assert "解釈（LLM）を試みたターン" not in markdown
+
+
+async def test_report_groups_schema_failures_under_one_reason(fake_llm: FakeLLM) -> None:
+    """同じ種類の失敗は、モデルの生出力が違っても1行にまとまる（ISSUE-047 の
+    レビュー指摘）。
+
+    解釈の失敗のメッセージは生出力（`text[:200]`）を含む。これを集計の鍵に
+    すると、同じスキーマ違反が出力の差だけで別々の行に割れ、改行や `|` が
+    Markdown の表を壊す。
+    """
+    fake_llm.push("写真ですね。")
+    fake_llm.push("写真ですね。")
+    # どちらもスキーマ違反だが、生出力は違う（改行と `|` を含む）。
+    fake_llm.push_interpretation('{\n  "request": "写真 | の話",\n  "is_closing": "はい"\n}')
+    fake_llm.push_interpretation('{"request": "別の話", "is_closing": "いいえ"}')
+    persona = load_persona()
+    results = await run_scenarios(
+        [_scenario(turns=[{"text": "ひとつ目"}, {"text": "ふたつ目"}])],
+        llm=fake_llm,
+        persona=persona,
+        settings=Settings(conversation_state_llm=True),
+    )
+    markdown = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=True,
+    )
+    assert "うち失敗：**2**" in markdown
+    assert "| schema | 2 |" in markdown
+    # 表の行数は見出し2行＋理由1行。生出力で割れていない。
+    reason_rows = [line for line in markdown.splitlines() if line.startswith("| schema")]
+    assert len(reason_rows) == 1
+
+
+async def test_report_counts_interpretation_timeout(fake_llm: FakeLLM) -> None:
+    """timeout も失敗として数え、所要時間を残す（ISSUE-047）。
+
+    timeout は `asyncio.wait_for` で切るため、例外の型が他の失敗と違う。
+    理由の鍵が `timeout` になり、所要時間が timeout の値に張り付くことを固定する。
+    """
+    fake_llm.push("写真ですね。")
+    fake_llm.push_interpretation("{}")
+    fake_llm.interpretation_delay = 0.2
+    persona = load_persona()
+    results = await run_scenarios(
+        [_scenario()],
+        llm=fake_llm,
+        persona=persona,
+        settings=Settings(
+            conversation_state_llm=True, conversation_state_llm_timeout_seconds=0.02
+        ),
+    )
+    turn = results[0].attempts[0].turns[0]
+    assert turn.interpretation_failed is True
+    assert turn.interpretation["error_kind"] == "timeout"
+    assert turn.interpretation["applied"] is False
+    assert isinstance(turn.interpretation["latency_ms"], int)
+    # 返答は返る（解釈の失敗は握りつぶす。計画 §8）。
+    assert turn.reply
+
+    markdown = build_markdown(
+        results,
+        persona=persona,
+        model="qwen3.5:9b",
+        model_digest="sha256:test",
+        options={"temperature": 0.8},
+        repeat=1,
+        started_at=datetime.now(UTC),
+        conversation_state_llm=True,
+    )
+    assert "| timeout | 1 |" in markdown
