@@ -67,28 +67,47 @@ export function useSpeechPlayer(
   const onDeliveredRef = useRef(onDelivered);
   onDeliveredRef.current = onDelivered;
 
-  const notify = useCallback((messageId: number, state: DeliveryNotice) => {
-    api
-      .notifyDelivery(messageId, state)
-      .then((message) => onDeliveredRef.current?.(message))
-      .catch(() => {
-        // 記録に失敗しても再生は続ける。会話を止める理由にはしない。
-      });
-  }, []);
+  const notify = useCallback(
+    (messageId: number, state: DeliveryNotice, progress?: number) => {
+      api
+        .notifyDelivery(messageId, state, progress)
+        .then((message) => onDeliveredRef.current?.(message))
+        .catch(() => {
+          // 記録に失敗しても再生は続ける。会話を止める理由にはしない。
+        });
+    },
+    [],
+  );
 
   /**
    * 始まっている再生を終える。開始を通知した発言には、必ず終わりも通知する。
    *
-   * 通知しないと、鳴っていないのに記録が「再生中」のまま残る。
+   * 通知しないと、鳴っていないのに記録が「再生中」のまま残る。progress
+   * （0〜1）は中断（aborted）のときだけ使う。サーバー側が届いた文字数の
+   * 近似に使う（ISSUE-051）。
    */
   const finishPlayback = useCallback(
-    (state: "completed" | "aborted") => {
+    (state: "completed" | "aborted", progress?: number) => {
       const started = playingRef.current;
       playingRef.current = null;
-      if (started !== null) notify(started, state);
+      if (started !== null) notify(started, state, progress);
     },
     [notify],
   );
+
+  /**
+   * いま鳴っている音声の再生位置を、0〜1 の比率として読む。
+   *
+   * teardown() は音声要素を手放すため、その前に呼ぶ必要がある。長さが
+   * 分からない（メタデータ未取得）場合は近似できないので undefined を返す。
+   */
+  const captureProgress = useCallback((): number | undefined => {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) {
+      return undefined;
+    }
+    return Math.min(1, Math.max(0, audio.currentTime / audio.duration));
+  }, []);
 
   /** 鳴っている音声を止めて後片付けする。終わりを通知するかは呼び出し側が決める。 */
   const teardown = useCallback(() => {
@@ -168,20 +187,22 @@ export function useSpeechPlayer(
   const stop = useCallback(() => {
     // 取得中の要求も無効にする。あとから届いた音声が鳴り出さないようにする。
     requestRef.current += 1;
+    const progress = captureProgress();
     teardown();
     setPlayingId(null);
     setLoadingId(null);
-    finishPlayback("aborted");
-  }, [finishPlayback, teardown]);
+    finishPlayback("aborted", progress);
+  }, [captureProgress, finishPlayback, teardown]);
 
   const play = useCallback(
     (messageId: number) => {
       if (disposedRef.current) return;
       const request = ++requestRef.current;
       // 直前の再生は中断として記録する。重ねて鳴らさないため。
+      const previousProgress = captureProgress();
       teardown();
       setPlayingId(null);
-      finishPlayback("aborted");
+      finishPlayback("aborted", previousProgress);
 
       setLoadingId(messageId);
       setError(null);
@@ -226,11 +247,12 @@ export function useSpeechPlayer(
         };
         audio.onerror = () => {
           if (!current()) return;
+          const progress = captureProgress();
           teardown();
           setPlayingId(null);
           setLoadingId(null);
           // 鳴り始めたあとの異常終了でも、記録を再生中のまま残さない。
-          finishPlayback("aborted");
+          finishPlayback("aborted", progress);
           setError("音声を再生できませんでした。");
         };
 
@@ -270,7 +292,7 @@ export function useSpeechPlayer(
         await connectAnalyser(audio, request);
       })();
     },
-    [connectAnalyser, finishPlayback, notify, teardown],
+    [captureProgress, connectAnalyser, finishPlayback, notify, teardown],
   );
 
   // 画面を離れるとき。鳴らしっぱなしにせず、取得中の要求も無効にする。
@@ -283,10 +305,11 @@ export function useSpeechPlayer(
     return () => {
       disposedRef.current = true;
       requestRef.current += 1;
+      const progress = captureProgress();
       teardown();
-      finishPlayback("aborted");
+      finishPlayback("aborted", progress);
     };
-  }, [finishPlayback, teardown]);
+  }, [captureProgress, finishPlayback, teardown]);
 
   return {
     playingId,

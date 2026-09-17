@@ -522,7 +522,13 @@ async def update_delivery(
     すでに話し終えた発言への通知は、聞き直しとみなして記録を変えない。
     """
     message = await _character_message(session, message_id)
-    return await apply_delivery_state(session, message, DeliveryState(payload.state), now=utcnow())
+    return await apply_delivery_state(
+        session,
+        message,
+        DeliveryState(payload.state),
+        now=utcnow(),
+        progress=payload.progress,
+    )
 
 
 @router.post("/messages/{message_id}/ideal", response_model=IdealResponseOut)

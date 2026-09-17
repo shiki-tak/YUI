@@ -44,6 +44,9 @@ class MessageOut(ORMModel):
     delivery_state: str
     delivery_started_at: UtcDatetime | None
     delivery_finished_at: UtcDatetime | None
+    # 中断（aborted）のときだけ入る近似値。completed では常に NULL
+    # （「全文届いた」を意味する。ISSUE-051）。
+    delivered_char_count: int | None
     created_at: UtcDatetime
 
 
@@ -221,6 +224,9 @@ class DeliveryUpdate(BaseModel):
     """再生の通知。generated は生成時の状態なので受け付けない。"""
 
     state: Literal["playing", "completed", "aborted"]
+    # state="aborted" のときだけ使う。画面が再生位置（currentTime / duration）
+    # から測った比率（ISSUE-051）。他の state では無視する。
+    progress: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class MemoryCreate(BaseModel):

@@ -137,10 +137,12 @@ export const api = {
   },
 
   // 再生の開始・完了・中断を記録する。聞き直しでは記録は変わらない。
-  notifyDelivery: (messageId: number, state: DeliveryNotice) =>
+  // progress（0〜1）は中断のときだけ使う。再生位置から測った比率で、
+  // サーバー側が届いた文字数の近似に使う（ISSUE-051）。
+  notifyDelivery: (messageId: number, state: DeliveryNotice, progress?: number) =>
     request<Message>(`/conversations/messages/${messageId}/delivery`, {
       method: "POST",
-      body: JSON.stringify({ state }),
+      body: JSON.stringify(progress === undefined ? { state } : { state, progress }),
     }),
 
   run: (messageId: number) =>

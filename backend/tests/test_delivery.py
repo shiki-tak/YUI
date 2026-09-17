@@ -13,7 +13,7 @@ import pytest
 from httpx import AsyncClient
 
 from app import main
-from app.agent.delivery import apply_delivery_state
+from app.agent.delivery import _delivered_char_count, apply_delivery_state
 from app.models import DeliveryState, Message, utcnow
 from tests.conftest import FakeSpeech
 
@@ -27,9 +27,14 @@ async def _say(client: AsyncClient, text: str, conversation_id: int | None = Non
     return response.json()
 
 
-async def _delivery(client: AsyncClient, message_id: int, state: str):
+async def _delivery(
+    client: AsyncClient, message_id: int, state: str, *, progress: float | None = None
+):
+    payload: dict = {"state": state}
+    if progress is not None:
+        payload["progress"] = progress
     return await client.post(
-        f"/api/conversations/messages/{message_id}/delivery", json={"state": state}
+        f"/api/conversations/messages/{message_id}/delivery", json=payload
     )
 
 
@@ -320,6 +325,103 @@ async def test_stale_finish_notice_does_not_move_the_first_record(
     stored = (await client.get(f"/api/conversations/messages/{message_id}")).json()
     assert stored["delivery_state"] == "completed"
     assert stored["delivery_finished_at"] == finished["delivery_finished_at"]
+
+
+async def test_aborted_playback_records_the_delivered_char_count(
+    client: AsyncClient, fake_llm
+):
+    """中断したとき、再生位置の比率から届いた文字数を近似する（ISSUE-051）。"""
+    fake_llm.push("こんばんは。今日は良い一日でしたか？また明日も話しましょう。")
+    result = await _say(client, "ただいま")
+    message_id = result["reply"]["id"]
+    content = result["reply"]["content"]
+
+    await _delivery(client, message_id, "playing")
+    aborted = (await _delivery(client, message_id, "aborted", progress=0.5)).json()
+
+    assert aborted["delivery_state"] == "aborted"
+    assert aborted["delivered_char_count"] == round(len(content) * 0.5)
+
+
+async def test_completed_playback_never_sets_delivered_char_count(client: AsyncClient):
+    """完了は「全文届いた」を NULL のままで表す。全長を書き直して二重に表現しない。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    await _delivery(client, message_id, "playing")
+    completed = (await _delivery(client, message_id, "completed")).json()
+
+    assert completed["delivery_state"] == "completed"
+    assert completed["delivered_char_count"] is None
+
+
+async def test_aborted_without_progress_leaves_delivered_char_count_unset(
+    client: AsyncClient,
+):
+    """進捗が送られない中断（旧クライアント等）では、量を勝手に決めない。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    await _delivery(client, message_id, "playing")
+    aborted = (await _delivery(client, message_id, "aborted")).json()
+
+    assert aborted["delivery_state"] == "aborted"
+    assert aborted["delivered_char_count"] is None
+
+
+async def test_delivered_char_count_at_full_progress_equals_the_content_length(
+    client: AsyncClient,
+):
+    """比率が1（全部届いた）なら、本文の長さと同じ文字数になる。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+    content = result["reply"]["content"]
+
+    await _delivery(client, message_id, "playing")
+    aborted = (await _delivery(client, message_id, "aborted", progress=1.0)).json()
+
+    assert aborted["delivered_char_count"] == len(content)
+
+
+def test_delivered_char_count_helper_clamps_progress_above_one():
+    """API 側は1を超える比率を422で弾くため（`ge=0, le=1`）、この境界は
+    `_delivered_char_count` を直接呼んで確かめる。壊れた呼び出し元が
+    範囲外の値を渡しても、本文の長さを超える文字数を作らない。
+    """
+    assert _delivered_char_count("こんばんは", 1.5) == len("こんばんは")
+
+
+def test_delivered_char_count_helper_clamps_progress_below_zero():
+    assert _delivered_char_count("こんばんは", -0.5) == 0
+
+
+async def test_delivery_rejects_progress_outside_zero_to_one(client: AsyncClient):
+    result = await _say(client, "こんばんは")
+    response = await _delivery(client, result["reply"]["id"], "aborted", progress=1.5)
+    assert response.status_code == 422
+
+
+async def test_stale_finish_notice_with_progress_does_not_move_the_first_record(
+    client: AsyncClient, session_factory
+):
+    """遅れて届いた中断の通知（進捗つき）でも、確定した完了を上書きしない。"""
+    result = await _say(client, "こんばんは")
+    message_id = result["reply"]["id"]
+
+    async with session_factory() as session:
+        stale = await session.get(Message, message_id)
+        assert stale is not None
+
+        await _delivery(client, message_id, "playing")
+        finished = (await _delivery(client, message_id, "completed")).json()
+
+        await apply_delivery_state(
+            session, stale, DeliveryState.ABORTED, now=utcnow(), progress=0.3
+        )
+
+    stored = (await client.get(f"/api/conversations/messages/{message_id}")).json()
+    assert stored["delivery_state"] == "completed"
+    assert stored["delivered_char_count"] is None
 
 
 async def test_delivery_returns_the_confirmed_state(client: AsyncClient):

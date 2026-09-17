@@ -274,6 +274,14 @@ class Message(Base):
     )
     delivery_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivery_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 中断（aborted）のときだけ入る。再生が実際にどこまで進んだかを、画面が
+    # 測った再生位置（currentTime / duration）から近似した文字数（ISSUE-051）。
+    # 音声は文単位で分割合成していない（ISSUE-012）ため、時間の比率からの
+    # 近似でしかなく、文の境界と一致しない。completed のときは常に NULL のまま
+    # とし、「全文が届いた」を意味させる（content の全長を書き直して二重に
+    # 表現しない）。generated／playing でも NULL のまま——「届いた範囲」は
+    # 中断か完了が確定して初めて言える。
+    delivered_char_count: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

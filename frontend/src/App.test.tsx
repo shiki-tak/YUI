@@ -38,6 +38,7 @@ function message(id: number, kind: "user" | "character", content: string): Messa
     delivery_state: kind === "user" ? "completed" : "generated",
     delivery_started_at: null,
     delivery_finished_at: null,
+    delivered_char_count: null,
     created_at: "2026-09-07T00:00:00Z",
   };
 }

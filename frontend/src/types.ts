@@ -34,6 +34,8 @@ export interface Message {
   delivery_state: DeliveryState;
   delivery_started_at: string | null;
   delivery_finished_at: string | null;
+  /** 中断（aborted）のときだけ入る近似値。completed では常に null（全文届いた）。 */
+  delivered_char_count: number | null;
   created_at: string;
 }
 

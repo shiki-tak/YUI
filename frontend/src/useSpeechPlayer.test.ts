@@ -37,6 +37,9 @@ class FakeAudio {
   pauseCount = 0;
   /** play() が返す約束。自動再生の失敗を作るときに差し替える。 */
   playResult: Promise<void> = Promise.resolve();
+  /** 再生位置の近似（ISSUE-051）に使う。テストで自由に書き換える。 */
+  currentTime = 0;
+  duration = NaN;
 
   constructor(readonly src: string) {
     FakeAudio.instances.push(this);
@@ -89,6 +92,7 @@ beforeEach(() => {
       delivery_state: state,
       delivery_started_at: null,
       delivery_finished_at: null,
+      delivered_char_count: null,
       created_at: "2026-09-07T00:00:00Z",
     };
   });
@@ -165,6 +169,109 @@ describe("停止と追い越し", () => {
       { messageId: 1, state: "aborted" },
     ]);
     expect(result.current.playingId).toBeNull();
+  });
+});
+
+describe("中断時の再生位置（ISSUE-051）", () => {
+  it("停止したとき、再生位置の比率を中断の通知に添える", async () => {
+    const { result } = renderHook(() => useSpeechPlayer());
+
+    act(() => result.current.play(1));
+    await deliverSpeech();
+    await waitFor(() => expect(result.current.playingId).toBe(1));
+
+    FakeAudio.instances[0].duration = 10;
+    FakeAudio.instances[0].currentTime = 5;
+    act(() => result.current.stop());
+
+    const call = vi
+      .mocked(api.notifyDelivery)
+      .mock.calls.find(([, state]) => state === "aborted");
+    expect(call?.[2]).toBeCloseTo(0.5);
+  });
+
+  it("次の返答へ切り替えたとき、前の再生位置の比率を中断の通知に添える", async () => {
+    const { result } = renderHook(() => useSpeechPlayer());
+
+    act(() => result.current.play(1));
+    await deliverSpeech(0);
+    await waitFor(() => expect(result.current.playingId).toBe(1));
+
+    FakeAudio.instances[0].duration = 4;
+    FakeAudio.instances[0].currentTime = 1;
+    act(() => result.current.play(2));
+
+    const call = vi
+      .mocked(api.notifyDelivery)
+      .mock.calls.find(([messageId, state]) => messageId === 1 && state === "aborted");
+    expect(call?.[2]).toBeCloseTo(0.25);
+  });
+
+  it("再生位置がまだ分からない（メタデータ未取得）ときは、比率を送らない", async () => {
+    const { result } = renderHook(() => useSpeechPlayer());
+
+    act(() => result.current.play(1));
+    await deliverSpeech();
+    await waitFor(() => expect(result.current.playingId).toBe(1));
+
+    // duration が NaN のまま（FakeAudio の既定値）。
+    act(() => result.current.stop());
+
+    const call = vi
+      .mocked(api.notifyDelivery)
+      .mock.calls.find(([, state]) => state === "aborted");
+    expect(call?.[2]).toBeUndefined();
+  });
+
+  it("完了した再生には比率を送らない", async () => {
+    const { result } = renderHook(() => useSpeechPlayer());
+
+    act(() => result.current.play(1));
+    await deliverSpeech();
+    await waitFor(() => expect(result.current.playingId).toBe(1));
+
+    FakeAudio.instances[0].duration = 10;
+    FakeAudio.instances[0].currentTime = 10;
+    act(() => FakeAudio.instances[0].onended?.());
+
+    const call = vi
+      .mocked(api.notifyDelivery)
+      .mock.calls.find(([, state]) => state === "completed");
+    expect(call?.[2]).toBeUndefined();
+  });
+
+  it("鳴り始めたあとの異常終了でも、再生位置の比率を中断の通知に添える", async () => {
+    const { result } = renderHook(() => useSpeechPlayer());
+
+    act(() => result.current.play(1));
+    await deliverSpeech();
+    await waitFor(() => expect(result.current.playingId).toBe(1));
+
+    FakeAudio.instances[0].duration = 8;
+    FakeAudio.instances[0].currentTime = 2;
+    act(() => FakeAudio.instances[0].onerror?.());
+
+    const call = vi
+      .mocked(api.notifyDelivery)
+      .mock.calls.find(([, state]) => state === "aborted");
+    expect(call?.[2]).toBeCloseTo(0.25);
+  });
+
+  it("再生中に画面を離れたときも、再生位置の比率を中断の通知に添える", async () => {
+    const { result, unmount } = renderHook(() => useSpeechPlayer());
+
+    act(() => result.current.play(1));
+    await deliverSpeech();
+    await waitFor(() => expect(result.current.playingId).toBe(1));
+
+    FakeAudio.instances[0].duration = 4;
+    FakeAudio.instances[0].currentTime = 3;
+    unmount();
+
+    const call = vi
+      .mocked(api.notifyDelivery)
+      .mock.calls.find(([, state]) => state === "aborted");
+    expect(call?.[2]).toBeCloseTo(0.75);
   });
 });
 

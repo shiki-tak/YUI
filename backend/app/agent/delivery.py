@@ -29,17 +29,36 @@ _ALLOWED_FROM: dict[DeliveryState, tuple[DeliveryState, ...]] = {
 }
 
 
+def _delivered_char_count(content: str, progress: float) -> int:
+    """再生位置の比率から、届いた文字数を近似する（ISSUE-051）。
+
+    文単位で分割合成していない（ISSUE-012）ため、音声のどこまでが
+    どの文字に対応するかは分からない。時間の比率をそのまま文字数の比率に
+    当てるだけの近似であり、文の境界とは一致しない。0文字・全文の
+    どちらにもなりうる。
+    """
+    clamped = min(1.0, max(0.0, progress))
+    return round(len(content) * clamped)
+
+
 async def apply_delivery_state(
     session: AsyncSession,
     message: Message,
     state: DeliveryState,
     *,
     now: datetime,
+    progress: float | None = None,
 ) -> Message:
     """再生の通知を反映し、確定した発言を返す。
 
     反映できるかの判定は DB 上で行う。呼び出し側が読み込んだ状態は、
     判定に使わない。
+
+    `progress`（0〜1）は中断（aborted）のときだけ意味を持つ。画面が
+    再生位置から測った比率で、`delivered_char_count` の近似に使う
+    （ISSUE-051）。completed・playing では無視する——completed は
+    「全文届いた」を `delivered_char_count = NULL` で表すため書き込まず、
+    playing は再生位置がまだ確定していない。
     """
     allowed = _ALLOWED_FROM.get(state)
     if allowed is None:
@@ -52,6 +71,8 @@ async def apply_delivery_state(
         # 再生を始める前に止めた場合、開始時刻は入れない。鳴っていない音声を
         # 「再生した」ことにしないため。
         values["delivery_finished_at"] = now
+        if state is DeliveryState.ABORTED and progress is not None:
+            values["delivered_char_count"] = _delivered_char_count(message.content, progress)
 
     await session.execute(
         update(Message)
