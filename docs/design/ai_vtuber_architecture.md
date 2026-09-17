@@ -170,7 +170,7 @@ flowchart TD
     UI -.-> OBS["任意：OBSからYouTube配信"]
 ```
 
-コンポーネント図（配置境界と技術名）は [architecture.mmd](architecture.mmd) と `images/architecture.png`。検査済みの返答を音声合成へ送り、生成音声は FastAPI 経由でブラウザに返す。音声と字幕・表情を同じターン ID で対応付ける。
+コンポーネント図（配置境界と技術名）は [architecture.mmd](architecture.mmd) と `images/architecture.png`。データの表と関係は第5.3節の ER 図。検査済みの返答を音声合成へ送り、生成音声は FastAPI 経由でブラウザに返す。音声と字幕・表情を同じターン ID で対応付ける。
 
 ### 3.1 同じキャラクターを異なる場所へ接続する
 
@@ -424,6 +424,322 @@ BASE_PERSONA は traits・speech・rules で構成された出発点である。
 - 別人の反対意見は共存させる。同一人物の訂正は時刻・文脈・訂正意図に基づき扱う
 - 同じ人の反復や言い換え、同じ話題の集中はまとめ、件数をそのまま人格更新の強さにしない。別アカウントであっても情報源が独立している保証はない
 - 「今日から乱暴な性格になって」等は会話内容として扱い、人格設定の管理操作とは区別する。引用や冗談を経験上の事実に変換しない
+
+### 5.3 v1.0 時点の ER 図
+
+v1.0（第8.7節）の着手時にどの表が存在し、どう繋がるかを1枚で示す。**実装済みの表だけが正で、それ以外は版の計画（第8節・第10節）と各版の詳細設計をこの図に写したものである。** 列名は実装済みのものはコードどおり、提案・未確定のものは実装時に決める。第8.7節のとおりアーキテクチャは v1.0 着手前に凍結するので、この図は v1.0 に入る前に確定する。
+
+| 印 | 意味 |
+| --- | --- |
+| 実装済み | `backend/app/models.py` にある。列名はコードどおり（2026-09-17 時点） |
+| 提案 | 版の詳細設計（[v0.3 の計画](../plan/v0.3.md) §3.2 など）または第8節に列まで書かれている。物理スキーマは実装時に決める |
+| 未確定 | 存在は決まっているが形が決まっていない（第11節）。初配信前に決める |
+
+**DB に無いもの**：固定人格は `backend/personas/<版>.toml`（`run_records.persona_version` が版名で指す）。評価シナリオは `backend/evals/scenarios/*.toml`、評価結果は `logs/evals/`。第5節の表にある「評価」は DB ではなくこれらのファイルである。JSON 列による参照（`basis_memory_ids`・`referenced_memory_ids`・`referenced_state_ids`・`similar_memory_ids`）は FK 制約を持たない論理参照で、図では関係線を引かず属性の注記で示す。`speech_runs.speaker_id` は VOICEVOX の話者番号であり、`speakers` への FK ではない。
+
+**図A：v1.0 時点に存在する表**
+
+```mermaid
+erDiagram
+    speakers {
+        int id PK "実装済み v0.1"
+        string source "local_text / youtube 等"
+        string external_id "(source, external_id) で同定"
+        string display_name
+        datetime created_at
+    }
+    speaker_links {
+        int id PK "未確定 初配信前 ISSUE-059"
+        int speaker_id_a FK
+        int speaker_id_b FK
+        float confidence
+        string confirmed_by "operator のリンクだけ可視性判定に使う"
+    }
+    scopes {
+        int id PK "未確定 初配信前 ISSUE-059"
+        string kind "speaker / audience"
+        int speaker_id FK "kind=speaker のとき"
+        string name
+    }
+    conversations {
+        int id PK "実装済み v0.1"
+        string mode "local / stream"
+        string title
+        datetime started_at
+        datetime ended_at
+        datetime reflection_started_at
+        datetime reflection_completed_at
+    }
+    messages {
+        int id PK "実装済み v0.1"
+        int conversation_id FK
+        string speaker_kind "user / character"
+        int speaker_id FK "YUI の発言は NULL"
+        string source
+        text content
+        string delivery_state "generated / playing / completed / aborted"
+        datetime delivery_started_at
+        datetime delivery_finished_at
+        int delivered_char_count "aborted のときだけ。近似 ISSUE-051"
+        datetime created_at
+    }
+    run_records {
+        int id PK "実装済み v0.1"
+        int message_id FK "UNIQUE"
+        string provider
+        string model
+        string model_digest
+        string persona_version "personas/<版>.toml"
+        json options "checks / interpretation / emotion の内訳"
+        json referenced_memory_ids "論理参照 FK なし"
+        json referenced_state_ids "論理参照 FK なし"
+        text system_prompt
+        int retrieval_ms
+        int latency_ms
+        int prompt_tokens
+        int completion_tokens
+        text error
+        datetime created_at
+    }
+    speech_runs {
+        int id PK "実装済み v0.1"
+        int message_id FK
+        string provider
+        int speaker_id "VOICEVOX の話者番号。FK ではない"
+        string engine_version
+        int query_ms
+        int synthesis_ms
+        int audio_ms
+        int byte_size
+        datetime created_at
+    }
+    ideal_responses {
+        int id PK "実装済み v0.1"
+        int message_id FK
+        text ideal_text
+        text note
+        datetime created_at
+    }
+    memory_candidates {
+        int id PK "実装済み v0.1"
+        int conversation_id FK
+        string kind
+        text content
+        int subject_speaker_id FK
+        int visible_to_speaker_id FK "scopes へ移行 未確定"
+        string certainty
+        string provenance "firsthand / hearsay / unknown"
+        string visibility
+        text keywords
+        datetime occurred_at
+        int source_message_id FK
+        json similar_memory_ids "論理参照 FK なし"
+        string status "pending / accepted / rejected"
+        int accepted_memory_id FK
+        string extractor_model "提案 ラベルの収集 第10節"
+        string prompt_hash "提案 ラベルの収集 第10節"
+        datetime decided_at "提案 ラベルの収集"
+        text decision_note "提案 ラベルの収集"
+        bool holdout "提案 5件に1件を評価用に取り置く"
+        datetime created_at
+    }
+    memories {
+        int id PK "実装済み v0.1"
+        string kind "experience / about_person / promise / impression / fact"
+        text content
+        int subject_speaker_id FK "対象者"
+        int visible_to_speaker_id FK "参照できる相手。scopes へ移行 未確定"
+        string certainty "fact / inference"
+        string provenance "firsthand / hearsay / unknown"
+        string visibility "private / public"
+        string sensitivity "未確定 感度クラス 第7節。初配信前に決める"
+        string status "active / corrected / deleted"
+        text keywords
+        datetime occurred_at
+        int source_message_id FK
+        int source_conversation_id FK
+        int superseded_by_id FK "自己参照"
+        datetime created_at
+        datetime updated_at
+    }
+    memory_revisions {
+        int id PK "実装済み v0.1"
+        int memory_id FK
+        string action
+        json before
+        json after
+        text reason
+        datetime created_at
+    }
+    character_states {
+        int id PK "実装済み v0.1"
+        string kind "interest / relationship。v0.4 で self_understanding を足す 提案"
+        int subject_speaker_id FK "relationship のとき"
+        string topic
+        text content
+        json basis_memory_ids "論理参照 FK なし"
+        bool basis_is_provisional
+        bool needs_review
+        text review_reason
+        json preference "提案 v0.4 好みの5次元。上書き禁止"
+        string status "pending / active / rejected / superseded / withdrawn"
+        string visibility
+        int visible_to_speaker_id FK "scopes へ移行 未確定"
+        int superseded_by_id FK "自己参照"
+        int source_conversation_id FK
+        datetime created_at
+        datetime updated_at
+    }
+    character_state_revisions {
+        int id PK "実装済み v0.1"
+        int state_id FK
+        string action
+        json before
+        json after
+        text reason "v0.4 は改訂の理由を必須にする 提案"
+        datetime created_at
+    }
+    conversation_states {
+        int id PK "実装済み v0.2"
+        int conversation_id FK
+        string kind "9種 第8.2節"
+        text content
+        int speaker_id FK "誰の発言に由来するか"
+        int target_speaker_id FK "誰に適用するか"
+        int source_message_id FK
+        string ref_kind "memory / message / state"
+        int ref_id "ref_kind ごとの論理参照"
+        string status "open / resolved / withdrawn / expired。解釈待ちを足すか 未確定 ISSUE-058"
+        string withdraw_reason
+        int asked_message_id FK
+        int responded_message_id FK
+        int judged_message_id FK
+        bool followup_needed
+        int resolved_message_id FK
+        string detected_by "rule / llm"
+        string decided_by "rule / llm / operator"
+        datetime created_at
+        datetime updated_at
+    }
+    emotion_states {
+        int id PK "提案 v0.3 計画 3.2"
+        int conversation_id FK "会話の中で閉じる"
+        string owner "yui / partner"
+        int subject_speaker_id FK "owner=partner のとき"
+        int target_speaker_id FK
+        int source_message_id FK "根拠の発言"
+        string label "calm / interested / glad / concerned / unsettled"
+        int intensity "0〜3"
+        json appraisal "relevance / valence / novelty と根拠 ID"
+        string status "active / withdrawn"
+        string withdraw_reason
+        string detected_by "rule / llm"
+        string decided_by "operator"
+        datetime created_at
+    }
+    goals {
+        int id PK "提案 v0.5 第8.5節"
+        string kind "対人フォロー / 自己の探索"
+        text purpose
+        int partner_speaker_id FK "対人フォローのみ"
+        string origin "会話から / YUI 自身の活動から 第3.1節"
+        int source_message_id FK "根拠の発言"
+        json basis_memory_ids "論理参照 FK なし。消えたら落とす"
+        int source_conversation_id FK
+        datetime occurred_at "出来事の日付"
+        datetime askable_from "聞いてよくなる日"
+        datetime expires_at "期限。種別ごとの日数は 未確定 第11節"
+        string status "candidate / adopted / done / dropped"
+        datetime executed_at "実行した時刻"
+        datetime achieved_at "達成した時刻。実行と分ける"
+        int offered_count "提案 v0.6 無視時の閾値上昇"
+        int last_offered_message_id FK "提案 v0.6 K ターン後の再試行"
+        string visibility "公開範囲を引き継ぐ 第3.1節"
+        datetime created_at
+        datetime updated_at
+    }
+
+    speakers ||--o{ messages : "speaker_id"
+    speakers ||--o{ speaker_links : "a / b"
+    speakers ||--o{ scopes : "kind=speaker"
+    conversations ||--o{ messages : ""
+    messages ||--o| run_records : "message_id UNIQUE"
+    messages ||--o{ speech_runs : ""
+    messages ||--o{ ideal_responses : ""
+    conversations ||--o{ memory_candidates : ""
+    messages ||--o{ memory_candidates : "source_message_id"
+    speakers ||--o{ memory_candidates : "subject / visible_to"
+    memory_candidates }o--o| memories : "accepted_memory_id"
+    memories ||--o{ memory_revisions : ""
+    memories }o--o| memories : "superseded_by_id"
+    speakers ||--o{ memories : "subject / visible_to"
+    messages ||--o{ memories : "source_message_id"
+    conversations ||--o{ memories : "source_conversation_id"
+    scopes ||--o{ memories : "visible_to 未確定"
+    character_states ||--o{ character_state_revisions : ""
+    character_states }o--o| character_states : "superseded_by_id"
+    speakers ||--o{ character_states : "subject / visible_to"
+    conversations ||--o{ character_states : "source_conversation_id"
+    conversations ||--o{ conversation_states : ""
+    speakers ||--o{ conversation_states : "speaker / target"
+    messages ||--o{ conversation_states : "source / asked / responded / judged / resolved"
+    conversations ||--o{ emotion_states : ""
+    messages ||--o{ emotion_states : "source_message_id"
+    speakers ||--o{ emotion_states : "subject / target"
+    speakers ||--o{ goals : "partner_speaker_id"
+    messages ||--o{ goals : "source / last_offered"
+    conversations ||--o{ goals : "source_conversation_id"
+```
+
+**図B：存在が v1.0 に紐づかない表**（並行トラック・条件つき。入るかどうかは各トラックの条件で決まり、v1.0 の前提にしない）
+
+```mermaid
+erDiagram
+    external_info {
+        int id PK "並行トラック 第7節 検索"
+        string url
+        text excerpt "本文または抜粋"
+        datetime fetched_at "取得日時"
+        datetime published_at "確認できた公開・更新日時"
+        int goal_id FK "関心起点の探索のとき"
+    }
+    delivery_segments {
+        int id PK "未確定 音声入力の前 ISSUE-051 方針2"
+        int message_id FK
+        int seq
+        text text "TTS の分割単位と揃える"
+        datetime started_at
+        datetime finished_at
+        string state
+    }
+    memory_embeddings {
+        int memory_id FK "未確定 ISSUE-055 の実測後 ISSUE-056"
+        string model "埋め込みモデルの版"
+        json vector
+    }
+    messages ||--o{ delivery_segments : "ISSUE-051 方針2"
+    memories ||--o| memory_embeddings : "ISSUE-056"
+    goals ||--o{ external_info : "自己の探索目標"
+```
+
+**表の一覧と出典**
+
+| 表 | 状態 | 版 | 出典 |
+| --- | --- | --- | --- |
+| `speakers`・`conversations`・`messages`・`memories`・`memory_revisions`・`memory_candidates`・`character_states`・`character_state_revisions`・`run_records`・`speech_runs`・`ideal_responses` | 実装済み | v0.1 | `models.py`。`messages.delivered_char_count` のみ 2026-09-17（[ISSUE-051](../issues/issues.md#issue-051)） |
+| `conversation_states` | 実装済み | v0.2 | 第8.2節、[v0.2 の計画](../plan/v0.2.md) §3 |
+| `memory_candidates` の刻印・判断の記録・取り置き印 | 提案 | v0.3 と並行（PR0） | 第10節「ラベルの収集」、[v0.3 の計画](../plan/v0.3.md) §11 |
+| `emotion_states` | 提案 | v0.3 | [v0.3 の計画](../plan/v0.3.md) §3.2。`character_states` に入れない理由は同 §3.1（[ISSUE-050](../issues/issues.md#issue-050)） |
+| `character_states.kind = self_understanding`、好みの5次元、改訂理由の必須化 | 提案 | v0.4 | 第8.4節。自己理解は「好みの改訂と同型」（第4.8節）なので表を増やさず種別で持つ。物理スキーマは実装時に決める |
+| `goals` | 提案 | v0.5（`offered_count`・`last_offered_message_id` は v0.6） | 第5節の表、第8.5節・第8.6節。4状態と部分ユニークは第8.5節。期限の日数は未確定（第11節） |
+| `scopes`・`speaker_links`、`visible_to_speaker_id` のスコープ化 | 未確定 | 初配信前 | [ISSUE-059](../issues/issues.md#issue-059)。「視聴者一般」を疑似 speaker にする回避策は採らない |
+| `memories.sensitivity`（感度クラス） | 未確定 | 初配信前 | 第5節・第7節・第2.4節 (c)。ローカルでは列も持たない——正しい値を書けないうちに列を作ると「未判定」と「判定済み」の区別が消える |
+| `conversation_states.status` の「解釈待ち」 | 未確定 | [ISSUE-049](../issues/issues.md#issue-049) の後 | [ISSUE-058](../issues/issues.md#issue-058)。解釈を非同期にするときだけ要る |
+| `external_info` | 並行トラック | 条件が揃い次第 | 第5節の表、第7節 |
+| `delivery_segments` | 未確定 | 音声入力の前 | [ISSUE-051](../issues/issues.md#issue-051) 方針2、[ISSUE-064](../issues/issues.md#issue-064)（表情の同期単位を同じ行に乗せる） |
+| `memory_embeddings` | 未確定 | [ISSUE-055](../issues/issues.md#issue-055) の実測後 | [ISSUE-056](../issues/issues.md#issue-056)。`memories` の列にせず、モデルの版を持つ別表にする |
+
+**この図の保守**：DB の定義を変える PR（Alembic のマイグレーションを足す PR）は、同じ PR でこの節を更新する。提案・未確定の列が実装で別の名前・形になったら図を実装に合わせ、「提案」「未確定」の印を外す。実装済みの列は `models.py` と一致していなければならず、食い違いは図の側の誤りである。
 
 ---
 
