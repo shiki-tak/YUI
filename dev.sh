@@ -163,19 +163,8 @@ fi
 read_env() {
   grep -E "^$1=" "$BACKEND/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
-OLLAMA_HOST="$(read_env YUI_OLLAMA_HOST)"
-OLLAMA_MODEL="$(read_env YUI_OLLAMA_MODEL)"
-OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:9b}"
 
-curl -fs -m 3 -o /dev/null "$OLLAMA_HOST/api/tags" 2>/dev/null \
-  || fail "Ollama に接続できません（${OLLAMA_HOST}）。\`ollama serve\` を起動してください。"
-curl -fs -m 5 "$OLLAMA_HOST/api/tags" 2>/dev/null | grep -q "\"${OLLAMA_MODEL%%:*}" \
-  || fail "モデル $OLLAMA_MODEL がありません。次を実行してください:
-    ollama pull $OLLAMA_MODEL"
-ok "Ollama：$OLLAMA_MODEL"
-
-# VOICEVOX は任意。無くても文字での会話は続けられるため、止めずに続行する。
+# VOICEVOX は任意。無くても起動は続けられるため、止めずに続行する。
 VOICEVOX_HOST="$(read_env YUI_VOICEVOX_HOST)"
 VOICEVOX_HOST="${VOICEVOX_HOST:-http://localhost:50021}"
 SPEECH_ENABLED="$(read_env YUI_SPEECH_ENABLED)"
@@ -196,11 +185,6 @@ for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
     $(ps -p "$(lsof -t -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1)" -o command= 2>/dev/null)"
   fi
 done
-
-# DB のテーブル定義を最新にする（適用済みなら何もしない）。
-( cd "$BACKEND" && .venv/bin/alembic upgrade head ) > "$LOG_DIR/alembic.log" 2>&1 \
-  || fail "DB のマイグレーションに失敗しました。logs/alembic.log を確認してください。"
-ok "DB：最新の状態"
 
 # --- 起動 -------------------------------------------------------------------
 

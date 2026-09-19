@@ -11,9 +11,7 @@ import wave
 
 import httpx
 import pytest
-from httpx import AsyncClient
 
-from app import main
 from app.voice.base import Reading, SpeechError, parse_readings, wav_duration_ms
 from app.voice.voicevox_client import VoicevoxClient
 
@@ -170,30 +168,6 @@ async def test_health_does_not_raise_when_engine_is_down():
     status = await build_client(handler).health()
     assert status["ok"] is False
     assert "error" in status
-
-
-async def test_api_health_includes_voice(client: AsyncClient):
-    body = (await client.get("/api/health")).json()
-    assert body["voice"]["enabled"] is True
-    assert body["voice"]["ok"] is True
-    assert body["voice"]["provider"] == "fake-voice"
-
-
-async def test_api_health_carries_the_credit_line(client: AsyncClient):
-    """読み上げた音声を出す場では表記が要る。画面がそれを出せるように返す。"""
-    body = (await client.get("/api/health")).json()
-    assert body["voice"]["credit"] == main.settings.voicevox_credit
-    assert body["voice"]["credit"]
-
-
-async def test_api_health_reports_disabled_voice(client: AsyncClient, monkeypatch):
-    """音声を切っていても、会話ができる状態なら全体は ok のまま。"""
-    monkeypatch.setattr(main.settings, "speech_enabled", False)
-
-    body = (await client.get("/api/health")).json()
-    assert body["voice"]["enabled"] is False
-    assert body["voice"]["ok"] is False
-    assert body["ok"] is True
 
 
 # --- 読み替え（ユーザー辞書）------------------------------------------------
